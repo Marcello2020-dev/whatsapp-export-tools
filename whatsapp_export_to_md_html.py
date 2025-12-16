@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-whatsapp_export_to_md_html_r06.py  (Revision 0.6)
+whatsapp_export_to_md_html.py
 
-WhatsApp _chat.txt -> HTML + Markdown
-- Bubble layout (WhatsApp-like), background pattern
-- Attachments (<Anhang: ...>) -> embedded images (base64 in HTML)
-- Link previews (OpenGraph) + YouTube thumbnails (online)
-- Day separators centered with weekday + full date
-- Robust "Ich"-Perspektive selection, safe on EOFError / non-interactive runs
+WhatsApp chat export (plain text) -> Markdown + HTML preview output.
+
+Revision r06 baseline; r07 change:
+- Header meta: remove full source path and remove file mtime line
+- Show only basename of chat file for "Quelle"
 """
 
 from __future__ import annotations
@@ -576,8 +575,10 @@ def render_html(
 
     parts.append("<div class='header'>")
     parts.append(f"<p class='h-title'>WhatsApp Chat<br>{html.escape(title_names)}</p>")
-    parts.append(f"<p class='h-meta'>Quelle: {html.escape(str(chat_path))}<br>"
-                 f"Export (file mtime): {html.escape(mtime.strftime('%d.%m.%Y %H:%M:%S'))}<br>"
+    # r07: show only basename;
+    parts.append(f"<p class='h-meta'>Quelle: {html.escape(Path(chat_path).name)}<br>"
+    # R07: Header simplified – file mtime omitted.
+                 f"Export: {html.escape(mtime.strftime('%d.%m.%Y %H:%M:%S'))}<br>"
                  f"Nachrichten: {len(msgs)}</p>")
     parts.append("</div>")
 
