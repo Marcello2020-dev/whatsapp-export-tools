@@ -736,6 +736,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("chat", help="Path to WhatsApp _chat.txt")
     ap.add_argument("--outdir", default=".", help="Output directory (default: current)")
     ap.add_argument("--no-previews", action="store_true", help="Disable online link previews")
+    ap.add_argument("--me", dest="me", default=None, help="Your display name (for styling). If omitted, auto-detect.")
     args = ap.parse_args(argv)
 
     chat_path = Path(args.chat).expanduser().resolve()
@@ -746,7 +747,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     # collect authors from parsed messages
     authors = [m.author for m in msgs if _norm_space(m.author)]
-    me_name = choose_me_name(authors)
+    me_name = args.me if args.me else choose_me_name(authors)
 
     # file naming like your previous style
     now = dt.datetime.now()
