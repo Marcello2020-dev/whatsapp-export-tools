@@ -759,9 +759,35 @@ def main(argv: Optional[List[str]] = None) -> int:
     authors = [m.author for m in msgs if _norm_space(m.author)]
     me_name = args.me if args.me else choose_me_name(authors)
 
-    # file naming like your previous style
+    # output filename: include chat partner(s), chat period (first/last message date) and render timestamp
     now = dt.datetime.now()
-    base = f"{safe_filename_stem('WHATSAPP_CHAT')}_{now.strftime('%Y-%m-%d_%H-%M-%S')}"
+
+    authors = sorted({a for a in authors if _norm_space(a) and a != SYSTEM_AUTHOR})
+    me_norm = _norm_space(me_name)
+    partners = [a for a in authors if _norm_space(a) != me_norm]
+
+    if not partners:
+        partners_part = "UNKNOWN"
+    elif len(partners) <= 3:
+        partners_part = "+".join(partners)
+    else:
+        partners_part = "+".join(partners[:3]) + f"+{len(partners)-3}more"
+
+    # chat period (date only)
+    if msgs:
+        start_date = min(m.ts for m in msgs).date().isoformat()
+        end_date = max(m.ts for m in msgs).date().isoformat()
+        period_part = f"{start_date}_to_{end_date}"
+    else:
+        period_part = "NO_MESSAGES"
+
+    base = "_".join([
+        safe_filename_stem("WHATSAPP_CHAT"),
+        safe_filename_stem(partners_part),
+        period_part,
+        now.strftime("%Y-%m-%d_%H-%M-%S"),
+    ])
+
     out_html = outdir / f"{base}.html"
     out_md = outdir / f"{base}.md"
 
