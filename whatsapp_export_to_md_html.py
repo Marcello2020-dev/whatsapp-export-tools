@@ -101,17 +101,21 @@ def safe_filename_stem(stem: str) -> str:
 
 # Supported formats:
 # 1) 2019-04-13 18:59:06 Carolin: Text
-_pat_iso = re.compile(r"^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})\s+([^:]+?):\s(.*)$")
+# NOTE:
+# WhatsApp exports sometimes emit lines like "... Name:" (no space / no text after colon),
+# especially for media messages where the attachment marker follows on the next line.
+# Therefore we must allow optional whitespace and an empty message text after ":".
+_pat_iso = re.compile(r"^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})\s+([^:]+?):\s*(.*)$")
 
 # 2) 13.04.19, 18:59 - Carolin: Text
 # 3) 13.04.2019, 18:59:06 - Carolin: Text
 _pat_de = re.compile(
-    r"^(\d{1,2}\.\d{1,2}\.\d{2,4}),\s+(\d{1,2}:\d{2})(?::(\d{2}))?\s+-\s+([^:]+?):\s(.*)$"
+    r"^(\d{1,2}\.\d{1,2}\.\d{2,4}),\s+(\d{1,2}:\d{2})(?::(\d{2}))?\s+-\s+([^:]+?):\s*(.*)$"
 )
 
 # 4) [13.04.2019, 18:59:06] Carolin: Text
 _pat_bracket = re.compile(
-    r"^\[(\d{1,2}\.\d{1,2}\.\d{2,4}),\s+(\d{1,2}:\d{2})(?::(\d{2}))?\]\s+([^:]+?):\s(.*)$"
+    r"^\[(\d{1,2}\.\d{1,2}\.\d{2,4}),\s+(\d{1,2}:\d{2})(?::(\d{2}))?\]\s+([^:]+?):\s*(.*)$"
 )
 SYSTEM_AUTHOR = "System"
 
@@ -147,6 +151,12 @@ def parse_messages(chat_path: Path) -> List[Message]:
     last: Optional[Message] = None
     for line in raw:
         line = line.rstrip("\n")
+        # iOS-WhatsApp-Exporte enthalten teils unsichtbare BOM-/Bidi-Zeichen, die die Header-RegEx brechen.
+        # Wenn das passiert, wird "[..] Marcel:" als Fortsetzung der vorherigen Bubble gewertet (falsche Seite).
+        if line:
+            line = (line.replace("\ufeff", "")
+                        .replace("\u200e", "").replace("\u200f", "")
+                        .replace("\u202a", "").replace("\u202b", "").replace("\u202c", ""))
         if not line:
             # keep empty line as continuation if inside message
             if last is not None:
