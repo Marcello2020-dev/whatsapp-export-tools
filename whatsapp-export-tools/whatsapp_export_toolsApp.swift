@@ -13,5 +13,6 @@ struct whatsapp_export_toolsApp: App {
         WindowGroup {
             ContentView()
         }
+        .defaultSize(width: 980, height: 720)
     }
 }
