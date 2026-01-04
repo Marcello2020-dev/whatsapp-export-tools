@@ -1,3 +1,30 @@
+# macOS
 .DS_Store
-*.diff
-*.patch
+
+# Xcode
+**/xcuserdata/
+**/DerivedData/
+*.xcuserstate
+*.xcscmblueprint
+*.xccheckout
+
+# Swift Package Manager
+.build/
+Packages/
+Package.resolved
+
+# Carthage
+Carthage/Build/
+
+# CocoaPods
+Pods/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+
+# Output artifacts (optional - remove if you want to version outputs)
+output/
