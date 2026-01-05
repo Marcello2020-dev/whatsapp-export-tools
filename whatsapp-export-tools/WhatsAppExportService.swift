@@ -524,6 +524,11 @@ public enum WhatsAppExportService {
         if n.hasSuffix(".m4v") { return "video/x-m4v" }
         if n.hasSuffix(".mov") { return "video/quicktime" }
 
+        // Documents
+        if n.hasSuffix(".pdf") { return "application/pdf" }
+        if n.hasSuffix(".doc") { return "application/msword" }
+        if n.hasSuffix(".docx") { return "application/vnd.openxmlformats-officedocument.wordprocessingml.document" }
+
         return "application/octet-stream"
     }
 
@@ -1289,7 +1294,48 @@ public enum WhatsAppExportService {
         parts.append("<!doctype html><html lang='de'><head><meta charset='utf-8'>")
         parts.append("<meta name='viewport' content='width=device-width, initial-scale=1'>")
         parts.append("<title>\(htmlEscape("WhatsApp Chat: " + titleNames))</title>")
-        parts.append("<style>\n\(cssIndented)\n    </style></head><body><div class='wrap'>")
+        parts.append("<style>\n\(cssIndented)\n    </style>")
+        // Insert the waOpenEmbed JS helper (in the <head>).
+        parts.append("""
+    <script>
+    // Open embedded base64 file (avoids data: URLs in href, works in Safari).
+    function waOpenEmbed(id){
+      try{
+        var el = document.getElementById(id);
+        if(!el) return false;
+
+        var b64 = (el.textContent || "").trim();
+        if(!b64) return false;
+
+        var mime = el.getAttribute('data-mime') || 'application/octet-stream';
+        var name = el.getAttribute('data-name') || 'file';
+
+        // base64 -> Uint8Array
+        var bin = atob(b64);
+        var len = bin.length;
+        var bytes = new Uint8Array(len);
+        for(var i=0;i<len;i++){ bytes[i] = bin.charCodeAt(i); }
+
+        var blob = new Blob([bytes], {type: mime});
+        var url = URL.createObjectURL(blob);
+
+        // Prefer opening in a new tab; if blocked, fall back to same-tab navigation.
+        var opened = null;
+        try { opened = window.open(url, '_blank'); } catch(e) { opened = null; }
+        if(!opened){
+          window.location.href = url;
+        }
+
+        // Revoke later to allow the new tab to load.
+        setTimeout(function(){ try{ URL.revokeObjectURL(url); }catch(e){} }, 60 * 1000);
+        return false;
+      } catch(e){
+        return false;
+      }
+    }
+    </script>
+    </head><body><div class='wrap'>
+    """)
 
         parts.append("<div class='header'>")
         parts.append("<p class='h-title'>WhatsApp Chat<br>\(htmlEscape(titleNames))</p>")
@@ -1301,6 +1347,7 @@ public enum WhatsAppExportService {
         var lastDayKey: String? = nil
         let exportAttachmentsDir = outHTML.deletingLastPathComponent().appendingPathComponent("attachments", isDirectory: true)
 
+        var embedCounter = 0
         for m in msgs {
             let dayKey = isoDateOnly(m.ts)
             if lastDayKey != dayKey {
@@ -1358,7 +1405,9 @@ public enum WhatsAppExportService {
                 let ext = p.pathExtension.lowercased()
 
                 // Mode A: embed everything directly into the HTML (single-file export).
+                // Use waOpenEmbed for clickable links (no data: href).
                 if embedAttachments {
+                    // For video, PDF, DOC, DOCX: use waOpenEmbed for fileline and preview click.
                     if ["mp4", "mov", "m4v"].contains(ext) {
                         let mime = guessMime(fromName: fn)
                         let poster = await attachmentPreviewDataURL(p)
@@ -1368,18 +1417,91 @@ public enum WhatsAppExportService {
                             posterAttr = " poster='\(poster)'"
                         }
 
-                        if let dataURL = fileToDataURL(p) {
-                            mediaBlocks.append(
-                                "<div class='media'><video controls preload='metadata' playsinline\(posterAttr)><source src='\(htmlEscape(dataURL))' type='\(htmlEscape(mime))'>Dein Browser kann dieses Video nicht abspielen.</video></div>"
-                            )
+                        // For <video>, we still need a data URL for the <source>.
+                        let dataURL = fileToDataURL(p)
+
+                        if let dataURL {
+                            // Assign a unique embed ID for the file open link.
+                            embedCounter += 1
+                            let embedId = "wa-embed-\(embedCounter)"
+                            // Generate base64 for the embed script.
+                            if let fmData = try? Data(contentsOf: p) {
+                                let b64 = fmData.base64EncodedString()
+                                let safeMime = htmlEscape(mime)
+                                let safeName = htmlEscape(fn)
+                                // Insert the hidden script tag before the clickable UI.
+                                mediaBlocks.append("<script id='\(embedId)' type='application/octet-stream' data-mime='\(safeMime)' data-name='\(safeName)'>\(b64)</script>")
+                                mediaBlocks.append(
+                                    "<div class='media'><video controls preload='metadata' playsinline\(posterAttr)><source src='\(htmlEscape(dataURL))' type='\(safeMime)'>Dein Browser kann dieses Video nicht abspielen.</video></div>"
+                                )
+                                // Fileline link using waOpenEmbed, does not modify address bar.
+                                mediaBlocks.append("<div class='fileline'>🎬 <a href='javascript:void(0)' onclick=\"return waOpenEmbed('\(embedId)')\">\(htmlEscape(fn))</a></div>")
+                            } else {
+                                mediaBlocks.append("<div class='media'><video controls preload='metadata' playsinline\(posterAttr)><source src='\(htmlEscape(dataURL))' type='\(htmlEscape(mime))'>Dein Browser kann dieses Video nicht abspielen.</video></div>")
+                                mediaBlocks.append("<div class='fileline'>🎬 \(htmlEscape(fn))</div>")
+                            }
+                        } else {
+                            mediaBlocks.append("<div class='fileline'>🎬 \(htmlEscape(fn))</div>")
                         }
-                        mediaBlocks.append("<div class='fileline'>🎬 \(htmlEscape(fn))</div>")
                         continue
                     }
 
-                    if let dataURL = await attachmentPreviewDataURL(p) {
-                        mediaBlocks.append("<div class='media'><img alt='' src='\(dataURL)'></div>")
-                        mediaBlocks.append("<div class='fileline'>📎 \(htmlEscape(fn))</div>")
+                    // For PDF/DOC/DOCX: preview thumbnail, clickable with waOpenEmbed.
+                    if ["pdf", "doc", "docx"].contains(ext) {
+                        let mime = guessMime(fromName: fn)
+                        let previewDataURL = await attachmentPreviewDataURL(p)
+                        let fileData = try? Data(contentsOf: p)
+                        if let previewDataURL, let fileData {
+                            embedCounter += 1
+                            let embedId = "wa-embed-\(embedCounter)"
+                            let b64 = fileData.base64EncodedString()
+                            let safeMime = htmlEscape(mime)
+                            let safeName = htmlEscape(fn)
+                            // Insert the hidden script tag before the clickable UI.
+                            mediaBlocks.append("<script id='\(embedId)' type='application/octet-stream' data-mime='\(safeMime)' data-name='\(safeName)'>\(b64)</script>")
+                            // Thumbnail preview wrapped in waOpenEmbed link.
+                            mediaBlocks.append("<div class='media'><a href='javascript:void(0)' onclick=\"return waOpenEmbed('\(embedId)')\"><img alt='' src='\(previewDataURL)'></a></div>")
+                            // Fileline link using waOpenEmbed.
+                            mediaBlocks.append("<div class='fileline'>📎 <a href='javascript:void(0)' onclick=\"return waOpenEmbed('\(embedId)')\">\(htmlEscape(fn))</a></div>")
+                        } else if let previewDataURL {
+                            mediaBlocks.append("<div class='media'><img alt='' src='\(previewDataURL)'></div>")
+                            mediaBlocks.append("<div class='fileline'>📎 \(htmlEscape(fn))</div>")
+                        } else if let fileData {
+                            embedCounter += 1
+                            let embedId = "wa-embed-\(embedCounter)"
+                            let b64 = fileData.base64EncodedString()
+                            let safeMime = htmlEscape(mime)
+                            let safeName = htmlEscape(fn)
+                            mediaBlocks.append("<script id='\(embedId)' type='application/octet-stream' data-mime='\(safeMime)' data-name='\(safeName)'>\(b64)</script>")
+                            mediaBlocks.append("<div class='fileline'>📎 <a href='javascript:void(0)' onclick=\"return waOpenEmbed('\(embedId)')\">\(htmlEscape(fn))</a></div>")
+                        } else {
+                            mediaBlocks.append("<div class='fileline'>📎 \(htmlEscape(fn))</div>")
+                        }
+                        continue
+                    }
+
+                    // For image files (jpg/png/gif/webp): embed as <img> (no waOpenEmbed needed).
+                    if ["jpg", "jpeg", "png", "gif", "webp"].contains(ext) {
+                        if let dataURL = fileToDataURL(p) {
+                            mediaBlocks.append("<div class='media'><img alt='' src='\(dataURL)'></div>")
+                            mediaBlocks.append("<div class='fileline'>🖼️ \(htmlEscape(fn))</div>")
+                        } else {
+                            mediaBlocks.append("<div class='fileline'>🖼️ \(htmlEscape(fn))</div>")
+                        }
+                        continue
+                    }
+
+                    // All other files: show fileline, clickable if file exists.
+                    let mime = guessMime(fromName: fn)
+                    let fileData = try? Data(contentsOf: p)
+                    if let fileData {
+                        embedCounter += 1
+                        let embedId = "wa-embed-\(embedCounter)"
+                        let b64 = fileData.base64EncodedString()
+                        let safeMime = htmlEscape(mime)
+                        let safeName = htmlEscape(fn)
+                        mediaBlocks.append("<script id='\(embedId)' type='application/octet-stream' data-mime='\(safeMime)' data-name='\(safeName)'>\(b64)</script>")
+                        mediaBlocks.append("<div class='fileline'>📎 <a href='javascript:void(0)' onclick=\"return waOpenEmbed('\(embedId)')\">\(htmlEscape(fn))</a></div>")
                     } else {
                         mediaBlocks.append("<div class='fileline'>📎 \(htmlEscape(fn))</div>")
                     }
