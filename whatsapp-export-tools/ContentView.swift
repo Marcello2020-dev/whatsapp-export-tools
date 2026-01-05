@@ -1,3 +1,4 @@
+
 import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
@@ -12,6 +13,7 @@ struct ContentView: View {
     private static let customMeTag = "__CUSTOM_ME__"
 
     // MARK: - Theme
+
     private static let whatsGreen = Color(
         red: 37.0 / 255.0,
         green: 211.0 / 255.0,
@@ -65,6 +67,9 @@ struct ContentView: View {
 
     @State private var noPreviews: Bool = false
 
+    // Default: embed attachments into HTML (single-file export)
+    @State private var embedAttachments: Bool = true
+
     @State private var detectedParticipants: [String] = []
     @State private var meSelection: String = ""
     @State private var meCustomName: String = ""
@@ -112,6 +117,9 @@ struct ContentView: View {
                     }
 
                     Toggle("Online-Linkvorschauen deaktivieren", isOn: $noPreviews)
+                        .toggleStyle(.switch)
+
+                    Toggle("Anhänge in HTML einbetten (Ein-Datei-Export)", isOn: $embedAttachments)
                         .toggleStyle(.switch)
 
                     HStack(spacing: 12) {
@@ -297,6 +305,7 @@ struct ContentView: View {
 
     @MainActor
     private func runExportFlow(chatURL: URL, outDir: URL) async {
+        // outDir exists by workflow (picked by user), but creating it is harmless.
         do {
             try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
         } catch {
@@ -320,7 +329,11 @@ struct ContentView: View {
         appendLog("=== Export ===")
         appendLog("Chat: \(chatURL.path)")
         appendLog("Ziel: \(outDir.path)")
-        appendLog("Linkvorschauen: \(noPreviews ? "deaktiviert" : "aktiv")")
+        let previewsState = noPreviews ? "deaktiviert" : "aktiv"
+        let embedState = embedAttachments ? "ja" : "nein"
+
+        appendLog("Linkvorschauen: \(previewsState)")
+        appendLog("Anhänge einbetten: \(embedState)")
         appendLog("Ich: \(meTrim)")
 
         do {
@@ -328,7 +341,8 @@ struct ContentView: View {
                 chatURL: chatURL,
                 outDir: outDir,
                 meNameOverride: meTrim,
-                enablePreviews: !noPreviews
+                enablePreviews: !noPreviews,
+                embedAttachments: embedAttachments
             )
             lastResult = ExportResult(html: r.html, md: r.md)
             appendLog("OK: wrote \(r.html.lastPathComponent)")

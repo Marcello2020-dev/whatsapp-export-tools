@@ -6,7 +6,27 @@
 //
 
 
+
 import Foundation
+@preconcurrency import Dispatch
+
+#if canImport(AppKit)
+import AppKit
+#endif
+
+#if canImport(QuickLookThumbnailing)
+import QuickLookThumbnailing
+#endif
+
+#if canImport(LinkPresentation)
+@preconcurrency import LinkPresentation
+#endif
+
+
+#if canImport(UniformTypeIdentifiers)
+import UniformTypeIdentifiers
+#endif
+
 
 // MARK: - Models (Python: @dataclass Message / Preview)
 
@@ -165,7 +185,8 @@ public enum WhatsAppExportService {
         chatURL: URL,
         outDir: URL,
         meNameOverride: String?,
-        enablePreviews: Bool
+        enablePreviews: Bool,
+        embedAttachments: Bool
     ) async throws -> (html: URL, md: URL) {
 
         let chatPath = chatURL.standardizedFileURL
@@ -221,14 +242,16 @@ public enum WhatsAppExportService {
             chatURL: chatPath,
             outHTML: outHTML,
             meName: meName,
-            enablePreviews: enablePreviews
+            enablePreviews: enablePreviews,
+            embedAttachments: embedAttachments
         )
 
         try renderMD(
             msgs: msgs,
             chatURL: chatPath,
             outMD: outMD,
-            meName: meName
+            meName: meName,
+            embedAttachments: embedAttachments
         )
 
         return (outHTML, outMD)
@@ -398,7 +421,11 @@ public enum WhatsAppExportService {
 
             if let g = match(patISO, line) {
                 let d = g[0], t = g[1], authorRaw = g[2], text = g[3]
-                let ts = isoDTFormatter.date(from: "\(d) \(t)") ?? Date()
+                guard let ts = isoDTFormatter.date(from: "\(d) \(t)") else {
+                    // If the timestamp cannot be parsed, treat the line as a continuation to avoid corrupting chronology.
+                    if let i = lastIndex { msgs[i].text += "\n" + line }
+                    continue
+                }
                 let author = _normSpace(authorRaw)
                 msgs.append(WAMessage(ts: ts, author: author, text: text))
                 lastIndex = msgs.count - 1
@@ -407,7 +434,11 @@ public enum WhatsAppExportService {
 
             if let g = match(patDE, line) {
                 let d = g[0], hm = g[1], sec = g[2].isEmpty ? nil : g[2], authorRaw = g[3], text = g[4]
-                let ts = parseDT_DE(date: d, hm: hm, sec: sec) ?? Date()
+                guard let ts = parseDT_DE(date: d, hm: hm, sec: sec) else {
+                    // If the timestamp cannot be parsed, treat the line as a continuation to avoid corrupting chronology.
+                    if let i = lastIndex { msgs[i].text += "\n" + line }
+                    continue
+                }
                 let author = _normSpace(authorRaw)
                 msgs.append(WAMessage(ts: ts, author: author, text: text))
                 lastIndex = msgs.count - 1
@@ -416,7 +447,11 @@ public enum WhatsAppExportService {
 
             if let g = match(patBracket, line) {
                 let d = g[0], hm = g[1], sec = g[2].isEmpty ? nil : g[2], authorRaw = g[3], text = g[4]
-                let ts = parseDT_DE(date: d, hm: hm, sec: sec) ?? Date()
+                guard let ts = parseDT_DE(date: d, hm: hm, sec: sec) else {
+                    // If the timestamp cannot be parsed, treat the line as a continuation to avoid corrupting chronology.
+                    if let i = lastIndex { msgs[i].text += "\n" + line }
+                    continue
+                }
                 let author = _normSpace(authorRaw)
                 msgs.append(WAMessage(ts: ts, author: author, text: text))
                 lastIndex = msgs.count - 1
@@ -483,6 +518,12 @@ public enum WhatsAppExportService {
         if n.hasSuffix(".png") { return "image/png" }
         if n.hasSuffix(".gif") { return "image/gif" }
         if n.hasSuffix(".webp") { return "image/webp" }
+
+        // Video
+        if n.hasSuffix(".mp4") { return "video/mp4" }
+        if n.hasSuffix(".m4v") { return "video/x-m4v" }
+        if n.hasSuffix(".mov") { return "video/quicktime" }
+
         return "application/octet-stream"
     }
 
@@ -493,6 +534,121 @@ public enum WhatsAppExportService {
         let mime = guessMime(fromName: url.lastPathComponent)
         let b64 = data.base64EncodedString()
         return "data:\(mime);base64,\(b64)"
+    }
+
+    private static func ensureDirectory(_ url: URL) throws {
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+    }
+
+    private static func urlPathEscapeComponent(_ s: String) -> String {
+        // Encode a single path component for safe use in href/src.
+        // Keep it conservative to work well across Safari/Chrome/Edge.
+        return s.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? s
+    }
+
+    private static func uniqueDestinationURL(_ dest: URL) -> URL {
+        // If a file already exists, create a non-colliding name like "name (2).ext".
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: dest.path) { return dest }
+
+        let ext = dest.pathExtension
+        let base = dest.deletingPathExtension().lastPathComponent
+        let dir = dest.deletingLastPathComponent()
+
+        var i = 2
+        while true {
+            let candidateName = ext.isEmpty ? "\(base) (\(i))" : "\(base) (\(i)).\(ext)"
+            let candidate = dir.appendingPathComponent(candidateName)
+            if !fm.fileExists(atPath: candidate.path) {
+                return candidate
+            }
+            i += 1
+        }
+    }
+
+    /// Copies a local attachment into the export folder (./attachments) and returns a relative href.
+    /// This makes the exported HTML/MD portable across macOS/Windows and browsers.
+    private static func stageAttachmentForExport(source: URL, attachmentsDir: URL) -> (relHref: String, stagedURL: URL)? {
+        let fm = FileManager.default
+        let src = source.standardizedFileURL
+        guard fm.fileExists(atPath: src.path) else { return nil }
+
+        do {
+            try ensureDirectory(attachmentsDir)
+
+            var dest = attachmentsDir.appendingPathComponent(src.lastPathComponent)
+            dest = uniqueDestinationURL(dest)
+
+            if !fm.fileExists(atPath: dest.path) {
+                try fm.copyItem(at: src, to: dest)
+            }
+
+            let rel = "attachments/\(urlPathEscapeComponent(dest.lastPathComponent))"
+            return (relHref: rel, stagedURL: dest)
+        } catch {
+            // If staging fails, fall back to using the original absolute file URL.
+            return (relHref: src.absoluteURL.absoluteString, stagedURL: src)
+        }
+    }
+
+    // ---------------------------
+    // Attachment previews (PDF/DOCX thumbnails via Quick Look)
+    // ---------------------------
+
+    #if canImport(QuickLookThumbnailing) && canImport(AppKit)
+    private static func thumbnailPNGDataURL(for fileURL: URL, maxPixel: CGFloat = 900) async -> String? {
+        let size = CGSize(width: maxPixel, height: maxPixel)
+        let scale = NSScreen.main?.backingScaleFactor ?? 2.0
+
+        let req = QLThumbnailGenerator.Request(
+            fileAt: fileURL,
+            size: size,
+            scale: scale,
+            representationTypes: .thumbnail
+        )
+
+        return await withCheckedContinuation { cont in
+            QLThumbnailGenerator.shared.generateBestRepresentation(for: req) { rep, err in
+                guard err == nil, let rep else {
+                    cont.resume(returning: nil)
+                    return
+                }
+
+                let cg = rep.cgImage
+                let nsImage = NSImage(cgImage: cg, size: size)
+                guard
+                    let tiff = nsImage.tiffRepresentation,
+                    let bmp = NSBitmapImageRep(data: tiff),
+                    let png = bmp.representation(using: .png, properties: [:])
+                else {
+                    cont.resume(returning: nil)
+                    return
+                }
+
+                cont.resume(returning: "data:image/png;base64,\(png.base64EncodedString())")
+            }
+        }
+    }
+    #endif
+
+    private static func attachmentPreviewDataURL(_ url: URL) async -> String? {
+        let ext = url.pathExtension.lowercased()
+
+        // True images: embed as-is.
+        if ["jpg","jpeg","png","gif","webp"].contains(ext) {
+            return fileToDataURL(url)
+        }
+
+        // PDF/DOCX/DOC/MP4/MOV/M4V: generate a thumbnail via Quick Look.
+        if ["pdf","docx","doc","mp4","mov","m4v"].contains(ext) {
+            #if canImport(QuickLookThumbnailing) && canImport(AppKit)
+            return await thumbnailPNGDataURL(for: url)
+            #else
+            return nil
+            #endif
+        }
+
+        return nil
     }
     
     // ---------------------------
@@ -560,6 +716,223 @@ public enum WhatsAppExportService {
         let lonStr = dmsEntity(lon, pos: "E", neg: "W")
         return "\(latStr) \(lonStr)"
     }
+
+    // ---------------------------
+    // Link previews (native, LinkPresentation)
+    // ---------------------------
+
+    #if canImport(LinkPresentation) && canImport(AppKit)
+
+    private static func nsImageToPNGData(_ img: NSImage) -> Data? {
+        guard let tiff = img.tiffRepresentation,
+              let rep = NSBitmapImageRep(data: tiff)
+        else { return nil }
+        return rep.representation(using: .png, properties: [:])
+    }
+
+    private static func loadNSImage(from provider: NSItemProvider) async throws -> NSImage {
+        try await withCheckedThrowingContinuation { cont in
+            provider.loadObject(ofClass: NSImage.self) { obj, err in
+                if let err {
+                    cont.resume(throwing: err)
+                    return
+                }
+                if let img = obj as? NSImage {
+                    cont.resume(returning: img)
+                    return
+                }
+                cont.resume(throwing: URLError(.cannotDecodeContentData))
+            }
+        }
+    }
+
+
+    // Swift 6 (strict concurrency): LinkPresentation types are not Sendable.
+    // Design: keep LinkPresentation objects inside a boxed class and ensure single completion via locking.
+    // We start/cancel the provider on the main thread, but we complete the async continuation directly
+    // from the provider callback (no MainActor annotations on the callback, avoiding Swift 6 actor loss errors).
+
+    private final class WALPFetchBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var finished = false
+        private var continuation: CheckedContinuation<LPLinkMetadata, Error>?
+        private var provider: LPMetadataProvider?
+        private var timeoutTask: Task<Void, Never>?
+
+        private func withLock<T>(_ body: () -> T) -> T {
+            lock.lock()
+            defer { lock.unlock() }
+            return body()
+        }
+
+        func start(
+            url: URL,
+            timeoutSeconds: Double,
+            continuation: CheckedContinuation<LPLinkMetadata, Error>
+        ) {
+            withLock {
+                self.continuation = continuation
+            }
+
+            // Timeout via Task.sleep. If it fires, cancel the provider and finish with a timeout.
+            let nanos = UInt64(max(0.0, timeoutSeconds) * 1_000_000_000)
+            timeoutTask = Task { [weak self] in
+                guard let self else { return }
+                do {
+                    try await Task.sleep(nanoseconds: nanos)
+                } catch {
+                    return // cancelled
+                }
+                self.cancelProviderOnMain()
+                self.finish(.failure(URLError(.timedOut)))
+            }
+
+            // Create + start the provider on the MainActor (LPMetadataProvider is MainActor-isolated under Swift 6).
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+
+                let provider = LPMetadataProvider()
+                self.withLock {
+                    self.provider = provider
+                }
+
+                do {
+                    // Use the async API to avoid Swift 6 concurrency diagnostics for the completion-handler variant.
+                    let meta = try await provider.startFetchingMetadata(for: url)
+                    self.finish(.success(meta))
+                } catch {
+                    self.finish(.failure(error))
+                }
+            }
+        }
+
+        func cancel() {
+            cancelProviderOnMain()
+            finish(.failure(CancellationError()))
+        }
+
+        private func cancelProviderOnMain() {
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let p: LPMetadataProvider? = self.withLock { self.provider }
+                p?.cancel()
+            }
+        }
+
+        private func finish(_ result: Result<LPLinkMetadata, Error>) {
+            let cont: CheckedContinuation<LPLinkMetadata, Error>?
+
+            lock.lock()
+            if finished {
+                lock.unlock()
+                return
+            }
+            finished = true
+
+            timeoutTask?.cancel()
+            timeoutTask = nil
+            provider = nil
+
+            cont = continuation
+            continuation = nil
+            lock.unlock()
+
+            guard let cont else { return }
+            switch result {
+            case .success(let v):
+                cont.resume(returning: v)
+            case .failure(let e):
+                cont.resume(throwing: e)
+            }
+        }
+    }
+
+    private static func fetchLPMetadata(_ url: URL, timeoutSeconds: Double = 10) async throws -> LPLinkMetadata {
+        let box = WALPFetchBox()
+
+        return try await withTaskCancellationHandler(
+            operation: {
+                try await withCheckedThrowingContinuation { (cont: CheckedContinuation<LPLinkMetadata, Error>) in
+                    box.start(url: url, timeoutSeconds: timeoutSeconds, continuation: cont)
+                }
+            },
+            onCancel: {
+                // LPMetadataProvider.cancel() is MainActor-isolated under Swift 6; dispatch cancellation onto MainActor.
+                Task { @MainActor in
+                    box.cancel()
+                }
+            }
+        )
+    }
+
+    private static func loadDataRepresentation(from provider: NSItemProvider, typeIdentifier: String) async throws -> Data {
+        return try await withCheckedThrowingContinuation { cont in
+            provider.loadDataRepresentation(forTypeIdentifier: typeIdentifier) { data, err in
+                if let err {
+                    cont.resume(throwing: err)
+                    return
+                }
+                guard let data else {
+                    cont.resume(throwing: URLError(.cannotDecodeContentData))
+                    return
+                }
+                cont.resume(returning: data)
+            }
+        }
+    }
+
+    private static func loadBestImageData(from provider: NSItemProvider) async throws -> (data: Data, mime: String) {
+        #if canImport(UniformTypeIdentifiers)
+        let candidates: [(String, String)] = [
+            (UTType.png.identifier, "image/png"),
+            (UTType.jpeg.identifier, "image/jpeg"),
+            (UTType.image.identifier, "image/png")
+        ]
+        for (uti, mime) in candidates {
+            if provider.hasItemConformingToTypeIdentifier(uti) {
+                let data = try await loadDataRepresentation(from: provider, typeIdentifier: uti)
+                return (data, mime)
+            }
+        }
+        #endif
+
+        // Fallback: load as NSImage and re-encode PNG
+        let img = try await loadNSImage(from: provider)
+        if let png = nsImageToPNGData(img) {
+            return (png, "image/png")
+        }
+        throw URLError(.cannotDecodeContentData)
+    }
+
+    /// Attempts to build a rich preview using macOS LinkPresentation (often yields a real preview image).
+    private static func buildPreviewViaLinkPresentation(_ urlString: String) async -> WAPreview? {
+        guard let u = URL(string: urlString) else { return nil }
+        do {
+            let meta = try await fetchLPMetadata(u)
+
+            let title = (meta.title ?? urlString).trimmingCharacters(in: .whitespacesAndNewlines)
+
+            // LinkPresentation does not reliably provide a description. Keep it empty to avoid unstable output.
+            let desc = ""
+
+            var imageDataURL: String? = nil
+
+            // Prefer the rich preview image; fall back to site/app icon.
+            let providers = [meta.imageProvider, meta.iconProvider].compactMap { $0 }
+            for p in providers {
+                if let (data, mime) = try? await loadBestImageData(from: p) {
+                    imageDataURL = "data:\(mime);base64,\(data.base64EncodedString())"
+                    break
+                }
+            }
+
+            return WAPreview(url: urlString, title: title, description: desc, imageDataURL: imageDataURL)
+        } catch {
+            return nil
+        }
+    }
+
+#endif
 
     // ---------------------------
     // Link previews (online)
@@ -678,6 +1051,15 @@ public enum WhatsAppExportService {
             return prev
         }
 
+        // Prefer native LinkPresentation when available (often provides a real preview image).
+        #if canImport(LinkPresentation) && canImport(AppKit)
+        if let lp = await buildPreviewViaLinkPresentation(url) {
+            await previewCache.set(url, lp)
+            return lp
+        }
+        #endif
+
+        // Fallback: manual HTML meta parsing (og:title/og:image, etc.)
         do {
             let (htmlBytes, _) = try await httpGet(url)
             let meta = parseMeta(htmlBytes)
@@ -757,7 +1139,8 @@ public enum WhatsAppExportService {
         chatURL: URL,
         outHTML: URL,
         meName: String,
-        enablePreviews: Bool
+        enablePreviews: Bool,
+        embedAttachments: Bool
     ) async throws {
 
         // participants -> title_names
@@ -872,6 +1255,15 @@ public enum WhatsAppExportService {
           width:100%;
           height:auto;
         }
+        .media video{
+          display:block;
+          width:100%;
+          height:auto;
+          background:#000;
+        }
+        .media a{display:block;}
+        .fileline a{color:#2a5db0;text-decoration:none;}
+        .fileline a:hover{text-decoration:underline;}
         .preview{
           margin-top: 10px;
           border-radius: 14px;
@@ -885,6 +1277,7 @@ public enum WhatsAppExportService {
         .preview .ptitle{font-weight:700; margin:0 0 4px; font-size: 16px;}
         .preview .pdesc{margin:0; color: var(--muted); font-size: 14px;}
         .linkline{margin-top:8px;font-size:15px;color:#2a5db0;word-break:break-all;}
+        .fileline{margin-top:10px;font-size:15px;color:#2b2b2b;opacity:.85;word-break:break-all;}
         """#
 
         // Python emits the <style> block with a newline after <style> and 4-space indentation.
@@ -906,6 +1299,7 @@ public enum WhatsAppExportService {
         parts.append("</div>")
 
         var lastDayKey: String? = nil
+        let exportAttachmentsDir = outHTML.deletingLastPathComponent().appendingPathComponent("attachments", isDirectory: true)
 
         for m in msgs {
             let dayKey = isoDateOnly(m.ts)
@@ -929,30 +1323,114 @@ public enum WhatsAppExportService {
             let urls = extractURLs(textWoAttach)
             var previewHTML = ""
 
-            if enablePreviews, let first = urls.first {
-                if let prev = await buildPreview(first) {
-                    var imgBlock = ""
-                    if let img = prev.imageDataURL {
-                        imgBlock = "<div class='pimg'><img alt='' src='\(img)'></div>"
+            if enablePreviews, !urls.isEmpty {
+                let previewTargets: [String] = urls
+                var blocks: [String] = []
+                blocks.reserveCapacity(previewTargets.count)
+
+                for u in previewTargets {
+                    if let prev = await buildPreview(u) {
+                        var imgBlock = ""
+                        if let img = prev.imageDataURL {
+                            imgBlock = "<div class='pimg'><img alt='' src='\(img)'></div>"
+                        }
+                        let ptitle = htmlEscape(prev.title.isEmpty ? u : prev.title)
+                        let pdesc = htmlEscape(prev.description)
+                        let block =
+                            "<div class='preview'>"
+                            + "<a href='\(htmlEscape(u))' target='_blank' rel='noopener'>"
+                            + imgBlock
+                            + "<div class='pbody'><p class='ptitle'>\(ptitle)</p>"
+                            + (pdesc.isEmpty ? "" : "<p class='pdesc'>\(pdesc)</p>")
+                            + "</div></a></div>"
+                        blocks.append(block)
                     }
-                    let ptitle = htmlEscape(prev.title.isEmpty ? first : prev.title)
-                    let pdesc = htmlEscape(prev.description)
-                    previewHTML =
-                        "<div class='preview'>"
-                        + "<a href='\(htmlEscape(first))' target='_blank' rel='noopener'>"
-                        + imgBlock
-                        + "<div class='pbody'><p class='ptitle'>\(ptitle)</p>"
-                        + (pdesc.isEmpty ? "" : "<p class='pdesc'>\(pdesc)</p>")
-                        + "</div></a></div>"
                 }
+
+                previewHTML = blocks.joined()
             }
 
-            // attachments embedded (images only)
+            // attachments: images embedded; PDFs/DOCX get a QuickLook thumbnail; otherwise show filename.
+            // Make previews + filenames clickable to the local file (file://...) when it exists.
             var mediaBlocks: [String] = []
             for fn in attachments {
                 let p = chatURL.deletingLastPathComponent().appendingPathComponent(fn).standardizedFileURL
-                if let dataURL = fileToDataURL(p), guessMime(fromName: fn).hasPrefix("image/") {
-                    mediaBlocks.append("<div class='media'><img alt='' src='\(dataURL)'></div>")
+                let ext = p.pathExtension.lowercased()
+
+                // Mode A: embed everything directly into the HTML (single-file export).
+                if embedAttachments {
+                    if ["mp4", "mov", "m4v"].contains(ext) {
+                        let mime = guessMime(fromName: fn)
+                        let poster = await attachmentPreviewDataURL(p)
+
+                        var posterAttr = ""
+                        if let poster {
+                            posterAttr = " poster='\(poster)'"
+                        }
+
+                        if let dataURL = fileToDataURL(p) {
+                            mediaBlocks.append(
+                                "<div class='media'><video controls preload='metadata' playsinline\(posterAttr)><source src='\(htmlEscape(dataURL))' type='\(htmlEscape(mime))'>Dein Browser kann dieses Video nicht abspielen.</video></div>"
+                            )
+                        }
+                        mediaBlocks.append("<div class='fileline'>🎬 \(htmlEscape(fn))</div>")
+                        continue
+                    }
+
+                    if let dataURL = await attachmentPreviewDataURL(p) {
+                        mediaBlocks.append("<div class='media'><img alt='' src='\(dataURL)'></div>")
+                        mediaBlocks.append("<div class='fileline'>📎 \(htmlEscape(fn))</div>")
+                    } else {
+                        mediaBlocks.append("<div class='fileline'>📎 \(htmlEscape(fn))</div>")
+                    }
+                    continue
+                }
+
+                // Mode B (default): stage attachments into ./attachments for portable HTML/MD.
+                let staged = stageAttachmentForExport(source: p, attachmentsDir: exportAttachmentsDir)
+                let href = staged?.relHref
+                let stagedURL = staged?.stagedURL
+
+                // Video attachments: embed a small inline player in the HTML export.
+                // Use a portable relative path (./attachments/...) when available.
+                if ["mp4", "mov", "m4v"].contains(ext), let href {
+                    let mime = guessMime(fromName: fn)
+                    let poster = await attachmentPreviewDataURL(stagedURL ?? p) // Quick Look thumbnail when available
+
+                    var posterAttr = ""
+                    if let poster {
+                        posterAttr = " poster='\(poster)'"
+                    }
+
+                    mediaBlocks.append(
+                        "<div class='media'><video controls preload='metadata' playsinline\(posterAttr)><source src='\(htmlEscape(href))' type='\(htmlEscape(mime))'>Dein Browser kann dieses Video nicht abspielen. <a href='\(htmlEscape(href))'>Video öffnen</a>.</video></div>"
+                    )
+                    mediaBlocks.append(
+                        "<div class='fileline'>🎬 <a href='\(htmlEscape(href))' target='_blank' rel='noopener' download>\(htmlEscape(fn))</a></div>"
+                    )
+                    continue
+                }
+
+                if let dataURL = await attachmentPreviewDataURL(stagedURL ?? p) {
+                    if let href {
+                        mediaBlocks.append(
+                            "<div class='media'><a href='\(htmlEscape(href))' target='_blank' rel='noopener'><img alt='' src='\(dataURL)'></a></div>"
+                        )
+                        mediaBlocks.append(
+                            "<div class='fileline'>📎 <a href='\(htmlEscape(href))' target='_blank' rel='noopener'>\(htmlEscape(fn))</a></div>"
+                        )
+                    } else {
+                        mediaBlocks.append("<div class='media'><img alt='' src='\(dataURL)'></div>")
+                        mediaBlocks.append("<div class='fileline'>📎 \(htmlEscape(fn))</div>")
+                    }
+                } else {
+                    if let href {
+                        mediaBlocks.append(
+                            "<div class='fileline'>📎 <a href='\(htmlEscape(href))' target='_blank' rel='noopener'>\(htmlEscape(fn))</a></div>"
+                        )
+                    } else {
+                        mediaBlocks.append("<div class='fileline'>📎 \(htmlEscape(fn))</div>")
+                    }
                 }
             }
 
@@ -989,7 +1467,8 @@ public enum WhatsAppExportService {
         msgs: [WAMessage],
         chatURL: URL,
         outMD: URL,
-        meName: String
+        meName: String,
+        embedAttachments: Bool
     ) throws {
 
         var authors: [String] = []
@@ -1017,6 +1496,9 @@ public enum WhatsAppExportService {
         lines.append("")
 
         var lastDayKey: String? = nil
+        let exportAttachmentsDir: URL? = embedAttachments
+            ? nil
+            : outMD.deletingLastPathComponent().appendingPathComponent("attachments", isDirectory: true)
 
         for m in msgs {
             let dayKey = isoDateOnly(m.ts)
@@ -1046,7 +1528,38 @@ public enum WhatsAppExportService {
             }
 
             for fn in attachments {
-                lines.append("![Anhang](\(fn))")
+                let p = chatURL.deletingLastPathComponent().appendingPathComponent(fn).standardizedFileURL
+
+                let href: String? = {
+                    if embedAttachments {
+                        // No staging in embed mode; keep the markdown portable by avoiding a new attachments/ folder.
+                        // If the file exists, link to the original file URL.
+                        return FileManager.default.fileExists(atPath: p.path) ? p.absoluteURL.absoluteString : nil
+                    }
+                    guard let dir = exportAttachmentsDir else { return nil }
+                    return stageAttachmentForExport(source: p, attachmentsDir: dir)?.relHref
+                }()
+
+                let n = fn.lowercased()
+                if n.hasSuffix(".mp4") || n.hasSuffix(".mov") || n.hasSuffix(".m4v") {
+                    if let href {
+                        lines.append("- 🎬 [\(fn)](\(href))")
+                    } else {
+                        lines.append("- 🎬 \(fn)")
+                    }
+                } else if n.hasSuffix(".jpg") || n.hasSuffix(".jpeg") || n.hasSuffix(".png") || n.hasSuffix(".gif") || n.hasSuffix(".webp") {
+                    if let href {
+                        lines.append("- 🖼️ [\(fn)](\(href))")
+                    } else {
+                        lines.append("- 🖼️ \(fn)")
+                    }
+                } else {
+                    if let href {
+                        lines.append("- 📎 [\(fn)](\(href))")
+                    } else {
+                        lines.append("- 📎 \(fn)")
+                    }
+                }
             }
             lines.append("")
         }
