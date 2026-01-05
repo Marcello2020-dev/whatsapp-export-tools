@@ -5,13 +5,16 @@
 //  Created by Marcel Mißbach on 04.01.26.
 //
 
-
-
 import Foundation
 @preconcurrency import Dispatch
 
+
 #if canImport(AppKit)
 import AppKit
+#endif
+
+#if canImport(UIKit)
+import UIKit
 #endif
 
 #if canImport(QuickLookThumbnailing)
@@ -22,11 +25,9 @@ import QuickLookThumbnailing
 @preconcurrency import LinkPresentation
 #endif
 
-
 #if canImport(UniformTypeIdentifiers)
 import UniformTypeIdentifiers
 #endif
-
 
 // MARK: - Models (Python: @dataclass Message / Preview)
 
@@ -52,6 +53,44 @@ public enum WhatsAppExportService {
     // ---------------------------
 
     private static let systemAuthor = "System"
+
+    // Shared system markers (used for participant filtering, title building, and me-name selection)
+    private static let systemMarkers: Set<String> = [
+        "system",
+        "whatsapp",
+        "messages to this chat are now secured",
+        "nachrichten und anrufe sind ende-zu-ende-verschlüsselt",
+    ]
+
+    private static func isSystemAuthor(_ name: String) -> Bool {
+        let low = _normSpace(name).lowercased()
+        if low.isEmpty { return true }
+        if low == systemAuthor.lowercased() { return true }
+        return systemMarkers.contains(low)
+    }
+
+    private static func isSystemMessage(authorRaw: String, text: String) -> Bool {
+        // Prefer author-based detection.
+        if isSystemAuthor(authorRaw) { return true }
+
+        // Some exports put WhatsApp notices into the message body (or the author field may be empty/"Unbekannt").
+        let lowText = _normSpace(text).lowercased()
+        if lowText.isEmpty { return false }
+
+        // Exact markers (when the whole line matches a known WhatsApp/system notice).
+        if systemMarkers.contains(lowText) { return true }
+
+        // Fuzzy markers (when the notice is longer / localized / contains extra words).
+        let needles: [String] = [
+            "ende-zu-ende-verschlüsselt",
+            "end-to-end encrypted",
+            "sicherheitsnummer",
+            "security code",
+            "hat sich geändert",
+            "changed"
+        ]
+        return needles.contains(where: { lowText.contains($0) })
+    }
 
     // Python:
     // _pat_iso = r"^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})\s+([^:]+?):\s*(.*)$"
@@ -147,6 +186,10 @@ public enum WhatsAppExportService {
 
     private static let previewCache = PreviewCache()
 
+    // Cache for staged attachments (source path -> (relHref, stagedURL)) to avoid duplicate copies.
+    private static let stagedAttachmentLock = NSLock()
+    private static var stagedAttachmentMap: [String: (relHref: String, stagedURL: URL)] = [:]
+
     // ---------------------------
     // Public API
     // ---------------------------
@@ -163,22 +206,14 @@ public enum WhatsAppExportService {
         for m in msgs {
             let a = _normSpace(m.author)
             if a.isEmpty { continue }
-            if a.lowercased() == systemAuthor.lowercased() { continue }
+            if isSystemAuthor(a) { continue }
             if !uniq.contains(a) { uniq.append(a) }
         }
 
-        // Apply the same system-marker filtering as chooseMeName
-        let systemMarkers: Set<String> = [
-            "system",
-            "whatsapp",
-            "messages to this chat are now secured",
-            "nachrichten und anrufe sind ende-zu-ende-verschlüsselt",
-        ]
-
-        let filtered = uniq.filter { !systemMarkers.contains(_normSpace($0).lowercased()) }
+        let filtered = uniq.filter { !isSystemAuthor($0) }
         return filtered.isEmpty ? uniq : filtered
     }
-    
+
     /// 1:1-Export: parses chat, decides me-name, renders HTML+MD, writes files.
     /// Returns URLs of written HTML/MD.
     public static func export(
@@ -205,11 +240,11 @@ public enum WhatsAppExportService {
 
         // Output filename parts (Python main)
         let uniqAuthors = Array(Set(authors.map { _normSpace($0) }))
-            .filter { !$0.isEmpty && $0 != systemAuthor }
+            .filter { !$0.isEmpty && !isSystemAuthor($0) }
             .sorted()
 
-        let meNorm = _normSpace(meName)
-        let partners = uniqAuthors.filter { _normSpace($0) != meNorm }
+        let meNorm = _normSpace(meName).lowercased()
+        let partners = uniqAuthors.filter { _normSpace($0).lowercased() != meNorm }
 
         let partnersPart: String = {
             if partners.isEmpty { return "UNKNOWN" }
@@ -305,6 +340,66 @@ public enum WhatsAppExportService {
             out.append(u)
         }
         return out
+    }
+
+    // True if the message text consists only of one or more URLs (plus whitespace/newlines).
+    // Used to avoid duplicating gigantic raw URLs in the bubble text when we already show previews/link lines.
+    private static func isURLOnlyText(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return false }
+
+        let rstripSet = CharacterSet(charactersIn: ").,;:!?]\"')")
+        let tokens = trimmed.split(whereSeparator: { $0.isWhitespace })
+        if tokens.isEmpty { return false }
+
+        for t0 in tokens {
+            let t1 = String(t0).trimmingCharacters(in: rstripSet)
+            let low = t1.lowercased()
+            if !(low.hasPrefix("http://") || low.hasPrefix("https://")) { return false }
+            if URL(string: t1) == nil { return false }
+        }
+        return true
+    }
+
+    // Produces a compact, human-friendly display string for a URL.
+    // The href remains the original URL; this only affects what is shown in the UI/PDF.
+    private static func displayURL(_ urlString: String, maxLen: Int = 90) -> String {
+        func shorten(_ s: String) -> String {
+            if s.count <= maxLen { return s }
+            return String(s.prefix(max(0, maxLen - 1))) + "…"
+        }
+
+        guard let u = URL(string: urlString), let host = u.host?.lowercased() else {
+            return shorten(urlString)
+        }
+
+        // Apple Maps tends to have very long query strings; show a stable, compact label.
+        if host == "maps.apple.com" {
+            var coordPart: String? = nil
+            if let comps = URLComponents(url: u, resolvingAgainstBaseURL: false) {
+                let items = comps.queryItems ?? []
+                if let v = items.first(where: { ["ll","q"].contains($0.name.lowercased()) })?.value {
+                    // Keep only a short coordinate-ish part if present.
+                    let candidate = v.replacingOccurrences(of: "+", with: " ")
+                    if candidate.contains(",") {
+                        coordPart = candidate
+                    }
+                }
+            }
+            let base = "maps.apple.com · Apple Maps"
+            if let coordPart, !coordPart.isEmpty {
+                return shorten(base + " · " + coordPart)
+            }
+            return shorten(base)
+        }
+
+        let path = u.path
+        let hostPlusPath: String = {
+            if path.isEmpty || path == "/" { return host }
+            return host + path
+        }()
+
+        return shorten(hostPlusPath)
     }
 
     // Python is_youtube_url
@@ -482,14 +577,7 @@ public enum WhatsAppExportService {
             if !uniq.contains(a2) { uniq.append(a2) }
         }
 
-        let systemMarkers: Set<String> = [
-            "system",
-            "whatsapp",
-            "messages to this chat are now secured",
-            "nachrichten und anrufe sind ende-zu-ende-verschlüsselt",
-        ]
-
-        let filtered = uniq.filter { !systemMarkers.contains(_normSpace($0).lowercased()) }
+        let filtered = uniq.filter { !isSystemAuthor($0) }
         if !filtered.isEmpty { uniq = filtered }
 
         if uniq.isEmpty { return "Ich" }
@@ -518,6 +606,8 @@ public enum WhatsAppExportService {
         if n.hasSuffix(".png") { return "image/png" }
         if n.hasSuffix(".gif") { return "image/gif" }
         if n.hasSuffix(".webp") { return "image/webp" }
+        if n.hasSuffix(".heic") { return "image/heic" }
+        if n.hasSuffix(".heif") { return "image/heif" }
 
         // Video
         if n.hasSuffix(".mp4") { return "video/mp4" }
@@ -548,7 +638,9 @@ public enum WhatsAppExportService {
     private static func urlPathEscapeComponent(_ s: String) -> String {
         // Encode a single path component for safe use in href/src.
         // Keep it conservative to work well across Safari/Chrome/Edge.
-        return s.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? s
+        var allowed = CharacterSet.urlPathAllowed
+        allowed.remove(charactersIn: "/?#")
+        return s.addingPercentEncoding(withAllowedCharacters: allowed) ?? s
     }
 
     private static func uniqueDestinationURL(_ dest: URL) -> URL {
@@ -578,6 +670,14 @@ public enum WhatsAppExportService {
         let src = source.standardizedFileURL
         guard fm.fileExists(atPath: src.path) else { return nil }
 
+        // Dedupe: if we already staged this exact source path, return the same staged reference.
+        stagedAttachmentLock.lock()
+        if let cached = stagedAttachmentMap[src.path] {
+            stagedAttachmentLock.unlock()
+            return (relHref: cached.relHref, stagedURL: cached.stagedURL)
+        }
+        stagedAttachmentLock.unlock()
+
         do {
             try ensureDirectory(attachmentsDir)
 
@@ -589,10 +689,21 @@ public enum WhatsAppExportService {
             }
 
             let rel = "attachments/\(urlPathEscapeComponent(dest.lastPathComponent))"
+
+            stagedAttachmentLock.lock()
+            stagedAttachmentMap[src.path] = (relHref: rel, stagedURL: dest)
+            stagedAttachmentLock.unlock()
+
             return (relHref: rel, stagedURL: dest)
         } catch {
             // If staging fails, fall back to using the original absolute file URL.
-            return (relHref: src.absoluteURL.absoluteString, stagedURL: src)
+            let rel = src.absoluteURL.absoluteString
+
+            stagedAttachmentLock.lock()
+            stagedAttachmentMap[src.path] = (relHref: rel, stagedURL: src)
+            stagedAttachmentLock.unlock()
+
+            return (relHref: rel, stagedURL: src)
         }
     }
 
@@ -600,53 +711,72 @@ public enum WhatsAppExportService {
     // Attachment previews (PDF/DOCX thumbnails via Quick Look)
     // ---------------------------
 
-    #if canImport(QuickLookThumbnailing) && canImport(AppKit)
-    private static func thumbnailPNGDataURL(for fileURL: URL, maxPixel: CGFloat = 900) async -> String? {
-        let size = CGSize(width: maxPixel, height: maxPixel)
+#if canImport(QuickLookThumbnailing)
+private static func thumbnailPNGDataURL(for fileURL: URL, maxPixel: CGFloat = 900) async -> String? {
+    let size = CGSize(width: maxPixel, height: maxPixel)
+    #if canImport(AppKit)
         let scale = NSScreen.main?.backingScaleFactor ?? 2.0
+    #elseif canImport(UIKit)
+        let scale = UIScreen.main.scale
+    #else
+        let scale: CGFloat = 2.0
+    #endif
 
-        let req = QLThumbnailGenerator.Request(
-            fileAt: fileURL,
-            size: size,
-            scale: scale,
-            representationTypes: .thumbnail
-        )
+    let req = QLThumbnailGenerator.Request(
+        fileAt: fileURL,
+        size: size,
+        scale: scale,
+        representationTypes: .thumbnail
+    )
 
-        return await withCheckedContinuation { cont in
-            QLThumbnailGenerator.shared.generateBestRepresentation(for: req) { rep, err in
-                guard err == nil, let rep else {
-                    cont.resume(returning: nil)
-                    return
-                }
-
-                let cg = rep.cgImage
-                let nsImage = NSImage(cgImage: cg, size: size)
-                guard
-                    let tiff = nsImage.tiffRepresentation,
-                    let bmp = NSBitmapImageRep(data: tiff),
-                    let png = bmp.representation(using: .png, properties: [:])
-                else {
-                    cont.resume(returning: nil)
-                    return
-                }
-
-                cont.resume(returning: "data:image/png;base64,\(png.base64EncodedString())")
+    return await withCheckedContinuation { cont in
+        QLThumbnailGenerator.shared.generateBestRepresentation(for: req) { rep, err in
+            guard err == nil, let rep else {
+                cont.resume(returning: nil)
+                return
             }
+
+            let cg = rep.cgImage
+
+            #if canImport(AppKit)
+            let nsImage = NSImage(cgImage: cg, size: size)
+            guard
+                let tiff = nsImage.tiffRepresentation,
+                let bmp = NSBitmapImageRep(data: tiff),
+                let png = bmp.representation(using: .png, properties: [:])
+            else {
+                cont.resume(returning: nil)
+                return
+            }
+            cont.resume(returning: "data:image/png;base64,\(png.base64EncodedString())")
+
+            #elseif canImport(UIKit)
+            let uiImage = UIImage(cgImage: cg)
+            guard let png = uiImage.pngData() else {
+                cont.resume(returning: nil)
+                return
+            }
+            cont.resume(returning: "data:image/png;base64,\(png.base64EncodedString())")
+
+            #else
+            cont.resume(returning: nil)
+            #endif
         }
     }
-    #endif
+}
+#endif
 
     private static func attachmentPreviewDataURL(_ url: URL) async -> String? {
         let ext = url.pathExtension.lowercased()
 
         // True images: embed as-is.
-        if ["jpg","jpeg","png","gif","webp"].contains(ext) {
+        if ["jpg","jpeg","png","gif","webp","heic","heif"].contains(ext) {
             return fileToDataURL(url)
         }
 
         // PDF/DOCX/DOC/MP4/MOV/M4V: generate a thumbnail via Quick Look.
         if ["pdf","docx","doc","mp4","mov","m4v"].contains(ext) {
-            #if canImport(QuickLookThumbnailing) && canImport(AppKit)
+            #if canImport(QuickLookThumbnailing)
             return await thumbnailPNGDataURL(for: url)
             #else
             return nil
@@ -655,7 +785,7 @@ public enum WhatsAppExportService {
 
         return nil
     }
-    
+
     // ---------------------------
     // Link previews: Google Maps helpers
     // ---------------------------
@@ -726,17 +856,42 @@ public enum WhatsAppExportService {
     // Link previews (native, LinkPresentation)
     // ---------------------------
 
-    #if canImport(LinkPresentation) && canImport(AppKit)
+    #if canImport(LinkPresentation)
 
-    private static func nsImageToPNGData(_ img: NSImage) -> Data? {
+    #if canImport(UIKit)
+    private typealias WAPlatformImage = UIImage
+    #elseif canImport(AppKit)
+    private typealias WAPlatformImage = NSImage
+    #endif
+
+    private static func platformImageToPNGData(_ img: WAPlatformImage) -> Data? {
+        #if canImport(UIKit)
+        return img.pngData()
+        #elseif canImport(AppKit)
         guard let tiff = img.tiffRepresentation,
               let rep = NSBitmapImageRep(data: tiff)
         else { return nil }
         return rep.representation(using: .png, properties: [:])
+        #else
+        return nil
+        #endif
     }
 
-    private static func loadNSImage(from provider: NSItemProvider) async throws -> NSImage {
+    private static func loadPlatformImage(from provider: NSItemProvider) async throws -> WAPlatformImage {
         try await withCheckedThrowingContinuation { cont in
+            #if canImport(UIKit)
+            provider.loadObject(ofClass: UIImage.self) { obj, err in
+                if let err {
+                    cont.resume(throwing: err)
+                    return
+                }
+                if let img = obj as? UIImage {
+                    cont.resume(returning: img)
+                    return
+                }
+                cont.resume(throwing: URLError(.cannotDecodeContentData))
+            }
+            #elseif canImport(AppKit)
             provider.loadObject(ofClass: NSImage.self) { obj, err in
                 if let err {
                     cont.resume(throwing: err)
@@ -748,9 +903,11 @@ public enum WhatsAppExportService {
                 }
                 cont.resume(throwing: URLError(.cannotDecodeContentData))
             }
+            #else
+            cont.resume(throwing: URLError(.cannotDecodeContentData))
+            #endif
         }
     }
-
 
     // Swift 6 (strict concurrency): LinkPresentation types are not Sendable.
     // Design: keep LinkPresentation objects inside a boxed class and ensure single completion via locking.
@@ -901,9 +1058,9 @@ public enum WhatsAppExportService {
         }
         #endif
 
-        // Fallback: load as NSImage and re-encode PNG
-        let img = try await loadNSImage(from: provider)
-        if let png = nsImageToPNGData(img) {
+        // Fallback: load as platform image and re-encode PNG
+        let img = try await loadPlatformImage(from: provider)
+        if let png = platformImageToPNGData(img) {
             return (png, "image/png")
         }
         throw URLError(.cannotDecodeContentData)
@@ -1028,7 +1185,7 @@ public enum WhatsAppExportService {
 
     private static func buildPreview(_ url: String) async -> WAPreview? {
         if let cached = await previewCache.get(url) { return cached }
-        
+
         // Google Maps: avoid consent/interstitial pages and keep output stable.
         // For coordinate links like .../maps/search/?api=1&query=52.508450,13.372972
         // synthesize the title Google typically returns (Python then HTML-escapes it).
@@ -1057,7 +1214,7 @@ public enum WhatsAppExportService {
         }
 
         // Prefer native LinkPresentation when available (often provides a real preview image).
-        #if canImport(LinkPresentation) && canImport(AppKit)
+        #if canImport(LinkPresentation)
         if let lp = await buildPreviewViaLinkPresentation(url) {
             await previewCache.set(url, lp)
             return lp
@@ -1152,9 +1309,11 @@ public enum WhatsAppExportService {
         var authors: [String] = []
         for m in msgs {
             let a = _normSpace(m.author)
-            if !a.isEmpty && !authors.contains(a) { authors.append(a) }
+            if a.isEmpty { continue }
+            if isSystemAuthor(a) { continue }
+            if !authors.contains(a) { authors.append(a) }
         }
-        let others = authors.filter { $0 != meName }
+        let others = authors.filter { _normSpace($0).lowercased() != _normSpace(meName).lowercased() }
         let titleNames: String = {
             if others.count == 1 { return "\(meName) ↔ \(others[0])" }
             if others.count > 1 { return "\(meName) ↔ \(others.joined(separator: ", "))" }
@@ -1173,6 +1332,7 @@ public enum WhatsAppExportService {
           --text:#111;
           --muted:#666;
           --shadow: 0 1px 0 rgba(0,0,0,.06);
+          --media-max: 40vw; /* cap media (photos/videos/pdf/link previews) to ~40% viewport width */
         }
         html,body{height:100%;margin:0;padding:0;}
         body{
@@ -1223,6 +1383,7 @@ public enum WhatsAppExportService {
         }
         .row.me{justify-content:flex-end;}
         .row.other{justify-content:flex-start;}
+        .row.system{justify-content:center;}
         .bubble{
           max-width: 78%;
           min-width: 220px;
@@ -1231,6 +1392,20 @@ public enum WhatsAppExportService {
           box-shadow: var(--shadow);
           position:relative;
           overflow:hidden;
+        }
+        .bubble.system{
+          background: rgba(255,255,255,.70);
+          color:#333;
+          font-size: 14px;
+          line-height: 1.25;
+          max-width: 90%;
+          min-width: 0;
+          padding: 8px 10px;
+          text-align: center;
+        }
+        .bubble.has-media{
+          /* Prevent media messages from shrinking to min-width; keep preview/media width consistent */
+          width: min(78%, var(--media-max));
         }
         .bubble.me{background: var(--bubble-me);}
         .bubble.other{background: var(--bubble-other);}
@@ -1254,6 +1429,14 @@ public enum WhatsAppExportService {
           border-radius: 14px;
           overflow:hidden;
           background: rgba(255,255,255,.35);
+          max-width: var(--media-max);
+          width: 100%;
+          margin-left: auto;
+          margin-right: auto;
+        }
+        /* Photos: fill the media box width; allow taller images (e.g. phone screenshots) to grow in height. */
+        .media.media-img img{
+          max-height: none;
         }
         .media img{
           display:block;
@@ -1275,9 +1458,13 @@ public enum WhatsAppExportService {
           overflow:hidden;
           background: rgba(255,255,255,.55);
           border: 1px solid rgba(0,0,0,.06);
+          max-width: var(--media-max);
+          width: 100%;
+          margin-left: auto;
+          margin-right: auto;
         }
         .preview a{color: inherit; text-decoration:none; display:block;}
-        .preview .pimg img{width:100%;height:auto;display:block;}
+        .preview .pimg img{width:100%;height:auto;display:block;max-height:none;}
         .preview .pbody{padding:10px 12px;}
         .preview .ptitle{font-weight:700; margin:0 0 4px; font-size: 16px;}
         .preview .pdesc{margin:0; color: var(--muted); font-size: 14px;}
@@ -1356,18 +1543,30 @@ public enum WhatsAppExportService {
                 lastDayKey = dayKey
             }
 
-            let author = _normSpace(m.author).isEmpty ? "Unbekannt" : _normSpace(m.author)
-            let isMe = (author == meName)
-            let rowCls = isMe ? "me" : "other"
-            let bubCls = isMe ? "me" : "other"
+            let authorRaw = _normSpace(m.author)
+            let author = authorRaw.isEmpty ? "Unbekannt" : authorRaw
 
             let textRaw = m.text
             let attachments = findAttachments(textRaw)
             let textWoAttach = stripAttachmentMarkers(textRaw)
 
-            let textHTML = textWoAttach.isEmpty ? "" : htmlEscapeKeepNewlines(textWoAttach)
+            let isSystemMsg = isSystemMessage(authorRaw: authorRaw, text: textWoAttach)
 
-            let urls = extractURLs(textWoAttach)
+            let isMe = (!isSystemMsg) && (authorRaw.lowercased() == _normSpace(meName).lowercased())
+            let rowCls: String = isSystemMsg ? "system" : (isMe ? "me" : "other")
+            let bubCls: String = isSystemMsg ? "system" : (isMe ? "me" : "other")
+
+            let trimmedText = textWoAttach.trimmingCharacters(in: .whitespacesAndNewlines)
+            let urls = extractURLs(trimmedText)
+            let urlOnly = isURLOnlyText(trimmedText)
+
+            // If the message is just a URL (or a list of URLs), avoid printing the raw URL(s) again as bubble text.
+            let textHTML: String = {
+                if urlOnly { return "" }
+                if trimmedText.isEmpty { return "" }
+                return htmlEscapeKeepNewlines(trimmedText)
+            }()
+
             var previewHTML = ""
 
             if enablePreviews, !urls.isEmpty {
@@ -1407,40 +1606,29 @@ public enum WhatsAppExportService {
                 // Mode A: embed everything directly into the HTML (single-file export).
                 // Use waOpenEmbed for clickable links (no data: href).
                 if embedAttachments {
-                    // For video, PDF, DOC, DOCX: use waOpenEmbed for fileline and preview click.
+                    // For video: store payload once (script) and open via waOpenEmbed (avoid double-embedding).
                     if ["mp4", "mov", "m4v"].contains(ext) {
                         let mime = guessMime(fromName: fn)
                         let poster = await attachmentPreviewDataURL(p)
 
-                        var posterAttr = ""
-                        if let poster {
-                            posterAttr = " poster='\(poster)'"
-                        }
-
-                        // For <video>, we still need a data URL for the <source>.
-                        let dataURL = fileToDataURL(p)
-
-                        if let dataURL {
-                            // Assign a unique embed ID for the file open link.
+                        if let fmData = try? Data(contentsOf: p) {
                             embedCounter += 1
                             let embedId = "wa-embed-\(embedCounter)"
-                            // Generate base64 for the embed script.
-                            if let fmData = try? Data(contentsOf: p) {
-                                let b64 = fmData.base64EncodedString()
-                                let safeMime = htmlEscape(mime)
-                                let safeName = htmlEscape(fn)
-                                // Insert the hidden script tag before the clickable UI.
-                                mediaBlocks.append("<script id='\(embedId)' type='application/octet-stream' data-mime='\(safeMime)' data-name='\(safeName)'>\(b64)</script>")
-                                mediaBlocks.append(
-                                    "<div class='media'><video controls preload='metadata' playsinline\(posterAttr)><source src='\(htmlEscape(dataURL))' type='\(safeMime)'>Dein Browser kann dieses Video nicht abspielen.</video></div>"
-                                )
-                                // Fileline link using waOpenEmbed, does not modify address bar.
-                                mediaBlocks.append("<div class='fileline'>🎬 <a href='javascript:void(0)' onclick=\"return waOpenEmbed('\(embedId)')\">\(htmlEscape(fn))</a></div>")
-                            } else {
-                                mediaBlocks.append("<div class='media'><video controls preload='metadata' playsinline\(posterAttr)><source src='\(htmlEscape(dataURL))' type='\(htmlEscape(mime))'>Dein Browser kann dieses Video nicht abspielen.</video></div>")
-                                mediaBlocks.append("<div class='fileline'>🎬 \(htmlEscape(fn))</div>")
+                            let b64 = fmData.base64EncodedString()
+                            let safeMime = htmlEscape(mime)
+                            let safeName = htmlEscape(fn)
+
+                            mediaBlocks.append("<script id='\(embedId)' type='application/octet-stream' data-mime='\(safeMime)' data-name='\(safeName)'>\(b64)</script>")
+
+                            if let poster {
+                                mediaBlocks.append("<div class='media'><a href='javascript:void(0)' onclick=\"return waOpenEmbed('\(embedId)')\"><img alt='' src='\(htmlEscape(poster))'></a></div>")
                             }
+
+                            mediaBlocks.append("<div class='fileline'>🎬 <a href='javascript:void(0)' onclick=\"return waOpenEmbed('\(embedId)')\">Video öffnen</a></div>")
                         } else {
+                            if let poster {
+                                mediaBlocks.append("<div class='media'><img alt='' src='\(htmlEscape(poster))'></div>")
+                            }
                             mediaBlocks.append("<div class='fileline'>🎬 \(htmlEscape(fn))</div>")
                         }
                         continue
@@ -1480,12 +1668,29 @@ public enum WhatsAppExportService {
                         continue
                     }
 
-                    // For image files (jpg/png/gif/webp): embed as <img> (no waOpenEmbed needed).
-                    if ["jpg", "jpeg", "png", "gif", "webp"].contains(ext) {
-                        if let dataURL = fileToDataURL(p) {
-                            mediaBlocks.append("<div class='media'><img alt='' src='\(dataURL)'></div>")
-                            mediaBlocks.append("<div class='fileline'>🖼️ \(htmlEscape(fn))</div>")
+                    // For image files (jpg/png/gif/webp/heic/heif): show as <img> and open via waOpenEmbed on click.
+                    // (Avoids data: URLs in href which can lead to about:blank in Safari.)
+                    if ["jpg", "jpeg", "png", "gif", "webp", "heic", "heif"].contains(ext) {
+                        let mime = guessMime(fromName: fn)
+                        if let dataURL = fileToDataURL(p), let fileData = try? Data(contentsOf: p) {
+                            embedCounter += 1
+                            let embedId = "wa-embed-\(embedCounter)"
+                            let b64 = fileData.base64EncodedString()
+                            let safeMime = htmlEscape(mime)
+                            let safeName = htmlEscape(fn)
+
+                            // Store raw bytes once; click opens blob via waOpenEmbed.
+                            mediaBlocks.append("<script id='\(embedId)' type='application/octet-stream' data-mime='\(safeMime)' data-name='\(safeName)'>\(b64)</script>")
+
+                            let safeSrc = htmlEscape(dataURL)
+                            mediaBlocks.append("<div class='media media-img'><a href='javascript:void(0)' onclick=\"return waOpenEmbed('\(embedId)')\"><img alt='' src='\(safeSrc)'></a></div>")
+                            // Kein Dateiname unter eingebetteten Bildern
+                        } else if let dataURL = fileToDataURL(p) {
+                            // Fallback: show image without click-to-open.
+                            let safeSrc = htmlEscape(dataURL)
+                            mediaBlocks.append("<div class='media media-img'><img alt='' src='\(safeSrc)'></div>")
                         } else {
+                            // Nur wenn Einbettung fehlschlägt, den Dateinamen anzeigen
                             mediaBlocks.append("<div class='fileline'>🖼️ \(htmlEscape(fn))</div>")
                         }
                         continue
@@ -1527,23 +1732,26 @@ public enum WhatsAppExportService {
                     mediaBlocks.append(
                         "<div class='media'><video controls preload='metadata' playsinline\(posterAttr)><source src='\(htmlEscape(href))' type='\(htmlEscape(mime))'>Dein Browser kann dieses Video nicht abspielen. <a href='\(htmlEscape(href))'>Video öffnen</a>.</video></div>"
                     )
-                    mediaBlocks.append(
-                        "<div class='fileline'>🎬 <a href='\(htmlEscape(href))' target='_blank' rel='noopener' download>\(htmlEscape(fn))</a></div>"
-                    )
                     continue
                 }
 
                 if let dataURL = await attachmentPreviewDataURL(stagedURL ?? p) {
+                    let isImage = ["jpg","jpeg","png","gif","webp","heic","heif"].contains(ext)
+
                     if let href {
                         mediaBlocks.append(
-                            "<div class='media'><a href='\(htmlEscape(href))' target='_blank' rel='noopener'><img alt='' src='\(dataURL)'></a></div>"
+                            "<div class='media\(isImage ? " media-img" : "")'><a href='\(htmlEscape(href))' target='_blank' rel='noopener'><img alt='' src='\(dataURL)'></a></div>"
                         )
-                        mediaBlocks.append(
-                            "<div class='fileline'>📎 <a href='\(htmlEscape(href))' target='_blank' rel='noopener'>\(htmlEscape(fn))</a></div>"
-                        )
+                        if !isImage {
+                            mediaBlocks.append(
+                                "<div class='fileline'>📎 <a href='\(htmlEscape(href))' target='_blank' rel='noopener'>\(htmlEscape(fn))</a></div>"
+                            )
+                        }
                     } else {
-                        mediaBlocks.append("<div class='media'><img alt='' src='\(dataURL)'></div>")
-                        mediaBlocks.append("<div class='fileline'>📎 \(htmlEscape(fn))</div>")
+                        mediaBlocks.append("<div class='media\(isImage ? " media-img" : "")'><img alt='' src='\(dataURL)'></div>")
+                        if !isImage {
+                            mediaBlocks.append("<div class='fileline'>📎 \(htmlEscape(fn))</div>")
+                        }
                     }
                 } else {
                     if let href {
@@ -1559,15 +1767,27 @@ public enum WhatsAppExportService {
             // show all urls as lines
             var linkLines = ""
             if !urls.isEmpty {
-                let lines = urls.map {
-                    "<a href='\(htmlEscape($0))' target='_blank' rel='noopener'>\(htmlEscape($0))</a>"
+                let lines = urls.map { u in
+                    let shown = htmlEscape(displayURL(u))
+                    let full = htmlEscape(u)
+                    return "<a href='\(full)' target='_blank' rel='noopener' title='\(full)'>\(shown)</a>"
                 }.joined(separator: "<br>")
                 linkLines = "<div class='linkline'>\(lines)</div>"
             }
 
+            // For URL-only messages, the preview blocks already contain the clickable link.
+            // Avoid duplicating a second huge link line when previews are present.
+            if urlOnly && !previewHTML.isEmpty {
+                linkLines = ""
+            }
+
             parts.append("<div class='row \(rowCls)'>")
-            parts.append("<div class='bubble \(bubCls)'>")
-            parts.append("<div class='name'>\(htmlEscape(author))</div>")
+            let hasMedia = (!previewHTML.isEmpty) || (!mediaBlocks.isEmpty)
+            let bubbleExtra = hasMedia ? " has-media" : ""
+            parts.append("<div class='bubble \(bubCls)\(bubbleExtra)'>")
+            if !isSystemMsg {
+                parts.append("<div class='name'>\(htmlEscape(author))</div>")
+            }
             if !textHTML.isEmpty { parts.append("<div class='text'>\(textHTML)</div>") }
             if !previewHTML.isEmpty { parts.append(previewHTML) }
             if !linkLines.isEmpty { parts.append(linkLines) }
@@ -1596,10 +1816,12 @@ public enum WhatsAppExportService {
         var authors: [String] = []
         for m in msgs {
             let a = _normSpace(m.author)
-            if !a.isEmpty && !authors.contains(a) { authors.append(a) }
+            if a.isEmpty { continue }
+            if isSystemAuthor(a) { continue }
+            if !authors.contains(a) { authors.append(a) }
         }
 
-        let others = authors.filter { $0 != meName }
+        let others = authors.filter { _normSpace($0).lowercased() != _normSpace(meName).lowercased() }
         let titleNames: String = {
             if others.count == 1 { return "\(meName) ↔ \(others[0])" }
             if others.count > 1 { return "\(meName) ↔ \(others.joined(separator: ", "))" }
@@ -1669,7 +1891,7 @@ public enum WhatsAppExportService {
                     } else {
                         lines.append("- 🎬 \(fn)")
                     }
-                } else if n.hasSuffix(".jpg") || n.hasSuffix(".jpeg") || n.hasSuffix(".png") || n.hasSuffix(".gif") || n.hasSuffix(".webp") {
+                } else if n.hasSuffix(".jpg") || n.hasSuffix(".jpeg") || n.hasSuffix(".png") || n.hasSuffix(".gif") || n.hasSuffix(".webp") || n.hasSuffix(".heic") || n.hasSuffix(".heif") {
                     if let href {
                         lines.append("- 🖼️ [\(fn)](\(href))")
                     } else {
