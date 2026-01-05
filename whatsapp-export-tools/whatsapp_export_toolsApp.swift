@@ -10,7 +10,7 @@ import SwiftUI
 @main
 struct whatsapp_export_toolsApp: App {
     var body: some Scene {
-        WindowGroup {
+        WindowGroup("WhatsApp Export Tools") {
             ContentView()
         }
         .defaultSize(width: 980, height: 720)

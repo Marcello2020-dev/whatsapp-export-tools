@@ -16,8 +16,8 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "1F7A85992F0A86540053EE07"
-               BuildableName = "whatsapp-export-tools.app"
-               BlueprintName = "whatsapp-export-tools"
+               BuildableName = "WhatsApp Export Tools.app"
+               BlueprintName = "WhatsApp Export Tools"
                ReferencedContainer = "container:whatsapp-export-tools.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
@@ -47,8 +47,8 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "1F7A85992F0A86540053EE07"
-            BuildableName = "whatsapp-export-tools.app"
-            BlueprintName = "whatsapp-export-tools"
+            BuildableName = "WhatsApp Export Tools.app"
+            BlueprintName = "WhatsApp Export Tools"
             ReferencedContainer = "container:whatsapp-export-tools.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
@@ -64,8 +64,8 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "1F7A85992F0A86540053EE07"
-            BuildableName = "whatsapp-export-tools.app"
-            BlueprintName = "whatsapp-export-tools"
+            BuildableName = "WhatsApp Export Tools.app"
+            BlueprintName = "WhatsApp Export Tools"
             ReferencedContainer = "container:whatsapp-export-tools.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
@@ -75,6 +75,7 @@
    </AnalyzeAction>
    <ArchiveAction
       buildConfiguration = "Release"
+      customArchiveName = "WhatsApp Export Tools"
       revealArchiveInOrganizer = "YES">
    </ArchiveAction>
 </Scheme>

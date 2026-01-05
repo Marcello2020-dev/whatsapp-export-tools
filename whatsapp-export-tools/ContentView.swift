@@ -1,4 +1,3 @@
-
 import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
@@ -14,14 +13,30 @@ struct ContentView: View {
 
     // MARK: - Theme
 
-    private static let whatsGreen = Color(
-        red: 37.0 / 255.0,
-        green: 211.0 / 255.0,
-        blue: 102.0 / 255.0
+
+    // WhatsApp-like palette (approx.)
+    static let waGreen = Color(red: 0x25/255.0, green: 0xD3/255.0, blue: 0x66/255.0)   // #25D366
+    static let waTeal  = Color(red: 0x12/255.0, green: 0x8C/255.0, blue: 0x7E/255.0)   // #128C7E
+    static let waBlue  = Color(red: 0x34/255.0, green: 0xB7/255.0, blue: 0xF1/255.0)   // #34B7F1
+
+    static let bgTop = waTeal.opacity(0.22)
+    static let bgBottom = waGreen.opacity(0.12)
+
+    // Subtle “card tint” gradient used by waCard()
+    static let cardTintGradient = LinearGradient(
+        colors: [waGreen.opacity(0.18), waBlue.opacity(0.10)],
+        startPoint: .topLeading,
+        endPoint: .bottomTrailing
     )
 
-    private static let bgTop = Color(nsColor: .controlBackgroundColor)
-    private static let bgBottom = Color(nsColor: .windowBackgroundColor)
+    /// Prefer a dedicated asset (if present) for in-app rendering; fallback to the actual app icon.
+    static var appIconNSImage: NSImage {
+        // NOTE: `AppIcon` is often an Icon Set and may not be addressable by name at runtime.
+        // If you have a separate Image Set (recommended), name it e.g. `AppIconRender` and add it here.
+        if let img = NSImage(named: "AppIconRender") { return img }
+        if let img = NSImage(named: "AppIcon") { return img }
+        return NSApp.applicationIconImage
+    }
 
     private struct WhatsAppBackground: View {
         var body: some View {
@@ -50,8 +65,18 @@ struct ContentView: View {
                             }
                         }
                     }
-                    .opacity(0.85)
+                    .opacity(0.55)
                     .allowsHitTesting(false)
+                    
+                    // Large app icon watermark
+                    Image(nsImage: ContentView.appIconNSImage)
+                        .resizable()
+                        .interpolation(.high)
+                        .scaledToFit()
+                        .frame(width: min(geo.size.width, geo.size.height) * 0.82)
+                        .opacity(0.13)
+                        .blendMode(.softLight)
+                        .allowsHitTesting(false)
                 }
                 .frame(width: geo.size.width, height: geo.size.height)
             }
@@ -193,7 +218,7 @@ struct ContentView: View {
         }
         .padding(20)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .tint(.accentColor)
+        .tint(Self.waGreen)
         .background(WhatsAppBackground().ignoresSafeArea())
         .onAppear {
             if let u = chatURL, detectedParticipants.isEmpty {
@@ -205,16 +230,17 @@ struct ContentView: View {
 
     private var header: some View {
         HStack(spacing: 12) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(Self.whatsGreen)
-                    .shadow(color: .black.opacity(0.25), radius: 6, x: 0, y: 2)
-
-                Image(systemName: "bubble.left.and.bubble.right.fill")
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(.white)
-            }
-            .frame(width: 36, height: 36)
+            Image(nsImage: Self.appIconNSImage)
+                .resizable()
+                .interpolation(.high)
+                .scaledToFit()
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(.white.opacity(0.10), lineWidth: 1)
+                )
+                .shadow(color: .black.opacity(0.25), radius: 6, x: 0, y: 2)
+                .frame(width: 36, height: 36)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text("WhatsApp Export Tools")
@@ -372,14 +398,28 @@ private struct WASection<Content: View>: View {
 
 private struct WACard: ViewModifier {
     func body(content: Content) -> some View {
-        content
+        let shape = RoundedRectangle(cornerRadius: 14, style: .continuous)
+
+        return content
             .padding(12)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .stroke(.white.opacity(0.06), lineWidth: 1)
+            .background(
+                ZStack {
+                    // Color tint layer (WhatsApp palette) — very light so the watermark can shine through
+                    shape
+                        .fill(ContentView.cardTintGradient)
+                        .opacity(0.06)
+
+                    // Glass layer — significantly more transparent so the background watermark is clearly visible
+                    shape
+                        .fill(.ultraThinMaterial)
+                        .opacity(0.16)
+                }
             )
-            .shadow(color: .black.opacity(0.22), radius: 10, x: 0, y: 4)
+            .overlay(
+                shape
+                .stroke(ContentView.waGreen.opacity(0.05), lineWidth: 1)
+            )
+            .shadow(color: .black.opacity(0.06), radius: 12, x: 0, y: 6)
     }
 }
 

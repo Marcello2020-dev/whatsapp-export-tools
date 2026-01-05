@@ -169,11 +169,21 @@ public enum WhatsAppExportService {
         return f
     }()
 
-    private static let nowStampFormatter: DateFormatter = {
+    // File-name friendly stamps (Finder style): dots in dates, no seconds, no colon.
+    private static let fileStampFormatter: DateFormatter = {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
         f.timeZone = TimeZone.current
-        f.dateFormat = "yyyy-MM-dd_HH-mm-ss"
+        // No seconds; avoid ':' in filenames.
+        f.dateFormat = "yyyy.MM.dd HH.mm"
+        return f
+    }()
+
+    private static let fileDateOnlyFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone.current
+        f.dateFormat = "yyyy.MM.dd"
         return f
     }()
 
@@ -238,7 +248,7 @@ public enum WhatsAppExportService {
 
         let now = Date()
 
-        // Output filename parts (Python main)
+        // Output filename parts (Finder-friendly, human-readable)
         let uniqAuthors = Array(Set(authors.map { _normSpace($0) }))
             .filter { !$0.isEmpty && !isSystemAuthor($0) }
             .sorted()
@@ -247,27 +257,25 @@ public enum WhatsAppExportService {
         let partners = uniqAuthors.filter { _normSpace($0).lowercased() != meNorm }
 
         let partnersPart: String = {
-            if partners.isEmpty { return "UNKNOWN" }
-            if partners.count <= 3 { return partners.joined(separator: "+") }
-            return partners.prefix(3).joined(separator: "+") + "+\(partners.count - 3)more"
+            if partners.isEmpty { return "Unbekannt" }
+            if partners.count <= 3 { return partners.joined(separator: ", ") }
+            return partners.prefix(3).joined(separator: ", ") + " +\(partners.count - 3) weitere"
         }()
 
         let periodPart: String = {
             guard let minD = msgs.min(by: { $0.ts < $1.ts })?.ts,
                   let maxD = msgs.max(by: { $0.ts < $1.ts })?.ts else {
-                return "NO_MESSAGES"
+                return "Keine Nachrichten"
             }
-            let start = isoDateOnly(minD)
-            let end = isoDateOnly(maxD)
-            return "\(start)_to_\(end)"
+            let start = fileDateOnlyFormatter.string(from: minD)
+            let end = fileDateOnlyFormatter.string(from: maxD)
+            return "\(start) bis \(end)"
         }()
 
-        let base = [
-            safeFilenameStem("WHATSAPP_CHAT"),
-            safeFilenameStem(partnersPart),
-            periodPart,
-            nowStampFormatter.string(from: now),
-        ].joined(separator: "_")
+        let exportStamp = fileStampFormatter.string(from: now)
+
+        let baseRaw = "WhatsApp Chat · \(partnersPart) · \(periodPart) · Export \(exportStamp)"
+        let base = safeFinderFilename(baseRaw)
 
         let outHTML = outPath.appendingPathComponent("\(base).html")
         let outMD = outPath.appendingPathComponent("\(base).md")
@@ -434,6 +442,34 @@ public enum WhatsAppExportService {
         }
         out = out.trimmingCharacters(in: CharacterSet(charactersIn: "_"))
         return out.isEmpty ? "WHATSAPP_CHAT" : out
+    }
+    
+    // Produces a human-readable, Finder-friendly filename (keeps spaces and Unicode),
+    // while removing characters that are problematic in paths.
+    private static func safeFinderFilename(_ s: String, maxLen: Int = 200) -> String {
+        // Disallowed on macOS: "/" and ":".
+        var x = s
+            .replacingOccurrences(of: "/", with: " ")
+            .replacingOccurrences(of: ":", with: " ")
+
+        // Remove control characters
+        let filteredScalars = x.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }
+        x = String(String.UnicodeScalarView(filteredScalars))
+
+        // Normalize whitespace
+        x = _normSpace(x)
+
+        // Avoid leading/trailing dots/spaces
+        x = x.trimmingCharacters(in: CharacterSet(charactersIn: " ."))
+
+        if x.isEmpty { x = "WhatsApp Chat" }
+
+        // Length cap (extension is added later)
+        if x.count > maxLen {
+            x = String(x.prefix(maxLen)).trimmingCharacters(in: CharacterSet(charactersIn: " ."))
+        }
+
+        return x
     }
 
     private static func isoDateOnly(_ d: Date) -> String {
@@ -1396,7 +1432,7 @@ private static func thumbnailPNGDataURL(for fileURL: URL, maxPixel: CGFloat = 90
         .bubble.system{
           background: rgba(255,255,255,.70);
           color:#333;
-          font-size: 14px;
+          font-size: 12px;
           line-height: 1.25;
           max-width: 90%;
           min-width: 0;

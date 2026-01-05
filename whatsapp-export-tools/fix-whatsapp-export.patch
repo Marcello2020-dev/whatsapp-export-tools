@@ -1,0 +1,255 @@
+diff --git a/WhatsAppExportService.swift b/WhatsAppExportService.swift
+index 0000000..1111111 100644
+--- a/WhatsAppExportService.swift
++++ b/WhatsAppExportService.swift
+@@ -1,6 +1,7 @@
+ import Foundation
+ @preconcurrency import Dispatch
+ 
++
+ #if canImport(AppKit)
+ import AppKit
+ #endif
+@@ -54,6 +55,22 @@ public enum WhatsAppExportService {
+ 
+     private static let systemAuthor = "System"
+ 
++    // Shared system markers (used for participant filtering, title building, and me-name selection)
++    private static let systemMarkers: Set<String> = [
++        "system",
++        "whatsapp",
++        "messages to this chat are now secured",
++        "nachrichten und anrufe sind ende-zu-ende-verschlüsselt",
++    ]
++
++    private static func isSystemAuthor(_ name: String) -> Bool {
++        let low = _normSpace(name).lowercased()
++        if low.isEmpty { return true }
++        if low == systemAuthor.lowercased() { return true }
++        return systemMarkers.contains(low)
++    }
++
+     // Python:
+     // _pat_iso = r"^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})\s+([^:]+?):\s*(.*)$"
+     private static let patISO = try! NSRegularExpression(
+@@ -140,6 +157,11 @@ public enum WhatsAppExportService {
+ 
+     private static let previewCache = PreviewCache()
+ 
++    // Cache for staged attachments (source path -> (relHref, stagedURL)) to avoid duplicate copies.
++    private static let stagedAttachmentLock = NSLock()
++    private static var stagedAttachmentMap: [String: (relHref: String, stagedURL: URL)] = [:]
++
+     // ---------------------------
+     // Public API
+     // ---------------------------
+@@ -162,19 +184,8 @@ public enum WhatsAppExportService {
+             if a.lowercased() == systemAuthor.lowercased() { continue }
+             if !uniq.contains(a) { uniq.append(a) }
+         }
+-
+-        // Apply the same system-marker filtering as chooseMeName
+-        let systemMarkers: Set<String> = [
+-            "system",
+-            "whatsapp",
+-            "messages to this chat are now secured",
+-            "nachrichten und anrufe sind ende-zu-ende-verschlüsselt",
+-        ]
+-
+-        let filtered = uniq.filter { !systemMarkers.contains(_normSpace($0).lowercased()) }
+-        return filtered.isEmpty ? uniq : filtered
++        let filtered = uniq.filter { !isSystemAuthor($0) }
++        return filtered.isEmpty ? uniq : filtered
+     }
+     
+     /// 1:1-Export: parses chat, decides me-name, renders HTML+MD, writes files.
+@@ -214,14 +225,14 @@ public enum WhatsAppExportService {
+ 
+         // Output filename parts (Python main)
+         let uniqAuthors = Array(Set(authors.map { _normSpace($0) }))
+-            .filter { !$0.isEmpty && $0 != systemAuthor }
++            .filter { !$0.isEmpty && !isSystemAuthor($0) }
+             .sorted()
+ 
+-        let meNorm = _normSpace(meName)
+-        let partners = uniqAuthors.filter { _normSpace($0) != meNorm }
++        let meNorm = _normSpace(meName).lowercased()
++        let partners = uniqAuthors.filter { _normSpace($0).lowercased() != meNorm }
+ 
+         let partnersPart: String = {
+             if partners.isEmpty { return "UNKNOWN" }
+@@ -388,7 +399,10 @@ public enum WhatsAppExportService {
+     private static func urlPathEscapeComponent(_ s: String) -> String {
+         // Encode a single path component for safe use in href/src.
+         // Keep it conservative to work well across Safari/Chrome/Edge.
+-        return s.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? s
++        var allowed = CharacterSet.urlPathAllowed
++        // We encode single *components*; ensure path separators and fragment/query delimiters are encoded.
++        allowed.remove(charactersIn: "/?#")
++        return s.addingPercentEncoding(withAllowedCharacters: allowed) ?? s
+     }
+ 
+     private static func uniqueDestinationURL(_ dest: URL) -> URL {
+@@ -431,10 +445,21 @@ public enum WhatsAppExportService {
+     /// Copies a local attachment into the export folder (./attachments) and returns a relative href.
+     /// This makes the exported HTML/MD portable across macOS/Windows and browsers.
+     private static func stageAttachmentForExport(source: URL, attachmentsDir: URL) -> (relHref: String, stagedURL: URL)? {
+         let fm = FileManager.default
+         let src = source.standardizedFileURL
+         guard fm.fileExists(atPath: src.path) else { return nil }
+ 
++        // Dedupe: if we already staged this exact source path, return the same staged reference.
++        stagedAttachmentLock.lock()
++        if let cached = stagedAttachmentMap[src.path] {
++            stagedAttachmentLock.unlock()
++            return (relHref: cached.relHref, stagedURL: cached.stagedURL)
++        }
++        stagedAttachmentLock.unlock()
++
+         do {
+             try ensureDirectory(attachmentsDir)
+ 
+@@ -451,7 +476,13 @@ public enum WhatsAppExportService {
+             }
+ 
+             let rel = "attachments/\(urlPathEscapeComponent(dest.lastPathComponent))"
++
++            stagedAttachmentLock.lock()
++            stagedAttachmentMap[src.path] = (relHref: rel, stagedURL: dest)
++            stagedAttachmentLock.unlock()
++
+             return (relHref: rel, stagedURL: dest)
+         } catch {
+             // If staging fails, fall back to using the original absolute file URL.
+             return (relHref: src.absoluteURL.absoluteString, stagedURL: src)
+@@ -619,19 +650,8 @@ public enum WhatsAppExportService {
+     private static func chooseMeName(authors: [String]) -> String {
+         var uniq: [String] = []
+         for a in authors {
+             let a2 = _normSpace(a)
+             if a2.isEmpty { continue }
+             if !uniq.contains(a2) { uniq.append(a2) }
+         }
+-
+-        let systemMarkers: Set<String> = [
+-            "system",
+-            "whatsapp",
+-            "messages to this chat are now secured",
+-            "nachrichten und anrufe sind ende-zu-ende-verschlüsselt",
+-        ]
+-
+-        let filtered = uniq.filter { !systemMarkers.contains(_normSpace($0).lowercased()) }
+-        if !filtered.isEmpty { uniq = filtered }
++        let filtered = uniq.filter { !isSystemAuthor($0) }
++        if !filtered.isEmpty { uniq = filtered }
+ 
+         if uniq.isEmpty { return "Ich" }
+         return uniq[0] // GUI kann später eine Auswahl anbieten; 1:1 Default = erstes Element
+     }
+@@ -904,11 +924,13 @@ public enum WhatsAppExportService {
+         // participants -> title_names
+         var authors: [String] = []
+         for m in msgs {
+             let a = _normSpace(m.author)
+-            if !a.isEmpty && !authors.contains(a) { authors.append(a) }
++            if a.isEmpty { continue }
++            if isSystemAuthor(a) { continue }
++            if !authors.contains(a) { authors.append(a) }
+         }
+-        let others = authors.filter { $0 != meName }
++        let others = authors.filter { _normSpace($0).lowercased() != _normSpace(meName).lowercased() }
+         let titleNames: String = {
+             if others.count == 1 { return "\(meName) ↔ \(others[0])" }
+             if others.count > 1 { return "\(meName) ↔ \(others.joined(separator: ", "))" }
+@@ -1111,8 +1133,8 @@ public enum WhatsAppExportService {
+             }
+ 
+             let author = _normSpace(m.author).isEmpty ? "Unbekannt" : _normSpace(m.author)
+-            let isMe = (author == meName)
++            let isMe = _normSpace(author).lowercased() == _normSpace(meName).lowercased()
+             let rowCls = isMe ? "me" : "other"
+             let bubCls = isMe ? "me" : "other"
+ 
+@@ -1182,49 +1204,36 @@ public enum WhatsAppExportService {
+                 // Mode A: embed everything directly into the HTML (single-file export).
+                 // Use waOpenEmbed for clickable links (no data: href).
+                 if embedAttachments {
+                     // For video, PDF, DOC, DOCX: use waOpenEmbed for fileline and preview click.
+                     if ["mp4", "mov", "m4v"].contains(ext) {
+                         let mime = guessMime(fromName: fn)
+                         let poster = await attachmentPreviewDataURL(p)
+-
+-                        var posterAttr = ""
+-                        if let poster {
+-                            posterAttr = " poster='\(poster)'"
+-                        }
+-
+-                        // For <video>, we still need a data URL for the <source>.
+-                        let dataURL = fileToDataURL(p)
+-
+-                        if let dataURL {
+-                            // Assign a unique embed ID for the file open link.
+-                            embedCounter += 1
+-                            let embedId = "wa-embed-\(embedCounter)"
+-                            // Generate base64 for the embed script.
+-                            if let fmData = try? Data(contentsOf: p) {
+-                                let b64 = fmData.base64EncodedString()
+-                                let safeMime = htmlEscape(mime)
+-                                let safeName = htmlEscape(fn)
+-                                // Insert the hidden script tag before the clickable UI.
+-                                mediaBlocks.append("<script id='\(embedId)' type='application/octet-stream' data-mime='\(safeMime)' data-name='\(safeName)'>\(b64)</script>")
+-                                mediaBlocks.append(
+-                                    "<div class='media'><video controls preload='metadata' playsinline\(posterAttr)><source src='\(htmlEscape(dataURL))' type='\(safeMime)'>Dein Browser kann dieses Video nicht abspielen.</video></div>"
+-                                )
+-                                // Fileline link using waOpenEmbed, does not modify address bar.
+-                                mediaBlocks.append("<div class='fileline'>🎬 <a href='javascript:void(0)' onclick=\"return waOpenEmbed('\(embedId)')\">Video öffnen</a></div>")
+-                            } else {
+-                                mediaBlocks.append("<div class='media'><video controls preload='metadata' playsinline\(posterAttr)><source src='\(htmlEscape(dataURL))' type='\(htmlEscape(mime))'>Dein Browser kann dieses Video nicht abspielen.</video></div>")
+-                                mediaBlocks.append("<div class='fileline'>🎬 \(htmlEscape(fn))</div>")
+-                            }
+-                        } else {
+-                            mediaBlocks.append("<div class='fileline'>🎬 \(htmlEscape(fn))</div>")
+-                        }
++                        // Single-file export without huge inline <video data:...>: store payload once
++                        // and open it via waOpenEmbed. Optionally show a thumbnail poster.
++                        if let fmData = try? Data(contentsOf: p) {
++                            embedCounter += 1
++                            let embedId = "wa-embed-\(embedCounter)"
++                            let b64 = fmData.base64EncodedString()
++                            let safeMime = htmlEscape(mime)
++                            let safeName = htmlEscape(fn)
++                            mediaBlocks.append("<script id='\(embedId)' type='application/octet-stream' data-mime='\(safeMime)' data-name='\(safeName)'>\(b64)</script>")
++
++                            if let poster {
++                                mediaBlocks.append("<div class='media'><a href='javascript:void(0)' onclick=\"return waOpenEmbed('\(embedId)')\"><img alt='' src='\(htmlEscape(poster))'></a></div>")
++                            }
++                            mediaBlocks.append("<div class='fileline'>🎬 <a href='javascript:void(0)' onclick=\"return waOpenEmbed('\(embedId)')\">Video öffnen</a></div>")
++                        } else {
++                            if let poster {
++                                mediaBlocks.append("<div class='media'><img alt='' src='\(htmlEscape(poster))'></div>")
++                            }
++                            mediaBlocks.append("<div class='fileline'>🎬 \(htmlEscape(fn))</div>")
++                        }
+                         continue
+                     }
+ 
+                     // For PDF/DOC/DOCX: preview thumbnail, clickable with waOpenEmbed.
+                     if ["pdf", "doc", "docx"].contains(ext) {
+@@ -1417,13 +1426,15 @@ public enum WhatsAppExportService {
+ 
+         var authors: [String] = []
+         for m in msgs {
+             let a = _normSpace(m.author)
+-            if !a.isEmpty && !authors.contains(a) { authors.append(a) }
++            if a.isEmpty { continue }
++            if isSystemAuthor(a) { continue }
++            if !authors.contains(a) { authors.append(a) }
+         }
+ 
+-        let others = authors.filter { $0 != meName }
++        let others = authors.filter { _normSpace($0).lowercased() != _normSpace(meName).lowercased() }
+         let titleNames: String = {
+             if others.count == 1 { return "\(meName) ↔ \(others[0])" }
+             if others.count > 1 { return "\(meName) ↔ \(others.joined(separator: ", "))" }
+             return "\(meName) ↔ Chat"
+         }()
