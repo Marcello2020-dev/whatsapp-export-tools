@@ -231,7 +231,8 @@ public enum WhatsAppExportService {
         outDir: URL,
         meNameOverride: String?,
         enablePreviews: Bool,
-        embedAttachments: Bool
+        embedAttachments: Bool,
+        embedAttachmentThumbnailsOnly: Bool = false
     ) async throws -> (html: URL, md: URL) {
 
         let chatPath = chatURL.standardizedFileURL
@@ -286,7 +287,8 @@ public enum WhatsAppExportService {
             outHTML: outHTML,
             meName: meName,
             enablePreviews: enablePreviews,
-            embedAttachments: embedAttachments
+            embedAttachments: embedAttachments,
+            embedAttachmentThumbnailsOnly: embedAttachmentThumbnailsOnly
         )
 
         try renderMD(
@@ -294,7 +296,9 @@ public enum WhatsAppExportService {
             chatURL: chatPath,
             outMD: outMD,
             meName: meName,
-            embedAttachments: embedAttachments
+            enablePreviews: enablePreviews,
+            embedAttachments: embedAttachments,
+            embedAttachmentThumbnailsOnly: embedAttachmentThumbnailsOnly
         )
 
         return (outHTML, outMD)
@@ -743,6 +747,7 @@ public enum WhatsAppExportService {
         }
     }
 
+
     // ---------------------------
     // Attachment previews (PDF/DOCX thumbnails via Quick Look)
     // ---------------------------
@@ -802,6 +807,89 @@ private static func thumbnailPNGDataURL(for fileURL: URL, maxPixel: CGFloat = 90
 }
 #endif
 
+#if canImport(QuickLookThumbnailing)
+private static func thumbnailJPEGData(for fileURL: URL, maxPixel: CGFloat = 900, quality: CGFloat = 0.72) async -> Data? {
+    let size = CGSize(width: maxPixel, height: maxPixel)
+    #if canImport(AppKit)
+        let scale = NSScreen.main?.backingScaleFactor ?? 2.0
+    #elseif canImport(UIKit)
+        let scale = UIScreen.main.scale
+    #else
+        let scale: CGFloat = 2.0
+    #endif
+
+    let req = QLThumbnailGenerator.Request(
+        fileAt: fileURL,
+        size: size,
+        scale: scale,
+        representationTypes: .thumbnail
+    )
+
+    return await withCheckedContinuation { cont in
+        QLThumbnailGenerator.shared.generateBestRepresentation(for: req) { rep, err in
+            guard err == nil, let rep else {
+                cont.resume(returning: nil)
+                return
+            }
+
+            let cg = rep.cgImage
+
+            #if canImport(AppKit)
+            let nsImage = NSImage(cgImage: cg, size: size)
+            guard
+                let tiff = nsImage.tiffRepresentation,
+                let bmp = NSBitmapImageRep(data: tiff),
+                let jpg = bmp.representation(using: .jpeg, properties: [.compressionFactor: quality])
+            else {
+                cont.resume(returning: nil)
+                return
+            }
+            cont.resume(returning: jpg)
+
+            #elseif canImport(UIKit)
+            let uiImage = UIImage(cgImage: cg)
+            cont.resume(returning: uiImage.jpegData(compressionQuality: quality))
+
+            #else
+            cont.resume(returning: nil)
+            #endif
+        }
+    }
+}
+#endif
+
+private static func stageThumbnailForExport(source: URL, thumbsDir: URL) async -> String? {
+    let fm = FileManager.default
+    let src = source.standardizedFileURL
+    guard fm.fileExists(atPath: src.path) else { return nil }
+
+    do {
+        try ensureDirectory(thumbsDir)
+
+        // Prefer a .jpg thumbnail to keep size down.
+        let baseName = src.deletingPathExtension().lastPathComponent
+        var dest = thumbsDir.appendingPathComponent(baseName).appendingPathExtension("jpg")
+        dest = uniqueDestinationURL(dest)
+
+        // If a thumbnail already exists (same chosen dest), reuse it.
+        if fm.fileExists(atPath: dest.path) {
+            return "attachments/_thumbs/\(urlPathEscapeComponent(dest.lastPathComponent))"
+        }
+
+        #if canImport(QuickLookThumbnailing)
+        if let jpg = await thumbnailJPEGData(for: src, maxPixel: 900, quality: 0.72) {
+            try jpg.write(to: dest, options: .atomic)
+            return "attachments/_thumbs/\(urlPathEscapeComponent(dest.lastPathComponent))"
+        }
+        #endif
+
+        // No thumbnail available.
+        return nil
+    } catch {
+        return nil
+    }
+}
+
     private static func attachmentPreviewDataURL(_ url: URL) async -> String? {
         let ext = url.pathExtension.lowercased()
 
@@ -820,6 +908,35 @@ private static func thumbnailPNGDataURL(for fileURL: URL, maxPixel: CGFloat = 90
         }
 
         return nil
+    }
+
+    private static func attachmentThumbnailDataURL(_ url: URL) async -> String? {
+        // Goal: always produce a lightweight thumbnail image (PNG) when possible.
+        // - Images: prefer QuickLook thumbnail so we do not embed the full photo bytes.
+        // - PDF/DOCX/Video: QuickLook thumbnail.
+        // Fallback: for images only, embed the original if QuickLook is unavailable.
+        let ext = url.pathExtension.lowercased()
+
+        #if canImport(QuickLookThumbnailing)
+        // QuickLook can thumbnail images too; this keeps the HTML small.
+        if let thumb = await thumbnailPNGDataURL(for: url) {
+            return thumb
+        }
+        #endif
+
+        // Fallback: if we cannot thumbnail, only allow direct image embedding.
+        if ["jpg","jpeg","png","gif","webp","heic","heif"].contains(ext) {
+            return fileToDataURL(url)
+        }
+
+        return nil
+    }
+
+    private static func attachmentEmoji(forExtension ext: String) -> String {
+        let e = ext.lowercased()
+        if ["mp4","mov","m4v"].contains(e) { return "🎬" }
+        if ["jpg","jpeg","png","gif","webp","heic","heif"].contains(e) { return "🖼️" }
+        return "📎"
     }
 
     // ---------------------------
@@ -1328,6 +1445,80 @@ private static func thumbnailPNGDataURL(for fileURL: URL, maxPixel: CGFloat = 90
         return esc.components(separatedBy: .newlines).joined(separator: "<br>")
     }
 
+    // Escapes text as HTML and (optionally) turns http(s) URLs into clickable <a> links.
+    // Keeps original newlines by converting them to <br> (same behavior as htmlEscapeKeepNewlines).
+    private static func htmlEscapeAndLinkifyKeepNewlines(_ s: String, linkify: Bool) -> String {
+        if !linkify {
+            return htmlEscapeKeepNewlines(s)
+        }
+
+        let rstripSet = CharacterSet(charactersIn: ").,;:!?]\"'")
+
+        func splitURLTrailingPunct(_ raw: String) -> (core: String, trailing: String) {
+            var core = raw
+            var trailing = ""
+            while let last = core.unicodeScalars.last, rstripSet.contains(last) {
+                trailing.insert(Character(last), at: trailing.startIndex)
+                core.removeLast()
+            }
+            return (core, trailing)
+        }
+
+        let lines = s.components(separatedBy: .newlines)
+        var outLines: [String] = []
+        outLines.reserveCapacity(lines.count)
+
+        for line in lines {
+            let ns = line as NSString
+            let matches = urlRe.matches(in: line, options: [], range: NSRange(location: 0, length: ns.length))
+            if matches.isEmpty {
+                outLines.append(htmlEscape(line))
+                continue
+            }
+
+            var out = ""
+            var cursor = 0
+
+            for m in matches {
+                let r = m.range(at: 1)
+                if r.location == NSNotFound || r.length == 0 { continue }
+
+                // Append text before the URL
+                if r.location > cursor {
+                    let before = ns.substring(with: NSRange(location: cursor, length: r.location - cursor))
+                    out += htmlEscape(before)
+                }
+
+                let rawURL = ns.substring(with: r)
+                let (core, trailing) = splitURLTrailingPunct(rawURL)
+
+                if !core.isEmpty {
+                    let href = htmlEscape(core)
+                    let shown = htmlEscape(core)
+                    out += "<a href='\(href)' target='_blank' rel='noopener'>\(shown)</a>"
+                } else {
+                    out += htmlEscape(rawURL)
+                }
+
+                if !trailing.isEmpty {
+                    out += htmlEscape(trailing)
+                }
+
+                cursor = r.location + r.length
+            }
+
+            // Append remainder
+            if cursor < ns.length {
+                let rest = ns.substring(from: cursor)
+                out += htmlEscape(rest)
+            }
+
+            outLines.append(out)
+        }
+
+        return outLines.joined(separator: "<br>")
+    }
+
     // ---------------------------
     // Render HTML (1:1 layout + CSS)
     // ---------------------------
@@ -1338,7 +1529,8 @@ private static func thumbnailPNGDataURL(for fileURL: URL, maxPixel: CGFloat = 90
         outHTML: URL,
         meName: String,
         enablePreviews: Bool,
-        embedAttachments: Bool
+        embedAttachments: Bool,
+        embedAttachmentThumbnailsOnly: Bool
     ) async throws {
 
         // participants -> title_names
@@ -1556,6 +1748,44 @@ private static func thumbnailPNGDataURL(for fileURL: URL, maxPixel: CGFloat = 90
         return false;
       }
     }
+
+    // Download embedded base64 file with original filename.
+    function waDownloadEmbed(id){
+      try{
+        var el = document.getElementById(id);
+        if(!el) return false;
+
+        var b64 = (el.textContent || "").trim();
+        if(!b64) return false;
+
+        var mime = el.getAttribute('data-mime') || 'application/octet-stream';
+        var name = el.getAttribute('data-name') || 'file';
+
+        // base64 -> Uint8Array
+        var bin = atob(b64);
+        var len = bin.length;
+        var bytes = new Uint8Array(len);
+        for(var i=0;i<len;i++){ bytes[i] = bin.charCodeAt(i); }
+
+        var blob = new Blob([bytes], {type: mime});
+        var url = URL.createObjectURL(blob);
+
+        var a = document.createElement('a');
+        a.href = url;
+        a.download = name;
+        a.style.display = 'none';
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(function(){
+          try{ document.body.removeChild(a); }catch(e){}
+          try{ URL.revokeObjectURL(url); }catch(e){}
+        }, 1000);
+
+        return false;
+      } catch(e){
+        return false;
+      }
+    }
     </script>
     </head><body><div class='wrap'>
     """)
@@ -1583,7 +1813,9 @@ private static func thumbnailPNGDataURL(for fileURL: URL, maxPixel: CGFloat = 90
             let author = authorRaw.isEmpty ? "Unbekannt" : authorRaw
 
             let textRaw = m.text
-            let attachments = findAttachments(textRaw)
+            // Minimal mode (no attachments): only include attachments when we either embed full files
+            // or explicitly render thumbnails-only.
+            let attachments = (embedAttachments || embedAttachmentThumbnailsOnly) ? findAttachments(textRaw) : []
             let textWoAttach = stripAttachmentMarkers(textRaw)
 
             let isSystemMsg = isSystemMessage(authorRaw: authorRaw, text: textWoAttach)
@@ -1593,14 +1825,17 @@ private static func thumbnailPNGDataURL(for fileURL: URL, maxPixel: CGFloat = 90
             let bubCls: String = isSystemMsg ? "system" : (isMe ? "me" : "other")
 
             let trimmedText = textWoAttach.trimmingCharacters(in: .whitespacesAndNewlines)
-            let urls = extractURLs(trimmedText)
-            let urlOnly = isURLOnlyText(trimmedText)
+            // Minimal mode (no previews): do not extract URLs for link lines/previews, and do not treat
+            // URL-only messages as empty bubble text.
+            let urls = enablePreviews ? extractURLs(trimmedText) : []
+            let urlOnly = enablePreviews ? isURLOnlyText(trimmedText) : false
 
             // If the message is just a URL (or a list of URLs), avoid printing the raw URL(s) again as bubble text.
             let textHTML: String = {
                 if urlOnly { return "" }
                 if trimmedText.isEmpty { return "" }
-                return htmlEscapeKeepNewlines(trimmedText)
+                // In the smallest variant (previews disabled), URLs should still be real clickable links.
+                return htmlEscapeAndLinkifyKeepNewlines(trimmedText, linkify: !enablePreviews)
             }()
 
             var previewHTML = ""
@@ -1639,6 +1874,39 @@ private static func thumbnailPNGDataURL(for fileURL: URL, maxPixel: CGFloat = 90
                 let p = chatURL.deletingLastPathComponent().appendingPathComponent(fn).standardizedFileURL
                 let ext = p.pathExtension.lowercased()
 
+                if embedAttachmentThumbnailsOnly {
+                    // Thumbnails-only mode must produce a standalone HTML (no ./attachments folder):
+                    // - Do NOT stage/copy attachments to disk.
+                    // - Embed ONLY a lightweight thumbnail as a data: URL.
+                    // - Do NOT wrap thumbnails in <a href=...> and do NOT print any file link/text line.
+
+                    var thumbDataURL: String? = nil
+
+                    #if canImport(QuickLookThumbnailing)
+                    // Prefer JPEG thumbnails to keep the HTML smaller than PNG.
+                    if let jpg = await thumbnailJPEGData(for: p, maxPixel: 900, quality: 0.72) {
+                        thumbDataURL = "data:image/jpeg;base64,\(jpg.base64EncodedString())"
+                    }
+                    #endif
+
+                    if thumbDataURL == nil {
+                        // Fallback (still standalone): Quick Look PNG thumbnail (or nil if unavailable).
+                        thumbDataURL = await attachmentThumbnailDataURL(p)
+                    }
+
+                    if let thumbDataURL {
+                        let isImage = ["jpg","jpeg","png","gif","webp","heic","heif"].contains(ext)
+                        mediaBlocks.append(
+                            "<div class='media\(isImage ? " media-img" : "")'><img alt='' src='\(htmlEscape(thumbDataURL))'></div>"
+                        )
+                        continue
+                    }
+
+                    // Fallback (no thumbnail available): show a non-clickable filename line.
+                    mediaBlocks.append("<div class='fileline'>\(attachmentEmoji(forExtension: ext)) \(htmlEscape(fn))</div>")
+                    continue
+                }
+
                 // Mode A: embed everything directly into the HTML (single-file export).
                 // Use waOpenEmbed for clickable links (no data: href).
                 if embedAttachments {
@@ -1661,6 +1929,7 @@ private static func thumbnailPNGDataURL(for fileURL: URL, maxPixel: CGFloat = 90
                             }
 
                             mediaBlocks.append("<div class='fileline'>🎬 <a href='javascript:void(0)' onclick=\"return waOpenEmbed('\(embedId)')\">Video öffnen</a></div>")
+                            mediaBlocks.append("<div class='fileline'>⬇︎ <a href='javascript:void(0)' onclick=\"return waDownloadEmbed('\(embedId)')\">Video speichern</a></div>")
                         } else {
                             if let poster {
                                 mediaBlocks.append("<div class='media'><img alt='' src='\(htmlEscape(poster))'></div>")
@@ -1687,6 +1956,7 @@ private static func thumbnailPNGDataURL(for fileURL: URL, maxPixel: CGFloat = 90
                             mediaBlocks.append("<div class='media'><a href='javascript:void(0)' onclick=\"return waOpenEmbed('\(embedId)')\"><img alt='' src='\(previewDataURL)'></a></div>")
                             // Fileline link using waOpenEmbed.
                             mediaBlocks.append("<div class='fileline'>📎 <a href='javascript:void(0)' onclick=\"return waOpenEmbed('\(embedId)')\">\(htmlEscape(fn))</a></div>")
+                            mediaBlocks.append("<div class='fileline'>⬇︎ <a href='javascript:void(0)' onclick=\"return waDownloadEmbed('\(embedId)')\">Datei speichern</a></div>")
                         } else if let previewDataURL {
                             mediaBlocks.append("<div class='media'><img alt='' src='\(previewDataURL)'></div>")
                             mediaBlocks.append("<div class='fileline'>📎 \(htmlEscape(fn))</div>")
@@ -1698,6 +1968,7 @@ private static func thumbnailPNGDataURL(for fileURL: URL, maxPixel: CGFloat = 90
                             let safeName = htmlEscape(fn)
                             mediaBlocks.append("<script id='\(embedId)' type='application/octet-stream' data-mime='\(safeMime)' data-name='\(safeName)'>\(b64)</script>")
                             mediaBlocks.append("<div class='fileline'>📎 <a href='javascript:void(0)' onclick=\"return waOpenEmbed('\(embedId)')\">\(htmlEscape(fn))</a></div>")
+                            mediaBlocks.append("<div class='fileline'>⬇︎ <a href='javascript:void(0)' onclick=\"return waDownloadEmbed('\\(embedId)')\">Datei speichern</a></div>")
                         } else {
                             mediaBlocks.append("<div class='fileline'>📎 \(htmlEscape(fn))</div>")
                         }
@@ -1720,6 +1991,7 @@ private static func thumbnailPNGDataURL(for fileURL: URL, maxPixel: CGFloat = 90
 
                             let safeSrc = htmlEscape(dataURL)
                             mediaBlocks.append("<div class='media media-img'><a href='javascript:void(0)' onclick=\"return waOpenEmbed('\(embedId)')\"><img alt='' src='\(safeSrc)'></a></div>")
+                            mediaBlocks.append("<div class='fileline'>⬇︎ <a href='javascript:void(0)' onclick=\"return waDownloadEmbed('\(embedId)')\">Bild speichern</a></div>")
                             // Kein Dateiname unter eingebetteten Bildern
                         } else if let dataURL = fileToDataURL(p) {
                             // Fallback: show image without click-to-open.
@@ -1743,6 +2015,7 @@ private static func thumbnailPNGDataURL(for fileURL: URL, maxPixel: CGFloat = 90
                         let safeName = htmlEscape(fn)
                         mediaBlocks.append("<script id='\(embedId)' type='application/octet-stream' data-mime='\(safeMime)' data-name='\(safeName)'>\(b64)</script>")
                         mediaBlocks.append("<div class='fileline'>📎 <a href='javascript:void(0)' onclick=\"return waOpenEmbed('\(embedId)')\">\(htmlEscape(fn))</a></div>")
+                        mediaBlocks.append("<div class='fileline'>⬇︎ <a href='javascript:void(0)' onclick=\"return waDownloadEmbed('\\(embedId)')\">Datei speichern</a></div>")
                     } else {
                         mediaBlocks.append("<div class='fileline'>📎 \(htmlEscape(fn))</div>")
                     }
@@ -1800,9 +2073,9 @@ private static func thumbnailPNGDataURL(for fileURL: URL, maxPixel: CGFloat = 90
                 }
             }
 
-            // show all urls as lines
+            // show all urls as lines (only when previews/link-handling is enabled)
             var linkLines = ""
-            if !urls.isEmpty {
+            if enablePreviews, !urls.isEmpty {
                 let lines = urls.map { u in
                     let shown = htmlEscape(displayURL(u))
                     let full = htmlEscape(u)
@@ -1846,7 +2119,9 @@ private static func thumbnailPNGDataURL(for fileURL: URL, maxPixel: CGFloat = 90
         chatURL: URL,
         outMD: URL,
         meName: String,
-        embedAttachments: Bool
+        enablePreviews: Bool,
+        embedAttachments: Bool,
+        embedAttachmentThumbnailsOnly: Bool
     ) throws {
 
         var authors: [String] = []
@@ -1893,7 +2168,8 @@ private static func thumbnailPNGDataURL(for fileURL: URL, maxPixel: CGFloat = 90
             let tsLine = "\(fmtTime(m.ts)) / \(fmtDateFull(m.ts))"
 
             let textRaw = m.text
-            let attachments = findAttachments(textRaw)
+            // Minimal mode (no attachments): only include attachments for full-embed or thumbnails-only.
+            let attachments = (embedAttachments || embedAttachmentThumbnailsOnly) ? findAttachments(textRaw) : []
             let textWoAttach = stripAttachmentMarkers(textRaw)
 
             lines.append("**\(author)**  ")
@@ -1902,13 +2178,26 @@ private static func thumbnailPNGDataURL(for fileURL: URL, maxPixel: CGFloat = 90
                 lines.append(textWoAttach.trimmingCharacters(in: .whitespacesAndNewlines))
             }
 
-            let urls = extractURLs(textWoAttach)
+            let urls = enablePreviews ? extractURLs(textWoAttach) : []
             if !urls.isEmpty {
                 for u in urls { lines.append("- \(u)") }
             }
 
             for fn in attachments {
                 let p = chatURL.deletingLastPathComponent().appendingPathComponent(fn).standardizedFileURL
+
+                // Thumbnails-only mode: do not link to the full attachment in Markdown.
+                if embedAttachmentThumbnailsOnly {
+                    let n = fn.lowercased()
+                    if n.hasSuffix(".mp4") || n.hasSuffix(".mov") || n.hasSuffix(".m4v") {
+                        lines.append("- 🎬 \(fn)")
+                    } else if n.hasSuffix(".jpg") || n.hasSuffix(".jpeg") || n.hasSuffix(".png") || n.hasSuffix(".gif") || n.hasSuffix(".webp") || n.hasSuffix(".heic") || n.hasSuffix(".heif") {
+                        lines.append("- 🖼️ \(fn)")
+                    } else {
+                        lines.append("- 📎 \(fn)")
+                    }
+                    continue
+                }
 
                 let href: String? = {
                     if embedAttachments {

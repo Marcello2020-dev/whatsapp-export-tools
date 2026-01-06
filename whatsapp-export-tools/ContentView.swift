@@ -11,8 +11,58 @@ struct ContentView: View {
 
     private static let customMeTag = "__CUSTOM_ME__"
 
-    // MARK: - Theme
+    // MARK: - Export options
 
+    /// Three HTML variants, ordered by typical output size (largest → smallest).
+    private enum HTMLVariant: String, CaseIterable, Identifiable {
+        /// Largest: embed full attachments (images/videos/PDFs/etc.) into the HTML
+        case embedAll
+        /// Medium: embed only lightweight thumbnails for attachments (no full payload)
+        case thumbnailsOnly
+        /// Smallest: text-only export (no link previews, no thumbnails)
+        case textOnly
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .embedAll:
+                return "Maximal: Alles einbetten (größte Datei)"
+            case .thumbnailsOnly:
+                return "Mittel: Nur Thumbnails einbetten"
+            case .textOnly:
+                return "Minimal: Nur Text (keine Linkvorschauen, keine Thumbnails)"
+            }
+        }
+
+        /// Whether to fetch/render online link previews.
+        /// Per requirement: disabled only for the minimal text-only variant.
+        var enablePreviews: Bool {
+            switch self {
+            case .textOnly: return false
+            case .embedAll, .thumbnailsOnly: return true
+            }
+        }
+
+        /// Whether to embed any attachment representation into the HTML.
+        var embedAttachments: Bool {
+            switch self {
+            case .textOnly: return false
+            case .embedAll, .thumbnailsOnly: return true
+            }
+        }
+
+        /// If attachments are embedded, whether to embed thumbnails only (no full attachment payload).
+        var thumbnailsOnly: Bool {
+            switch self {
+            case .embedAll: return false
+            case .thumbnailsOnly: return true
+            case .textOnly: return false
+            }
+        }
+    }
+
+    // MARK: - Theme
 
     // WhatsApp-like palette (approx.)
     static let waGreen = Color(red: 0x25/255.0, green: 0xD3/255.0, blue: 0x66/255.0)   // #25D366
@@ -67,7 +117,7 @@ struct ContentView: View {
                     }
                     .opacity(0.55)
                     .allowsHitTesting(false)
-                    
+
                     // Large app icon watermark
                     Image(nsImage: ContentView.appIconNSImage)
                         .resizable()
@@ -90,10 +140,8 @@ struct ContentView: View {
     @State private var chatURL: URL?
     @State private var outBaseURL: URL?
 
-    @State private var noPreviews: Bool = false
-
-    // Default: embed attachments into HTML (single-file export)
-    @State private var embedAttachments: Bool = true
+    // HTML output variant (ordered by typical size: largest → smallest)
+    @State private var htmlVariant: HTMLVariant = .embedAll
 
     @State private var detectedParticipants: [String] = []
     @State private var meSelection: String = ""
@@ -141,11 +189,22 @@ struct ContentView: View {
                         }
                     }
 
-                    Toggle("Online-Linkvorschauen deaktivieren", isOn: $noPreviews)
-                        .toggleStyle(.switch)
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("HTML-Optionen")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(.secondary)
 
-                    Toggle("Anhänge in HTML einbetten (Ein-Datei-Export)", isOn: $embedAttachments)
-                        .toggleStyle(.switch)
+                        Picker("HTML-Variante", selection: $htmlVariant) {
+                            ForEach(HTMLVariant.allCases) { v in
+                                Text(v.title).tag(v)
+                            }
+                        }
+                        .pickerStyle(.radioGroup)
+
+                        Text("Reihenfolge nach Dateigröße: Maximal → Mittel → Minimal.")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                    }
 
                     HStack(spacing: 12) {
                         Text("Ich:")
@@ -225,7 +284,7 @@ struct ContentView: View {
                 refreshParticipants(for: u)
             }
         }
-        .frame(minWidth: 980, minHeight: 720)
+        .frame(minWidth: 980, minHeight: 780)
     }
 
     private var header: some View {
@@ -355,11 +414,7 @@ struct ContentView: View {
         appendLog("=== Export ===")
         appendLog("Chat: \(chatURL.path)")
         appendLog("Ziel: \(outDir.path)")
-        let previewsState = noPreviews ? "deaktiviert" : "aktiv"
-        let embedState = embedAttachments ? "ja" : "nein"
-
-        appendLog("Linkvorschauen: \(previewsState)")
-        appendLog("Anhänge einbetten: \(embedState)")
+        appendLog("HTML-Variante: \(htmlVariant.title)")
         appendLog("Ich: \(meTrim)")
 
         do {
@@ -367,8 +422,9 @@ struct ContentView: View {
                 chatURL: chatURL,
                 outDir: outDir,
                 meNameOverride: meTrim,
-                enablePreviews: !noPreviews,
-                embedAttachments: embedAttachments
+                enablePreviews: htmlVariant.enablePreviews,
+                embedAttachments: htmlVariant.embedAttachments,
+                embedAttachmentThumbnailsOnly: htmlVariant.thumbnailsOnly
             )
             lastResult = ExportResult(html: r.html, md: r.md)
             appendLog("OK: wrote \(r.html.lastPathComponent)")
@@ -417,7 +473,7 @@ private struct WACard: ViewModifier {
             )
             .overlay(
                 shape
-                .stroke(ContentView.waGreen.opacity(0.05), lineWidth: 1)
+                    .stroke(ContentView.waGreen.opacity(0.05), lineWidth: 1)
             )
             .shadow(color: .black.opacity(0.06), radius: 12, x: 0, y: 6)
     }
