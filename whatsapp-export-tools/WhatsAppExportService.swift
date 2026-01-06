@@ -823,6 +823,18 @@ public enum WhatsAppExportService {
         if n.hasSuffix(".m4v") { return "video/x-m4v" }
         if n.hasSuffix(".mov") { return "video/quicktime" }
 
+        // Audio
+        if n.hasSuffix(".mp3") { return "audio/mpeg" }
+        if n.hasSuffix(".m4a") { return "audio/mp4" }
+        if n.hasSuffix(".aac") { return "audio/aac" }
+        if n.hasSuffix(".wav") { return "audio/wav" }
+        if n.hasSuffix(".ogg") { return "audio/ogg" }
+        if n.hasSuffix(".opus") { return "audio/ogg" }   // Opus is typically in OGG container
+        if n.hasSuffix(".flac") { return "audio/flac" }
+        if n.hasSuffix(".caf") { return "audio/x-caf" }
+        if n.hasSuffix(".aiff") || n.hasSuffix(".aif") { return "audio/aiff" }
+        if n.hasSuffix(".amr") { return "audio/amr" }
+
         // Documents
         if n.hasSuffix(".pdf") { return "application/pdf" }
         if n.hasSuffix(".doc") { return "application/msword" }
@@ -1104,6 +1116,7 @@ private static func stageThumbnailForExport(source: URL, thumbsDir: URL) async -
     private static func attachmentEmoji(forExtension ext: String) -> String {
         let e = ext.lowercased()
         if ["mp4","mov","m4v"].contains(e) { return "🎬" }
+        if ["mp3","m4a","aac","wav","ogg","opus","flac","caf","aiff","aif","amr"].contains(e) { return "🎧" }
         if ["jpg","jpeg","png","gif","webp","heic","heif"].contains(e) { return "🖼️" }
         return "📎"
     }
@@ -1864,6 +1877,11 @@ private static func stageThumbnailForExport(source: URL, thumbsDir: URL) async -
           height:auto;
           background:#000;
         }
+        .media audio{
+          display:block;
+          width:100%;
+          height:auto;
+        }
         .media a{display:block;}
         .fileline a{color:#2a5db0;text-decoration:none;}
         .fileline a:hover{text-decoration:underline;}
@@ -1973,6 +1991,56 @@ private static func stageThumbnailForExport(source: URL, thumbsDir: URL) async -
         return false;
       }
     }
+    
+    // Create a Blob URL for an embedded base64 payload (used for inline audio/video players).
+    function waCreateEmbedURL(id){
+      try{
+        var el = document.getElementById(id);
+        if(!el) return null;
+
+        var b64 = (el.textContent || "").trim();
+        if(!b64) return null;
+
+        var mime = el.getAttribute('data-mime') || 'application/octet-stream';
+
+        // base64 -> Uint8Array
+        var bin = atob(b64);
+        var len = bin.length;
+        var bytes = new Uint8Array(len);
+        for(var i=0;i<len;i++){ bytes[i] = bin.charCodeAt(i); }
+
+        var blob = new Blob([bytes], {type: mime});
+        return URL.createObjectURL(blob);
+      } catch(e){
+        return null;
+      }
+    }
+
+    // Initialize all embedded audio/video players by wiring their src to a Blob URL.
+    // This keeps the export single-file while still giving a real mini-player.
+    function waInitEmbedPlayers(){
+      try{
+        var nodes = document.querySelectorAll('audio[data-wa-embed],video[data-wa-embed]');
+        for(var i=0;i<nodes.length;i++){
+          var n = nodes[i];
+          var id = n.getAttribute('data-wa-embed');
+          if(!id) continue;
+          var url = waCreateEmbedURL(id);
+          if(url){
+            n.src = url;
+            // Revoke later to keep memory bounded
+            setTimeout((function(u){
+              return function(){ try{ URL.revokeObjectURL(u); }catch(e){} };
+            })(url), 60 * 1000);
+          }
+        }
+      } catch(e){
+        // ignore
+      }
+    }
+
+    document.addEventListener('DOMContentLoaded', waInitEmbedPlayers);
+    
     </script>
     </head><body><div class='wrap'>
     """)
@@ -2097,7 +2165,8 @@ private static func stageThumbnailForExport(source: URL, thumbsDir: URL) async -
                 // Mode A: embed everything directly into the HTML (single-file export).
                 // Use waOpenEmbed for clickable links (no data: href).
                 if embedAttachments {
-                    // For video: store payload once (script) and open via waOpenEmbed (avoid double-embedding).
+                    // For video: store payload once (script) and show an inline player.
+                    // Keep the download link (waDownloadEmbed) as requested.
                     if ["mp4", "mov", "m4v"].contains(ext) {
                         let mime = guessMime(fromName: fn)
                         let poster = await attachmentPreviewDataURL(p)
@@ -2109,19 +2178,48 @@ private static func stageThumbnailForExport(source: URL, thumbsDir: URL) async -
                             let safeMime = htmlEscape(mime)
                             let safeName = htmlEscape(fn)
 
+                            // Store raw bytes once; player loads via Blob URL created in JS.
                             mediaBlocks.append("<script id='\(embedId)' type='application/octet-stream' data-mime='\(safeMime)' data-name='\(safeName)'>\(b64)</script>")
 
+                            var posterAttr = ""
                             if let poster {
-                                mediaBlocks.append("<div class='media'><a href='javascript:void(0)' onclick=\"return waOpenEmbed('\(embedId)')\"><img alt='' src='\(htmlEscape(poster))'></a></div>")
+                                posterAttr = " poster='\(htmlEscape(poster))'"
                             }
 
-                            mediaBlocks.append("<div class='fileline'>🎬 <a href='javascript:void(0)' onclick=\"return waOpenEmbed('\(embedId)')\">Video öffnen</a></div>")
+                            mediaBlocks.append(
+                                "<div class='media'><video controls preload='metadata' playsinline data-wa-embed='\(embedId)'\(posterAttr)></video></div>"
+                            )
                             mediaBlocks.append("<div class='fileline'>⬇︎ <a href='javascript:void(0)' onclick=\"return waDownloadEmbed('\(embedId)')\">Video speichern</a></div>")
                         } else {
                             if let poster {
                                 mediaBlocks.append("<div class='media'><img alt='' src='\(htmlEscape(poster))'></div>")
                             }
                             mediaBlocks.append("<div class='fileline'>🎬 \(htmlEscape(fn))</div>")
+                        }
+                        continue
+                    }
+                    
+                    // Audio: embed an inline mini player and keep a download link.
+                    if ["mp3","m4a","aac","wav","ogg","opus","flac","caf","aiff","aif","amr"].contains(ext) {
+                        let mime = guessMime(fromName: fn)
+
+                        if let fmData = try? Data(contentsOf: p) {
+                            embedCounter += 1
+                            let embedId = "wa-embed-\(embedCounter)"
+                            let b64 = fmData.base64EncodedString()
+                            let safeMime = htmlEscape(mime)
+                            let safeName = htmlEscape(fn)
+
+                            // Store raw bytes once; audio loads via Blob URL created in JS.
+                            mediaBlocks.append("<script id='\(embedId)' type='application/octet-stream' data-mime='\(safeMime)' data-name='\(safeName)'>\(b64)</script>")
+
+                            mediaBlocks.append(
+                                "<div class='media'><audio controls preload='metadata' data-wa-embed='\(embedId)'></audio></div>"
+                            )
+                            mediaBlocks.append("<div class='fileline'>🎧 \(htmlEscape(fn))</div>")
+                            mediaBlocks.append("<div class='fileline'>⬇︎ <a href='javascript:void(0)' onclick=\"return waDownloadEmbed('\(embedId)')\">Audio speichern</a></div>")
+                        } else {
+                            mediaBlocks.append("<div class='fileline'>🎧 \(htmlEscape(fn))</div>")
                         }
                         continue
                     }
@@ -2228,6 +2326,17 @@ private static func stageThumbnailForExport(source: URL, thumbsDir: URL) async -
                     mediaBlocks.append(
                         "<div class='media'><video controls preload='metadata' playsinline\(posterAttr)><source src='\(htmlEscape(href))' type='\(htmlEscape(mime))'>Dein Browser kann dieses Video nicht abspielen. <a href='\(htmlEscape(href))'>Video öffnen</a>.</video></div>"
                     )
+                    mediaBlocks.append("<div class='fileline'>⬇︎ <a href='\(htmlEscape(href))' download>Video herunterladen</a></div>")
+                    continue
+                }
+                
+                // Audio attachments: embed an inline mini player + keep a download link.
+                if ["mp3","m4a","aac","wav","ogg","opus","flac","caf","aiff","aif","amr"].contains(ext), let href {
+                    let mime = guessMime(fromName: fn)
+                    mediaBlocks.append(
+                        "<div class='media'><audio controls preload='metadata'><source src='\(htmlEscape(href))' type='\(htmlEscape(mime))'>Dein Browser kann dieses Audio nicht abspielen. <a href='\(htmlEscape(href))'>Audio öffnen</a>.</audio></div>"
+                    )
+                    mediaBlocks.append("<div class='fileline'>⬇︎ <a href='\(htmlEscape(href))' download>Audio herunterladen</a></div>")
                     continue
                 }
 
@@ -2385,6 +2494,8 @@ private static func stageThumbnailForExport(source: URL, thumbsDir: URL) async -
                     let n = fn.lowercased()
                     if n.hasSuffix(".mp4") || n.hasSuffix(".mov") || n.hasSuffix(".m4v") {
                         lines.append("- 🎬 \(fn)")
+                    } else if n.hasSuffix(".mp3") || n.hasSuffix(".m4a") || n.hasSuffix(".aac") || n.hasSuffix(".wav") || n.hasSuffix(".ogg") || n.hasSuffix(".opus") || n.hasSuffix(".flac") || n.hasSuffix(".caf") || n.hasSuffix(".aiff") || n.hasSuffix(".aif") || n.hasSuffix(".amr") {
+                        lines.append("- 🎧 \(fn)")
                     } else if n.hasSuffix(".jpg") || n.hasSuffix(".jpeg") || n.hasSuffix(".png") || n.hasSuffix(".gif") || n.hasSuffix(".webp") || n.hasSuffix(".heic") || n.hasSuffix(".heif") {
                         lines.append("- 🖼️ \(fn)")
                     } else {
@@ -2409,6 +2520,12 @@ private static func stageThumbnailForExport(source: URL, thumbsDir: URL) async -
                         lines.append("- 🎬 [\(fn)](\(href))")
                     } else {
                         lines.append("- 🎬 \(fn)")
+                    }
+                } else if n.hasSuffix(".mp3") || n.hasSuffix(".m4a") || n.hasSuffix(".aac") || n.hasSuffix(".wav") || n.hasSuffix(".ogg") || n.hasSuffix(".opus") || n.hasSuffix(".flac") || n.hasSuffix(".caf") || n.hasSuffix(".aiff") || n.hasSuffix(".aif") || n.hasSuffix(".amr") {
+                    if let href {
+                        lines.append("- 🎧 [\(fn)](\(href))")
+                    } else {
+                        lines.append("- 🎧 \(fn)")
                     }
                 } else if n.hasSuffix(".jpg") || n.hasSuffix(".jpeg") || n.hasSuffix(".png") || n.hasSuffix(".gif") || n.hasSuffix(".webp") || n.hasSuffix(".heic") || n.hasSuffix(".heif") {
                     if let href {
