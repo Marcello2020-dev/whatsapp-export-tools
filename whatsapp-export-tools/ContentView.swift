@@ -10,6 +10,7 @@ struct ContentView: View {
     }
 
     private static let customMeTag = "__CUSTOM_ME__"
+    
 
     // MARK: - Export options
 
@@ -149,6 +150,9 @@ struct ContentView: View {
 
     @State private var isRunning: Bool = false
     @State private var logText: String = ""
+    
+    @State private var showReplaceAlert: Bool = false
+    @State private var replaceExistingNames: [String] = []
 
     // MARK: - View
 
@@ -239,7 +243,7 @@ struct ContentView: View {
                             appendLog("ERROR: Bitte zuerst Chat-Export und Zielordner auswählen.")
                             return
                         }
-                        await runExportFlow(chatURL: chatURL, outDir: outBaseURL)
+                        await runExportFlow(chatURL: chatURL, outDir: outBaseURL, allowOverwrite: false)
                     }
                 } label: {
                     Label(isRunning ? "Läuft…" : "Exportieren", systemImage: "square.and.arrow.up")
@@ -283,6 +287,21 @@ struct ContentView: View {
             if let u = chatURL, detectedParticipants.isEmpty {
                 refreshParticipants(for: u)
             }
+        }
+        .alert("Datei bereits vorhanden", isPresented: $showReplaceAlert) {
+            Button("Abbrechen", role: .cancel) { }
+            Button("Ersetzen") {
+                Task {
+                    guard let chatURL, let outBaseURL else { return }
+                    await runExportFlow(chatURL: chatURL, outDir: outBaseURL, allowOverwrite: true)
+                }
+            }
+        } message: {
+            Text(
+                "Im Zielordner existieren bereits:\n" +
+                replaceExistingNames.joined(separator: "\n") +
+                "\n\nSoll(en) diese Datei(en) ersetzt werden?"
+            )
         }
         .frame(minWidth: 980, minHeight: 780)
     }
@@ -389,7 +408,7 @@ struct ContentView: View {
     // MARK: - Export
 
     @MainActor
-    private func runExportFlow(chatURL: URL, outDir: URL) async {
+    private func runExportFlow(chatURL: URL, outDir: URL, allowOverwrite: Bool) async {
         // outDir exists by workflow (picked by user), but creating it is harmless.
         do {
             try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
@@ -424,12 +443,22 @@ struct ContentView: View {
                 meNameOverride: meTrim,
                 enablePreviews: htmlVariant.enablePreviews,
                 embedAttachments: htmlVariant.embedAttachments,
-                embedAttachmentThumbnailsOnly: htmlVariant.thumbnailsOnly
+                embedAttachmentThumbnailsOnly: htmlVariant.thumbnailsOnly,
+                allowOverwrite: allowOverwrite
             )
             lastResult = ExportResult(html: r.html, md: r.md)
             appendLog("OK: wrote \(r.html.lastPathComponent)")
             appendLog("OK: wrote \(r.md.lastPathComponent)")
         } catch {
+            if let waErr = error as? WAExportError {
+                switch waErr {
+                case .outputAlreadyExists(let urls):
+                    replaceExistingNames = urls.map { $0.lastPathComponent }
+                    showReplaceAlert = true
+                    appendLog("WARN: Output exists → Nachfrage anzeigen.")
+                    return
+                }
+            }
             appendLog("ERROR: \(error)")
         }
     }

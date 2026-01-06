@@ -44,6 +44,19 @@ public struct WAPreview: Sendable {
     public var imageDataURL: String?
 }
 
+public enum WAExportError: Error, LocalizedError {
+    case outputAlreadyExists(urls: [URL])
+
+    public var errorDescription: String? {
+        switch self {
+        case .outputAlreadyExists(let urls):
+            if urls.isEmpty { return "Output files already exist." }
+            if urls.count == 1 { return "Output file already exists: \(urls[0].lastPathComponent)" }
+            return "Output files already exist: \(urls.map { $0.lastPathComponent }.joined(separator: ", "))"
+        }
+    }
+}
+
 // MARK: - Service
 
 public enum WhatsAppExportService {
@@ -87,7 +100,9 @@ public enum WhatsAppExportService {
             "sicherheitsnummer",
             "security code",
             "hat sich geändert",
-            "changed"
+            "changed",
+            " ist ein neuer kontakt",
+            " is a new contact",
         ]
         return needles.contains(where: { lowText.contains($0) })
     }
@@ -232,7 +247,8 @@ public enum WhatsAppExportService {
         meNameOverride: String?,
         enablePreviews: Bool,
         embedAttachments: Bool,
-        embedAttachmentThumbnailsOnly: Bool = false
+        embedAttachmentThumbnailsOnly: Bool = false,
+        allowOverwrite: Bool = false
     ) async throws -> (html: URL, md: URL) {
 
         let chatPath = chatURL.standardizedFileURL
@@ -247,7 +263,12 @@ public enum WhatsAppExportService {
             return chooseMeName(authors: authors)
         }()
 
-        let now = Date()
+        // Use the chat export file's creation date/time for the filename stamp.
+        // (The HTML header continues to use the file mtime as the export timestamp.)
+        let chatFileAttrs = (try? FileManager.default.attributesOfItem(atPath: chatPath.path)) ?? [:]
+        let chatCreatedAt = (chatFileAttrs[.creationDate] as? Date)
+            ?? (chatFileAttrs[.modificationDate] as? Date)
+            ?? Date()
 
         // Output filename parts (Finder-friendly, human-readable)
         let uniqAuthors = Array(Set(authors.map { _normSpace($0) }))
@@ -273,13 +294,30 @@ public enum WhatsAppExportService {
             return "\(start) bis \(end)"
         }()
 
-        let exportStamp = fileStampFormatter.string(from: now)
+        let createdStamp = fileStampFormatter.string(from: chatCreatedAt)
 
-        let baseRaw = "WhatsApp Chat · \(partnersPart) · \(periodPart) · Export \(exportStamp)"
+        let baseRaw = "WhatsApp Chat · \(partnersPart) · \(periodPart) · Chat.txt erstellt \(createdStamp)"
         let base = safeFinderFilename(baseRaw)
 
         let outHTML = outPath.appendingPathComponent("\(base).html")
         let outMD = outPath.appendingPathComponent("\(base).md")
+            
+            // If outputs already exist, ask the GUI to confirm replacement.
+            let fm = FileManager.default
+            var existing: [URL] = []
+            if fm.fileExists(atPath: outHTML.path) { existing.append(outHTML) }
+            if fm.fileExists(atPath: outMD.path) { existing.append(outMD) }
+
+            if !existing.isEmpty {
+                if allowOverwrite {
+                    // Remove old outputs so the subsequent atomic writes cannot collide.
+                    for u in existing {
+                        try? fm.removeItem(at: u)
+                    }
+                } else {
+                    throw WAExportError.outputAlreadyExists(urls: existing)
+                }
+            }
 
         try await renderHTML(
             msgs: msgs,
@@ -1551,6 +1589,13 @@ private static func stageThumbnailForExport(source: URL, thumbsDir: URL) async -
         // export time = file mtime
         let mtime: Date = (try? FileManager.default.attributesOfItem(atPath: chatURL.path)[.modificationDate] as? Date) ?? Date()
 
+        // message count (exclude WhatsApp system messages)
+        let messageCount: Int = msgs.reduce(0) { acc, m in
+            let authorNorm = _normSpace(m.author)
+            let textWoAttach = stripAttachmentMarkers(m.text)
+            return acc + (isSystemMessage(authorRaw: authorNorm, text: textWoAttach) ? 0 : 1)
+        }
+
         // CSS exactly from Python
         let css = #"""
         :root{
@@ -1622,14 +1667,15 @@ private static func stageThumbnailForExport(source: URL, thumbsDir: URL) async -
           overflow:hidden;
         }
         .bubble.system{
-          background: rgba(255,255,255,.70);
-          color:#333;
+          background: rgba(0,0,0,.22);
+          color: rgba(255,255,255,.95);
           font-size: 12px;
           line-height: 1.25;
           max-width: 90%;
           min-width: 0;
           padding: 8px 10px;
           text-align: center;
+          box-shadow: none;
         }
         .bubble.has-media{
           /* Prevent media messages from shrinking to min-width; keep preview/media width consistent */
@@ -1646,11 +1692,21 @@ private static func stageThumbnailForExport(source: URL, thumbsDir: URL) async -
         .text{white-space: normal; word-wrap: break-word;}
         .meta{
           margin-top: 10px;
-          text-align: right;
           font-size: 14px;
           color: #444;
           opacity: .9;
           line-height: 1.1;
+        }
+        /* Timestamp alignment: left bubbles left-aligned, right bubbles right-aligned */
+        .bubble.other .meta{ text-align: left; }
+        .bubble.me .meta{ text-align: right; }
+        .bubble.system .meta{
+          margin-top: 6px;
+          text-align: center;
+          font-size: 10px;
+          color: rgba(255,255,255,.85);
+          opacity: .85;
+          line-height: 1.05;
         }
         .media{
           margin-top: 10px;
@@ -1794,7 +1850,7 @@ private static func stageThumbnailForExport(source: URL, thumbsDir: URL) async -
         parts.append("<p class='h-title'>WhatsApp Chat<br>\(htmlEscape(titleNames))</p>")
         parts.append("<p class='h-meta'>Quelle: \(htmlEscape(chatURL.lastPathComponent))<br>"
                      + "Export: \(htmlEscape(exportDTFormatter.string(from: mtime)))<br>"
-                     + "Nachrichten: \(msgs.count)</p>")
+                     + "Nachrichten: \(messageCount)</p>")
         parts.append("</div>")
 
         var lastDayKey: String? = nil
@@ -2141,13 +2197,20 @@ private static func stageThumbnailForExport(source: URL, thumbsDir: URL) async -
 
         let mtime: Date = (try? FileManager.default.attributesOfItem(atPath: chatURL.path)[.modificationDate] as? Date) ?? Date()
 
+        // message count (exclude WhatsApp system messages)
+        let messageCount: Int = msgs.reduce(0) { acc, m in
+            let authorNorm = _normSpace(m.author)
+            let textWoAttach = stripAttachmentMarkers(m.text)
+            return acc + (isSystemMessage(authorRaw: authorNorm, text: textWoAttach) ? 0 : 1)
+        }
+
         var lines: [String] = []
         lines.append("# WhatsApp Chat: \(titleNames)")
         lines.append("")
         // Python writes full chat_path object; in Swift we mirror with full path.
         lines.append("- Quelle: \(chatURL.path)")
         lines.append("- Export (file mtime): \(exportDTFormatter.string(from: mtime))")
-        lines.append("- Nachrichten: \(msgs.count)")
+        lines.append("- Nachrichten: \(messageCount)")
         lines.append("")
 
         var lastDayKey: String? = nil
