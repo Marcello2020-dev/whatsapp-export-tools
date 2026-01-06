@@ -229,7 +229,7 @@ public enum WhatsAppExportService {
         // Preserve first-seen order
         var uniq: [String] = []
         for m in msgs {
-            let a = _normSpace(m.author)
+            let a = normalizedParticipantIdentifier(m.author)
             if a.isEmpty { continue }
             if isSystemAuthor(a) { continue }
             if !uniq.contains(a) { uniq.append(a) }
@@ -245,6 +245,7 @@ public enum WhatsAppExportService {
         chatURL: URL,
         outDir: URL,
         meNameOverride: String?,
+        participantNameOverrides: [String: String] = [:],
         enablePreviews: Bool,
         embedAttachments: Bool,
         embedAttachmentThumbnailsOnly: Bool = false,
@@ -254,12 +255,25 @@ public enum WhatsAppExportService {
         let chatPath = chatURL.standardizedFileURL
         let outPath = outDir.standardizedFileURL
 
-        let msgs = try parseMessages(chatPath)
+        var msgs = try parseMessages(chatPath)
+
+        // Apply participant name overrides (GUI: phone number -> display name),
+        // and normalize phone number representations for stable output.
+        let participantLookup = buildParticipantOverrideLookup(participantNameOverrides)
+        for i in msgs.indices {
+            let a = msgs[i].author
+            if isSystemAuthor(a) { continue }
+            msgs[i].author = applyParticipantOverride(a, lookup: participantLookup)
+        }
 
         let authors = msgs.map { $0.author }.filter { !_normSpace($0).isEmpty }
         let meName = {
-            let o = _normSpace(meNameOverride ?? "")
-            if !o.isEmpty { return o }
+            let oRaw = _normSpace(meNameOverride ?? "")
+            if !oRaw.isEmpty {
+                // If the UI selected a phone-number identity, map it to the overridden display name (if provided),
+                // otherwise normalize its representation.
+                return applyParticipantOverride(oRaw, lookup: participantLookup)
+            }
             return chooseMeName(authors: authors)
         }()
 
@@ -359,6 +373,114 @@ public enum WhatsAppExportService {
         // collapse whitespace
         x = x.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
         return x
+    }
+    
+    // ---------------------------
+    // Helpers: participant overrides (phone normalization)
+    // ---------------------------
+
+    /// Heuristic check whether a string looks like a phone-number participant label.
+    /// WhatsApp exports often use formats like "+49 171 1234567", "+491711234567", "0171 1234567".
+    private static func isPhoneCandidate(_ s: String) -> Bool {
+        let x = _normSpace(s)
+        if x.isEmpty { return false }
+
+        // Require a minimum amount of digits to avoid false positives.
+        let digitCount = x.unicodeScalars.reduce(into: 0) { acc, u in
+            if CharacterSet.decimalDigits.contains(u) { acc += 1 }
+        }
+        if digitCount < 6 { return false }
+
+        // Only allow typical phone number characters.
+        for ch in x {
+            if ch.isNumber { continue }
+            if ch == "+" || ch == " " || ch == "-" || ch == "(" || ch == ")" { continue }
+            return false
+        }
+        return true
+    }
+
+    /// Normalizes a phone-like participant string into a stable lookup key:
+    /// - removes spaces and punctuation
+    /// - keeps leading '+' if present
+    /// - converts leading "00" to '+'
+    private static func normalizePhoneKey(_ s: String) -> String {
+        let x = _normSpace(s)
+        if x.isEmpty { return "" }
+
+        var out = ""
+        out.reserveCapacity(x.count)
+
+        for ch in x {
+            if ch.isNumber {
+                out.append(ch)
+                continue
+            }
+            if ch == "+" && out.isEmpty {
+                out.append(ch)
+                continue
+            }
+        }
+
+        if out.hasPrefix("00") {
+            out = "+" + String(out.dropFirst(2))
+        }
+
+        return out
+    }
+
+    /// Normalizes participant identifiers so phone numbers are represented consistently.
+    /// If the string is not a phone candidate, it is returned unchanged (normalized whitespace only).
+    private static func normalizedParticipantIdentifier(_ s: String) -> String {
+        let x = _normSpace(s)
+        if !isPhoneCandidate(x) { return x }
+        let k = normalizePhoneKey(x)
+        return k.isEmpty ? x : k
+    }
+
+    /// Builds a lookup map that supports both raw keys and normalized phone keys.
+    /// Values are trimmed and empty values are ignored.
+    private static func buildParticipantOverrideLookup(_ overrides: [String: String]) -> [String: String] {
+        var map: [String: String] = [:]
+        map.reserveCapacity(overrides.count * 2)
+
+        for (k0, v0) in overrides {
+            let k = _normSpace(k0)
+            let v = _normSpace(v0)
+            if k.isEmpty || v.isEmpty { continue }
+
+            // Direct key.
+            map[k] = v
+
+            // Normalized phone-key (if applicable).
+            if isPhoneCandidate(k) {
+                let pk = normalizePhoneKey(k)
+                if !pk.isEmpty {
+                    map[pk] = v
+                }
+            }
+        }
+
+        return map
+    }
+
+    /// Applies participant overrides to an author label.
+    /// - If an override exists (raw or normalized phone key), return the override name.
+    /// - Otherwise, if it is phone-like, return the normalized phone representation.
+    /// - Otherwise, return the original author (normalized whitespace only).
+    private static func applyParticipantOverride(_ author: String, lookup: [String: String]) -> String {
+        let a = _normSpace(author)
+        if a.isEmpty { return author }
+
+        if let v = lookup[a], !v.isEmpty { return v }
+
+        if isPhoneCandidate(a) {
+            let pk = normalizePhoneKey(a)
+            if let v = lookup[pk], !v.isEmpty { return v }
+            if !pk.isEmpty { return pk }
+        }
+
+        return a
     }
 
     private static func stripBOMAndBidi(_ s: String) -> String {

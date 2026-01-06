@@ -148,6 +148,10 @@ struct ContentView: View {
     @State private var meSelection: String = ""
     @State private var meCustomName: String = ""
 
+    // Optional overrides for participants that appear only as phone numbers in the WhatsApp export
+    // Key = phone-number-like participant string as it appears in the export; Value = user-provided display name
+    @State private var phoneParticipantOverrides: [String: String] = [:]
+
     @State private var isRunning: Bool = false
     @State private var logText: String = ""
     
@@ -157,130 +161,162 @@ struct ContentView: View {
     // MARK: - View
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        ScrollView(.vertical) {
+            VStack(alignment: .leading, spacing: 16) {
 
-            header
+                header
+                    .waCard()
+
+                WASection(title: "Eingaben", systemImage: "bubble.left.and.bubble.right.fill") {
+                    VStack(alignment: .leading, spacing: 12) {
+
+                        Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
+                            GridRow {
+                                Text("Chat-Export:")
+                                    .frame(width: 120, alignment: .leading)
+
+                                Text(chatURL?.path ?? "—")
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                                Button("Auswählen…") { pickChatFile() }
+                                    .buttonStyle(.bordered)
+                            }
+
+                            GridRow {
+                                Text("Zielordner:")
+                                    .frame(width: 120, alignment: .leading)
+
+                                Text(outBaseURL?.path ?? "—")
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                                Button("Auswählen…") { pickOutputFolder() }
+                                    .buttonStyle(.bordered)
+                            }
+                        }
+
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("HTML-Optionen")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(.secondary)
+
+                            Picker("HTML-Variante", selection: $htmlVariant) {
+                                ForEach(HTMLVariant.allCases) { v in
+                                    Text(v.title).tag(v)
+                                }
+                            }
+                            .pickerStyle(.radioGroup)
+
+                            Text("Reihenfolge nach Dateigröße: Maximal → Mittel → Minimal.")
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+                        }
+
+                        HStack(spacing: 12) {
+                            Text("Ich:")
+                                .frame(width: 120, alignment: .leading)
+
+                            Picker("Ich", selection: $meSelection) {
+                                ForEach(detectedParticipants, id: \.self) { n in
+                                    Text(n).tag(n)
+                                }
+                                Divider()
+                                Text("Benutzerdefiniert…").tag(Self.customMeTag)
+                            }
+                            .pickerStyle(.menu)
+                            .frame(width: 240, alignment: .leading)
+
+                            if meSelection == Self.customMeTag {
+                                TextField("z. B. Marcel", text: $meCustomName)
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(minWidth: 240)
+                            }
+
+                            Spacer(minLength: 0)
+                        }
+
+                        if !phoneOnlyParticipants.isEmpty {
+                            Divider()
+                                .padding(.vertical, 4)
+
+                            VStack(alignment: .leading, spacing: 10) {
+                                Text("Unbekannte Telefonnummern (optional umbenennen)")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundStyle(.secondary)
+
+                                Text("Diese Eingabe wird nur für Teilnehmende angeboten, die im Export ausschließlich als Telefonnummer erscheinen.")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(.secondary)
+
+                                ForEach(phoneOnlyParticipants, id: \.self) { num in
+                                    HStack(spacing: 12) {
+                                        Text(num)
+                                            .font(.system(.body, design: .monospaced))
+                                            .lineLimit(1)
+                                            .truncationMode(.middle)
+                                            .frame(width: 240, alignment: .leading)
+
+                                        TextField("Name (z. B. Max Mustermann)", text: bindingForPhoneOverride(num))
+                                            .textFieldStyle(.roundedBorder)
+
+                                        Spacer(minLength: 0)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 .waCard()
 
-            WASection(title: "Eingaben", systemImage: "bubble.left.and.bubble.right.fill") {
-                VStack(alignment: .leading, spacing: 12) {
-
-                    Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
-                        GridRow {
-                            Text("Chat-Export:")
-                                .frame(width: 120, alignment: .leading)
-
-                            Text(chatURL?.path ?? "—")
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-
-                            Button("Auswählen…") { pickChatFile() }
-                                .buttonStyle(.bordered)
-                        }
-
-                        GridRow {
-                            Text("Zielordner:")
-                                .frame(width: 120, alignment: .leading)
-
-                            Text(outBaseURL?.path ?? "—")
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-
-                            Button("Auswählen…") { pickOutputFolder() }
-                                .buttonStyle(.bordered)
-                        }
-                    }
-
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("HTML-Optionen")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(.secondary)
-
-                        Picker("HTML-Variante", selection: $htmlVariant) {
-                            ForEach(HTMLVariant.allCases) { v in
-                                Text(v.title).tag(v)
+                HStack(spacing: 12) {
+                    Button {
+                        Task {
+                            guard let chatURL, let outBaseURL else {
+                                appendLog("ERROR: Bitte zuerst Chat-Export und Zielordner auswählen.")
+                                return
                             }
+                            await runExportFlow(chatURL: chatURL, outDir: outBaseURL, allowOverwrite: false)
                         }
-                        .pickerStyle(.radioGroup)
-
-                        Text("Reihenfolge nach Dateigröße: Maximal → Mittel → Minimal.")
-                            .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
+                    } label: {
+                        Label(isRunning ? "Läuft…" : "Exportieren", systemImage: "square.and.arrow.up")
                     }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(isRunning)
 
-                    HStack(spacing: 12) {
-                        Text("Ich:")
-                            .frame(width: 120, alignment: .leading)
-
-                        Picker("Ich", selection: $meSelection) {
-                            ForEach(detectedParticipants, id: \.self) { n in
-                                Text(n).tag(n)
-                            }
-                            Divider()
-                            Text("Benutzerdefiniert…").tag(Self.customMeTag)
-                        }
-                        .pickerStyle(.menu)
-                        .frame(width: 240, alignment: .leading)
-
-                        if meSelection == Self.customMeTag {
-                            TextField("z. B. Marcel", text: $meCustomName)
-                                .textFieldStyle(.roundedBorder)
-                                .frame(minWidth: 240)
-                        }
-
-                        Spacer(minLength: 0)
+                    Button {
+                        logText = ""
+                    } label: {
+                        Label("Log leeren", systemImage: "trash")
                     }
+                    .buttonStyle(.bordered)
+                    .disabled(isRunning)
+
+                    Spacer()
                 }
+
+                WASection(title: "Log", systemImage: "doc.text.magnifyingglass") {
+                    GeometryReader { geo in
+                        ScrollView([.vertical, .horizontal]) {
+                            Text(logText)
+                                .font(.system(.body, design: .monospaced))
+                                .textSelection(.enabled)
+                                .fixedSize(horizontal: true, vertical: false)
+                                .frame(maxWidth: .infinity, alignment: .topLeading)
+                                .frame(minHeight: geo.size.height, alignment: .topLeading)
+                                .padding(8)
+                        }
+                    }
+                    .frame(minHeight: 280)
+                }
+                .waCard()
+                .frame(maxHeight: .infinity)
             }
-            .waCard()
-
-            HStack(spacing: 12) {
-                Button {
-                    Task {
-                        guard let chatURL, let outBaseURL else {
-                            appendLog("ERROR: Bitte zuerst Chat-Export und Zielordner auswählen.")
-                            return
-                        }
-                        await runExportFlow(chatURL: chatURL, outDir: outBaseURL, allowOverwrite: false)
-                    }
-                } label: {
-                    Label(isRunning ? "Läuft…" : "Exportieren", systemImage: "square.and.arrow.up")
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(isRunning)
-
-                Button {
-                    logText = ""
-                } label: {
-                    Label("Log leeren", systemImage: "trash")
-                }
-                .buttonStyle(.bordered)
-                .disabled(isRunning)
-
-                Spacer()
-            }
-
-            WASection(title: "Log", systemImage: "doc.text.magnifyingglass") {
-                GeometryReader { geo in
-                    ScrollView([.vertical, .horizontal]) {
-                        Text(logText)
-                            .font(.system(.body, design: .monospaced))
-                            .textSelection(.enabled)
-                            .fixedSize(horizontal: true, vertical: false)
-                            .frame(maxWidth: .infinity, alignment: .topLeading)
-                            .frame(minHeight: geo.size.height, alignment: .topLeading)
-                            .padding(8)
-                    }
-                }
-                .frame(minHeight: 280)
-            }
-            .waCard()
-            .frame(maxHeight: .infinity)
+            .padding(20)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
         }
-        .padding(20)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .tint(Self.waGreen)
         .background(WhatsAppBackground().ignoresSafeArea())
         .onAppear {
@@ -331,6 +367,30 @@ struct ContentView: View {
             Spacer(minLength: 0)
         }
     }
+    
+    // MARK: - Phone-only participant override helpers
+
+    /// Heuristic: treat strings without letters and with enough digits as "phone-number-like".
+    private static func isPhoneNumberLike(_ s: String) -> Bool {
+        let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        if t.isEmpty { return false }
+        if t.range(of: "[A-Za-z]", options: .regularExpression) != nil { return false }
+        let digits = t.filter { $0.isNumber }
+        return digits.count >= 6
+    }
+
+    private var phoneOnlyParticipants: [String] {
+        detectedParticipants
+            .filter { Self.isPhoneNumberLike($0) }
+            .sorted()
+    }
+
+    private func bindingForPhoneOverride(_ number: String) -> Binding<String> {
+        Binding(
+            get: { phoneParticipantOverrides[number] ?? "" },
+            set: { phoneParticipantOverrides[number] = $0 }
+        )
+    }
 
     // MARK: - Pickers
 
@@ -373,6 +433,14 @@ struct ContentView: View {
             var parts = try WhatsAppExportService.participants(chatURL: chatURL)
             if parts.isEmpty { parts = ["Ich"] }
             detectedParticipants = parts
+
+            // Keep overrides only for phone-number-like participants; preserve existing typed names.
+            let phones = parts.filter { Self.isPhoneNumberLike($0) }
+            var newOverrides: [String: String] = [:]
+            for p in phones {
+                newOverrides[p] = phoneParticipantOverrides[p] ?? ""
+            }
+            phoneParticipantOverrides = newOverrides
 
             if meSelection != Self.customMeTag {
                 let cur = meSelection.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -436,11 +504,20 @@ struct ContentView: View {
         appendLog("HTML-Variante: \(htmlVariant.title)")
         appendLog("Ich: \(meTrim)")
 
+        let participantNameOverrides: [String: String] = phoneParticipantOverrides.reduce(into: [:]) { acc, kv in
+            let key = kv.key.trimmingCharacters(in: .whitespacesAndNewlines)
+            let val = kv.value.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !key.isEmpty && !val.isEmpty {
+                acc[key] = val
+            }
+        }
+
         do {
             let r = try await WhatsAppExportService.export(
                 chatURL: chatURL,
                 outDir: outDir,
                 meNameOverride: meTrim,
+                participantNameOverrides: participantNameOverrides,
                 enablePreviews: htmlVariant.enablePreviews,
                 embedAttachments: htmlVariant.embedAttachments,
                 embedAttachmentThumbnailsOnly: htmlVariant.thumbnailsOnly,
