@@ -292,10 +292,19 @@ public enum WhatsAppExportService {
         let meNorm = _normSpace(meName).lowercased()
         let partners = uniqAuthors.filter { _normSpace($0).lowercased() != meNorm }
 
-        let partnersPart: String = {
-            if partners.isEmpty { return "Unbekannt" }
-            if partners.count <= 3 { return partners.joined(separator: ", ") }
-            return partners.prefix(3).joined(separator: ", ") + " +\(partners.count - 3) weitere"
+        // File-name conversation label should include BOTH chat partners (me + others).
+        // For group chats, include up to 3 others and append a “+N weitere” suffix.
+        let convoPart: String = {
+            if partners.isEmpty {
+                return "\(meName) ↔ Unbekannt"
+            }
+            if partners.count == 1 {
+                return "\(meName) ↔ \(partners[0])"
+            }
+            if partners.count <= 3 {
+                return "\(meName) ↔ \(partners.joined(separator: ", "))"
+            }
+            return "\(meName) ↔ \(partners.prefix(3).joined(separator: ", ")) +\(partners.count - 3) weitere"
         }()
 
         let periodPart: String = {
@@ -310,7 +319,7 @@ public enum WhatsAppExportService {
 
         let createdStamp = fileStampFormatter.string(from: chatCreatedAt)
 
-        let baseRaw = "WhatsApp Chat · \(partnersPart) · \(periodPart) · Chat.txt erstellt \(createdStamp)"
+        let baseRaw = "WhatsApp Chat · \(convoPart) · \(periodPart) · Chat.txt erstellt \(createdStamp)"
         let base = safeFinderFilename(baseRaw)
 
         let outHTML = outPath.appendingPathComponent("\(base).html")
