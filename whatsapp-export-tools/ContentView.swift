@@ -5,8 +5,9 @@ import UniformTypeIdentifiers
 struct ContentView: View {
 
     private struct ExportResult: Sendable {
-        let html: URL
-        let md: URL
+        let primaryHTML: URL?
+        let htmls: [URL]
+        let md: URL?
     }
 
     private static let customMeTag = "__CUSTOM_ME__"
@@ -33,6 +34,15 @@ struct ContentView: View {
                 return "Mittel: Nur Thumbnails einbetten"
             case .textOnly:
                 return "Minimal: Nur Text (keine Linkvorschauen, keine Thumbnails)"
+            }
+        }
+        
+        /// Suffix appended to the HTML filename (before extension)
+        var fileSuffix: String {
+            switch self {
+            case .embedAll: return "__max"
+            case .thumbnailsOnly: return "__mid"
+            case .textOnly: return "__min"
             }
         }
 
@@ -141,11 +151,15 @@ struct ContentView: View {
     @State private var chatURL: URL?
     @State private var outBaseURL: URL?
 
-    // HTML output variant (ordered by typical output size: largest → smallest)
-    @State private var htmlVariant: HTMLVariant = .embedAll
+    // Independent export toggles (default: all enabled)
+    @State private var exportHTMLMax: Bool = true
+    @State private var exportHTMLMid: Bool = true
+    @State private var exportHTMLMin: Bool = true
+    @State private var exportMarkdown: Bool = true
     
-    // NEW: Create a separate, sorted attachments folder next to the HTML/MD export
-    @State private var exportSortedAttachments: Bool = false
+    // NEW: Optional "Sidecar" folder export (sorted attachments) next to the HTML/MD export.
+    // IMPORTANT: HTML outputs must remain standalone and must NOT depend on the Sidecar folder.
+    @State private var exportSortedAttachments: Bool = true
 
     @State private var detectedParticipants: [String] = []
     @State private var meSelection: String = ""
@@ -202,25 +216,30 @@ struct ContentView: View {
                         }
 
                         VStack(alignment: .leading, spacing: 10) {
-                            Text("HTML-Optionen")
+                            Text("Ausgaben")
                                 .font(.system(size: 13, weight: .semibold))
                                 .foregroundStyle(.secondary)
 
-                            Picker("HTML-Variante", selection: $htmlVariant) {
-                                ForEach(HTMLVariant.allCases) { v in
-                                    Text(v.title).tag(v)
-                                }
-                            }
-                            .pickerStyle(.radioGroup)
+                            Toggle("HTML __max (Maximal: Alles einbetten)", isOn: $exportHTMLMax)
+                                .disabled(isRunning)
+                            Toggle("HTML __mid (Mittel: Nur Thumbnails)", isOn: $exportHTMLMid)
+                                .disabled(isRunning)
+                            Toggle("HTML __min (Minimal: Nur Text)", isOn: $exportHTMLMin)
+                                .disabled(isRunning)
+                            Toggle("Markdown (.md)", isOn: $exportMarkdown)
+                                .disabled(isRunning)
 
-                            Text("Reihenfolge nach Dateigröße: Maximal → Mittel → Minimal.")
+                            Text("Jede Ausgabe ist unabhängig aktivierbar. Standard: alles aktiviert (inkl. Sidecar).")
                                 .font(.system(size: 12))
                                 .foregroundStyle(.secondary)
 
-                            Toggle("Attachments zusätzlich sortiert exportieren (Ordnerstruktur neben HTML/MD)", isOn: $exportSortedAttachments)
+                            Divider()
+                                .padding(.vertical, 2)
+
+                            Toggle("Sidecar exportieren (optional, unabhängig von HTML/MD)", isOn: $exportSortedAttachments)
                                 .disabled(isRunning)
 
-                            Text("Erzeugt im Zielordner einen Ordner mit gleichem Namen wie HTML/MD und kopiert Attachments aus der WhatsApp-Quelle sortiert in Unterordner (videos/audios/documents). Dateinamen beginnen mit YYYY-MM-DD und behalten die WhatsApp-ID.")
+                            Text("Erzeugt im Zielordner einen zusätzlichen Sidecar-Ordner und kopiert Attachments aus der WhatsApp-Quelle sortiert in Unterordner (videos/audios/documents). Dateinamen beginnen mit YYYY-MM-DD und behalten die WhatsApp-ID. Die HTML-Dateien bleiben vollständig standalone (keine Abhängigkeit vom Sidecar).")
                                 .font(.system(size: 12))
                                 .foregroundStyle(.secondary)
                         }
@@ -511,9 +530,28 @@ struct ContentView: View {
         appendLog("=== Export ===")
         appendLog("Chat: \(chatURL.path)")
         appendLog("Ziel: \(outDir.path)")
-        appendLog("HTML-Variante: \(htmlVariant.title)")
+        
+        let selectedVariantsInOrder: [HTMLVariant] = [
+            exportHTMLMax ? .embedAll : nil,
+            exportHTMLMid ? .thumbnailsOnly : nil,
+            exportHTMLMin ? .textOnly : nil
+        ].compactMap { $0 }
+
+        let wantsMD = exportMarkdown
+        let wantsSidecar = exportSortedAttachments
+
+        let htmlLabel: String = {
+            var parts: [String] = []
+            if exportHTMLMax { parts.append("__max") }
+            if exportHTMLMid { parts.append("__mid") }
+            if exportHTMLMin { parts.append("__min") }
+            return parts.isEmpty ? "AUS" : parts.joined(separator: ", ")
+        }()
+
+        appendLog("HTML: \(htmlLabel)")
+        appendLog("Markdown: \(wantsMD ? "AN" : "AUS")")
+        appendLog("Sidecar: \(wantsSidecar ? "AN" : "AUS")")
         appendLog("Ich: \(meTrim)")
-        appendLog("Attachment-Sortierung: \(exportSortedAttachments ? "AN" : "AUS")")
 
         let participantNameOverrides: [String: String] = phoneParticipantOverrides.reduce(into: [:]) { acc, kv in
             let key = kv.key.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -523,21 +561,150 @@ struct ContentView: View {
             }
         }
 
+        if selectedVariantsInOrder.isEmpty && !wantsMD && !wantsSidecar {
+            appendLog("ERROR: Bitte mindestens eine Ausgabe aktivieren (HTML, Markdown oder Sidecar).")
+            return
+        }
+        
         do {
-            let r = try await WhatsAppExportService.export(
+            let fm = FileManager.default
+
+            func makeTempDir() throws -> URL {
+                let tmp = outDir.appendingPathComponent(".wa_export_tmp_\(UUID().uuidString)", isDirectory: true)
+                try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
+                return tmp
+            }
+
+            func htmlDestURL(baseHTMLName: String, variant: HTMLVariant) -> URL {
+                let ext = (baseHTMLName as NSString).pathExtension
+                let stem = (baseHTMLName as NSString).deletingPathExtension
+                let name: String
+                if ext.isEmpty {
+                    name = stem + variant.fileSuffix
+                } else {
+                    name = stem + variant.fileSuffix + "." + ext
+                }
+                return outDir.appendingPathComponent(name)
+            }
+
+            // Probe once to learn the base filenames produced by the service (no sidecar).
+            let probeDir = try makeTempDir()
+            defer { try? fm.removeItem(at: probeDir) }
+
+            let probe = try await WhatsAppExportService.export(
+                chatURL: chatURL,
+                outDir: probeDir,
+                meNameOverride: meTrim,
+                participantNameOverrides: participantNameOverrides,
+                enablePreviews: true,
+                embedAttachments: true,
+                embedAttachmentThumbnailsOnly: false,
+                exportSortedAttachments: false,
+                allowOverwrite: true
+            )
+
+            let baseHTMLName = probe.html.lastPathComponent
+            let baseMDName = probe.md.lastPathComponent
+
+            let plannedHTMLs: [URL] = selectedVariantsInOrder.map { htmlDestURL(baseHTMLName: baseHTMLName, variant: $0) }
+            let plannedMD: URL? = wantsMD ? outDir.appendingPathComponent(baseMDName) : nil
+
+            if !allowOverwrite {
+                var existing: [URL] = []
+                existing.append(contentsOf: plannedHTMLs.filter { fm.fileExists(atPath: $0.path) })
+                if let md = plannedMD, fm.fileExists(atPath: md.path) {
+                    existing.append(md)
+                }
+                if !existing.isEmpty {
+                    throw WAExportError.outputAlreadyExists(urls: existing)
+                }
+            } else {
+                for u in plannedHTMLs where fm.fileExists(atPath: u.path) { try? fm.removeItem(at: u) }
+                if let md = plannedMD, fm.fileExists(atPath: md.path) { try? fm.removeItem(at: md) }
+            }
+
+            // Choose a primary variant for the outDir run.
+            // Needed for Sidecar and/or Markdown, or for the first selected HTML.
+            let primaryVariant: HTMLVariant = selectedVariantsInOrder.first ?? .textOnly
+
+            // Run once into outDir so Sidecar (if enabled) lands in the target folder.
+            let first = try await WhatsAppExportService.export(
                 chatURL: chatURL,
                 outDir: outDir,
                 meNameOverride: meTrim,
                 participantNameOverrides: participantNameOverrides,
-                enablePreviews: htmlVariant.enablePreviews,
-                embedAttachments: htmlVariant.embedAttachments,
-                embedAttachmentThumbnailsOnly: htmlVariant.thumbnailsOnly,
-                exportSortedAttachments: exportSortedAttachments,
+                enablePreviews: primaryVariant.enablePreviews,
+                embedAttachments: primaryVariant.embedAttachments,
+                embedAttachmentThumbnailsOnly: primaryVariant.thumbnailsOnly,
+                exportSortedAttachments: wantsSidecar,
                 allowOverwrite: allowOverwrite
             )
-            lastResult = ExportResult(html: r.html, md: r.md)
-            appendLog("OK: wrote \(r.html.lastPathComponent)")
-            appendLog("OK: wrote \(r.md.lastPathComponent)")
+
+            var htmlByVariant: [HTMLVariant: URL] = [:]
+
+            // Handle HTML created by the outDir run
+            if selectedVariantsInOrder.contains(primaryVariant) {
+                let dest = htmlDestURL(baseHTMLName: baseHTMLName, variant: primaryVariant)
+                if allowOverwrite, fm.fileExists(atPath: dest.path) { try? fm.removeItem(at: dest) }
+                try fm.moveItem(at: first.html, to: dest)
+                htmlByVariant[primaryVariant] = dest
+            } else {
+                // HTML not requested -> delete the generated base HTML
+                if fm.fileExists(atPath: first.html.path) {
+                    try? fm.removeItem(at: first.html)
+                }
+            }
+
+            // Handle Markdown created by the outDir run
+            var finalMD: URL? = nil
+            if wantsMD {
+                finalMD = first.md
+            } else {
+                if fm.fileExists(atPath: first.md.path) {
+                    try? fm.removeItem(at: first.md)
+                }
+            }
+
+            // Export remaining selected HTML variants into temp folders (no sidecar duplicates)
+            for v in selectedVariantsInOrder where v != primaryVariant {
+                let tmp = try makeTempDir()
+                defer { try? fm.removeItem(at: tmp) }
+
+                let r = try await WhatsAppExportService.export(
+                    chatURL: chatURL,
+                    outDir: tmp,
+                    meNameOverride: meTrim,
+                    participantNameOverrides: participantNameOverrides,
+                    enablePreviews: v.enablePreviews,
+                    embedAttachments: v.embedAttachments,
+                    embedAttachmentThumbnailsOnly: v.thumbnailsOnly,
+                    exportSortedAttachments: false,
+                    allowOverwrite: true
+                )
+
+                let dest = htmlDestURL(baseHTMLName: baseHTMLName, variant: v)
+                if allowOverwrite, fm.fileExists(atPath: dest.path) { try? fm.removeItem(at: dest) }
+                try fm.moveItem(at: r.html, to: dest)
+                htmlByVariant[v] = dest
+            }
+
+            // Stable order for result/logging
+            let ordered: [HTMLVariant] = [.embedAll, .thumbnailsOnly, .textOnly]
+            let htmls: [URL] = ordered.compactMap { htmlByVariant[$0] }
+            let primaryHTML: URL? = htmlByVariant[.embedAll] ?? htmls.first
+
+            lastResult = ExportResult(primaryHTML: primaryHTML, htmls: htmls, md: finalMD)
+
+            if htmls.isEmpty {
+                appendLog("OK: HTML: AUS")
+            } else {
+                for u in htmls { appendLog("OK: wrote \(u.lastPathComponent)") }
+            }
+            if let md = finalMD {
+                appendLog("OK: wrote \(md.lastPathComponent)")
+            } else {
+                appendLog("OK: Markdown: AUS")
+            }
         } catch {
             if let waErr = error as? WAExportError {
                 switch waErr {

@@ -57,6 +57,55 @@ public enum WAExportError: Error, LocalizedError {
     }
 }
 
+public enum HTMLVariant: String, CaseIterable, Hashable, Sendable {
+    case embedAll        // größte Datei
+    case thumbnailsOnly  // mittel
+    case textOnly        // kleinste Datei
+
+    public var filenameSuffix: String {
+        switch self {
+        case .embedAll: return "__max"
+        case .thumbnailsOnly: return "__mid"
+        case .textOnly: return "__min"
+        }
+    }
+
+    // Vorgabe: Previews nur bei textOnly aus.
+    public var enablePreviews: Bool {
+        switch self {
+        case .textOnly: return false
+        case .embedAll, .thumbnailsOnly: return true
+        }
+    }
+
+    public var embedAttachments: Bool {
+        switch self {
+        case .textOnly: return false
+        case .embedAll, .thumbnailsOnly: return true
+        }
+    }
+
+    public var embedAttachmentThumbnailsOnly: Bool {
+        switch self {
+        case .embedAll: return false
+        case .thumbnailsOnly: return true
+        case .textOnly: return false
+        }
+    }
+}
+
+public struct ExportMultiResult: Sendable {
+    public let htmlByVariant: [HTMLVariant: URL]
+    public let md: URL
+
+    public var primaryHTML: URL {
+        if let u = htmlByVariant[.embedAll] { return u }
+        if let u = htmlByVariant[.thumbnailsOnly] { return u }
+        return htmlByVariant.values.sorted { $0.lastPathComponent < $1.lastPathComponent }.first!
+    }
+}
+
+
 // MARK: - Service
 
 public enum WhatsAppExportService {
@@ -214,6 +263,12 @@ public enum WhatsAppExportService {
     // Cache for staged attachments (source path -> (relHref, stagedURL)) to avoid duplicate copies.
     private static let stagedAttachmentLock = NSLock()
     private static var stagedAttachmentMap: [String: (relHref: String, stagedURL: URL)] = [:]
+    
+    private static func resetStagedAttachmentCache() {
+        stagedAttachmentLock.lock()
+        stagedAttachmentMap.removeAll(keepingCapacity: true)
+        stagedAttachmentLock.unlock()
+    }
 
     // ---------------------------
     // Public API
@@ -376,6 +431,156 @@ public enum WhatsAppExportService {
         }
 
         return (outHTML, outMD)
+    }
+    
+    /// Multi-Export: erzeugt alle HTML-Varianten (__max/__mid/__min) + eine MD-Datei.
+    public static func exportMulti(
+        chatURL: URL,
+        outDir: URL,
+        meNameOverride: String?,
+        participantNameOverrides: [String: String] = [:],
+        variants: [HTMLVariant] = HTMLVariant.allCases,
+        exportSortedAttachments: Bool = false,
+        allowOverwrite: Bool = false
+    ) async throws -> ExportMultiResult {
+
+        // Wichtig: staged-Map zurücksetzen (sonst können alte relHref-Ziele „kleben bleiben“)
+        resetStagedAttachmentCache()
+
+        let chatPath = chatURL.standardizedFileURL
+        let outPath = outDir.standardizedFileURL
+
+        var msgs = try parseMessages(chatPath)
+
+        // Apply participant overrides (phone normalization etc.)
+        let participantLookup = buildParticipantOverrideLookup(participantNameOverrides)
+        for i in msgs.indices {
+            let a = msgs[i].author
+            if isSystemAuthor(a) { continue }
+            msgs[i].author = applyParticipantOverride(a, lookup: participantLookup)
+        }
+
+        let authors = msgs.map { $0.author }.filter { !_normSpace($0).isEmpty }
+
+        let meName = {
+            let oRaw = _normSpace(meNameOverride ?? "")
+            if !oRaw.isEmpty {
+                return applyParticipantOverride(oRaw, lookup: participantLookup)
+            }
+            return chooseMeName(authors: authors)
+        }()
+
+        // Use creation date for filename stamp
+        let chatFileAttrs = (try? FileManager.default.attributesOfItem(atPath: chatPath.path)) ?? [:]
+        let chatCreatedAt = (chatFileAttrs[.creationDate] as? Date)
+            ?? (chatFileAttrs[.modificationDate] as? Date)
+            ?? Date()
+
+        // Build filename parts (wie in export(...))
+        let uniqAuthors = Array(Set(authors.map { _normSpace($0) }))
+            .filter { !$0.isEmpty && !isSystemAuthor($0) }
+            .sorted()
+
+        let meNorm = _normSpace(meName).lowercased()
+        let partners = uniqAuthors.filter { _normSpace($0).lowercased() != meNorm }
+
+        let convoPart: String = {
+            if partners.isEmpty {
+                return "\(meName) ↔ Unbekannt"
+            }
+            if partners.count == 1 {
+                return "\(meName) ↔ \(partners[0])"
+            }
+            if partners.count <= 3 {
+                return "\(meName) ↔ \(partners.joined(separator: ", "))"
+            }
+            return "\(meName) ↔ \(partners.prefix(3).joined(separator: ", ")) +\(partners.count - 3) weitere"
+        }()
+
+        let periodPart: String = {
+            guard let minD = msgs.min(by: { $0.ts < $1.ts })?.ts,
+                  let maxD = msgs.max(by: { $0.ts < $1.ts })?.ts else {
+                return "Keine Nachrichten"
+            }
+            let start = fileDateOnlyFormatter.string(from: minD)
+            let end = fileDateOnlyFormatter.string(from: maxD)
+            return "\(start) bis \(end)"
+        }()
+
+        let createdStamp = fileStampFormatter.string(from: chatCreatedAt)
+
+        let baseRaw = "WhatsApp Chat · \(convoPart) · \(periodPart) · Chat.txt erstellt \(createdStamp)"
+        let base = safeFinderFilename(baseRaw)
+
+        // Output URLs
+        var htmlByVariant: [HTMLVariant: URL] = [:]
+        htmlByVariant.reserveCapacity(variants.count)
+
+        for v in variants {
+            let u = outPath.appendingPathComponent("\(base)\(v.filenameSuffix).html")
+            htmlByVariant[v] = u
+        }
+
+        // Empfehlung: Markdown immer „portable“ mit attachments/ Links
+        let outMD = outPath.appendingPathComponent("\(base).md")
+
+        // Sorted attachments folder (optional)
+        let sortedFolderURL = outPath.appendingPathComponent(base, isDirectory: true)
+
+        // Existence check (wie in export(...), aber für alle Varianten)
+        let fm = FileManager.default
+        var existing: [URL] = []
+
+        for (_, u) in htmlByVariant {
+            if fm.fileExists(atPath: u.path) { existing.append(u) }
+        }
+        if fm.fileExists(atPath: outMD.path) { existing.append(outMD) }
+        if exportSortedAttachments && fm.fileExists(atPath: sortedFolderURL.path) { existing.append(sortedFolderURL) }
+
+        if !existing.isEmpty {
+            if allowOverwrite {
+                for u in existing { try? fm.removeItem(at: u) }
+            } else {
+                throw WAExportError.outputAlreadyExists(urls: existing)
+            }
+        }
+
+        // Render all HTML variants
+        for v in variants {
+            guard let outHTML = htmlByVariant[v] else { continue }
+            try await renderHTML(
+                msgs: msgs,
+                chatURL: chatPath,
+                outHTML: outHTML,
+                meName: meName,
+                enablePreviews: v.enablePreviews,
+                embedAttachments: v.embedAttachments,
+                embedAttachmentThumbnailsOnly: v.embedAttachmentThumbnailsOnly
+            )
+        }
+
+        // Render one Markdown (portable)
+        try renderMD(
+            msgs: msgs,
+            chatURL: chatPath,
+            outMD: outMD,
+            meName: meName,
+            enablePreviews: true,
+            embedAttachments: false,
+            embedAttachmentThumbnailsOnly: false
+        )
+
+        if exportSortedAttachments {
+            try exportSortedAttachmentsFolder(
+                chatURL: chatPath,
+                messages: msgs,
+                outDir: outPath,
+                folderName: base,
+                allowOverwrite: allowOverwrite
+            )
+        }
+
+        return ExportMultiResult(htmlByVariant: htmlByVariant, md: outMD)
     }
 
     // ---------------------------
@@ -2871,6 +3076,13 @@ private static func stageThumbnailForExport(source: URL, thumbsDir: URL) async -
             // best-effort: ignore copy errors
         }
     }
-
+    
+    private static func withHTMLSuffix(_ htmlURL: URL, suffix: String) -> URL {
+        let ext = htmlURL.pathExtension
+        let base = htmlURL.deletingPathExtension().lastPathComponent
+        let dir = htmlURL.deletingLastPathComponent()
+        let newName = base + suffix + "." + ext
+        return dir.appendingPathComponent(newName, isDirectory: false)
+    }
 }
 
