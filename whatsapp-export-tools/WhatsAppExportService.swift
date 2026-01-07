@@ -308,6 +308,9 @@ public enum WhatsAppExportService {
         allowOverwrite: Bool = false
     ) async throws -> (html: URL, md: URL) {
 
+        // Wichtig: staged-Map zurücksetzen (sonst können alte relHref-Ziele „kleben bleiben“)
+        resetStagedAttachmentCache()
+
         let chatPath = chatURL.standardizedFileURL
         let outPath = outDir.standardizedFileURL
 
@@ -1186,6 +1189,31 @@ public enum WhatsAppExportService {
         let stripped = attachRe.stringByReplacingMatches(in: text, options: [], range: range, withTemplate: "")
         return stripped.trimmingCharacters(in: .whitespacesAndNewlines)
     }
+    
+    /// For text-only exports, keep chat bubbles non-empty when the original message only contained attachments.
+    /// Returns a human-readable placeholder containing the original filenames (as referenced in the WhatsApp export).
+    private static func attachmentPlaceholderText(forAttachments fns: [String]) -> String {
+        guard !fns.isEmpty else { return "" }
+
+        func kindLabel(for fn: String) -> String {
+            let ext = (fn as NSString).pathExtension.lowercased()
+            if ["jpg","jpeg","png","gif","webp","heic","heif","tiff","tif","bmp"].contains(ext) { return "Bild" }
+            if ["mp4","mov","m4v","mkv","webm","avi","3gp"].contains(ext) { return "Video" }
+            if ["m4a","mp3","wav","aac","caf","ogg","opus","flac","amr","aiff","aif"].contains(ext) { return "Audio" }
+            return "Dokument"
+        }
+
+        var lines: [String] = []
+        lines.reserveCapacity(fns.count)
+
+        for fn in fns {
+            let ext = (fn as NSString).pathExtension
+            let emoji = attachmentEmoji(forExtension: ext)
+            lines.append("\(emoji) \(kindLabel(for: fn)): \(fn)")
+        }
+
+        return lines.joined(separator: "\n")
+    }
 
     private static func guessMime(fromName name: String) -> String {
         let n = name.lowercased()
@@ -1262,48 +1290,32 @@ public enum WhatsAppExportService {
         }
     }
 
-    /// Copies a local attachment into the export folder (./attachments) and returns a relative href.
-    /// This makes the exported HTML/MD portable across macOS/Windows and browsers.
-    private static func stageAttachmentForExport(source: URL, attachmentsDir: URL) -> (relHref: String, stagedURL: URL)? {
+    /// Returns an href for an attachment without staging/copying it into an extra output folder.
+    ///
+    /// Rationale: The WhatsApp export already ships the media next to `chat.txt` (or inside `Media`).
+    /// Creating an additional `./attachments` folder next to the sidecar output is redundant and can
+    /// confuse the user. Therefore we reference the existing file in-place via its file URL.
+    ///
+    /// NOTE: This keeps the HTML working locally. If you need fully portable exports later,
+    /// re-introduce staging into a dedicated sidecar folder (not a sibling `attachments` folder).
+    private static func stageAttachmentForExport(source: URL, attachmentsDir _: URL) -> (relHref: String, stagedURL: URL)? {
         let fm = FileManager.default
         let src = source.standardizedFileURL
         guard fm.fileExists(atPath: src.path) else { return nil }
 
-        // Dedupe: if we already staged this exact source path, return the same staged reference.
+        // Dedupe: if we already staged this exact source path, return the same reference.
         stagedAttachmentLock.lock()
         if let cached = stagedAttachmentMap[src.path] {
             stagedAttachmentLock.unlock()
             return (relHref: cached.relHref, stagedURL: cached.stagedURL)
         }
+
+        // No staging/copying: reference the original file.
+        let href = src.absoluteURL.absoluteString
+        stagedAttachmentMap[src.path] = (relHref: href, stagedURL: src)
         stagedAttachmentLock.unlock()
 
-        do {
-            try ensureDirectory(attachmentsDir)
-
-            var dest = attachmentsDir.appendingPathComponent(src.lastPathComponent)
-            dest = uniqueDestinationURL(dest)
-
-            if !fm.fileExists(atPath: dest.path) {
-                try fm.copyItem(at: src, to: dest)
-            }
-
-            let rel = "attachments/\(urlPathEscapeComponent(dest.lastPathComponent))"
-
-            stagedAttachmentLock.lock()
-            stagedAttachmentMap[src.path] = (relHref: rel, stagedURL: dest)
-            stagedAttachmentLock.unlock()
-
-            return (relHref: rel, stagedURL: dest)
-        } catch {
-            // If staging fails, fall back to using the original absolute file URL.
-            let rel = src.absoluteURL.absoluteString
-
-            stagedAttachmentLock.lock()
-            stagedAttachmentMap[src.path] = (relHref: rel, stagedURL: src)
-            stagedAttachmentLock.unlock()
-
-            return (relHref: rel, stagedURL: src)
-        }
+        return (relHref: href, stagedURL: src)
     }
 
 
@@ -1426,11 +1438,12 @@ private static func stageThumbnailForExport(source: URL, thumbsDir: URL) async -
         try ensureDirectory(thumbsDir)
 
         // Prefer a .jpg thumbnail to keep size down.
+        // IMPORTANT: Use a deterministic destination name so repeated runs reuse the same file
+        // instead of creating endless "(2)", "(3)", ... duplicates.
         let baseName = src.deletingPathExtension().lastPathComponent
-        var dest = thumbsDir.appendingPathComponent(baseName).appendingPathExtension("jpg")
-        dest = uniqueDestinationURL(dest)
+        let dest = thumbsDir.appendingPathComponent(baseName).appendingPathExtension("jpg")
 
-        // If a thumbnail already exists (same chosen dest), reuse it.
+        // If a thumbnail already exists, reuse it.
         if fm.fileExists(atPath: dest.path) {
             return "attachments/_thumbs/\(urlPathEscapeComponent(dest.lastPathComponent))"
         }
@@ -2450,6 +2463,7 @@ private static func stageThumbnailForExport(source: URL, thumbsDir: URL) async -
             // or explicitly render thumbnails-only.
             let attachments = (embedAttachments || embedAttachmentThumbnailsOnly) ? findAttachments(textRaw) : []
             let textWoAttach = stripAttachmentMarkers(textRaw)
+            let attachmentsAll = findAttachments(textRaw)
 
             let isSystemMsg = isSystemMessage(authorRaw: authorRaw, text: textWoAttach)
 
@@ -2458,16 +2472,20 @@ private static func stageThumbnailForExport(source: URL, thumbsDir: URL) async -
             let bubCls: String = isSystemMsg ? "system" : (isMe ? "me" : "other")
 
             let trimmedText = textWoAttach.trimmingCharacters(in: .whitespacesAndNewlines)
-            // Minimal mode (no previews): do not extract URLs for link lines/previews, and do not treat
-            // URL-only messages as empty bubble text.
             let urls = enablePreviews ? extractURLs(trimmedText) : []
             let urlOnly = enablePreviews ? isURLOnlyText(trimmedText) : false
 
-            // If the message is just a URL (or a list of URLs), avoid printing the raw URL(s) again as bubble text.
             let textHTML: String = {
                 if urlOnly { return "" }
+
+                // WICHTIG: Text-only Export soll Attachments sichtbar lassen
+                if trimmedText.isEmpty, !embedAttachments, !embedAttachmentThumbnailsOnly, !attachmentsAll.isEmpty {
+                    return htmlEscapeKeepNewlines(attachmentPlaceholderText(forAttachments: attachmentsAll))
+                }
+
                 if trimmedText.isEmpty { return "" }
-                // In the smallest variant (previews disabled), URLs should still be real clickable links.
+
+                // In der kleinsten Variante (Previews aus) URLs klickbar machen
                 return htmlEscapeAndLinkifyKeepNewlines(trimmedText, linkify: !enablePreviews)
             }()
 
@@ -2631,7 +2649,7 @@ private static func stageThumbnailForExport(source: URL, thumbsDir: URL) async -
                             let safeName = htmlEscape(fn)
                             mediaBlocks.append("<script id='\(embedId)' type='application/octet-stream' data-mime='\(safeMime)' data-name='\(safeName)'>\(b64)</script>")
                             mediaBlocks.append("<div class='fileline'>📎 <a href='javascript:void(0)' onclick=\"return waOpenEmbed('\(embedId)')\">\(htmlEscape(fn))</a></div>")
-                            mediaBlocks.append("<div class='fileline'>⬇︎ <a href='javascript:void(0)' onclick=\"return waDownloadEmbed('\\(embedId)')\">Datei speichern</a></div>")
+                            mediaBlocks.append("<div class='fileline'>⬇︎ <a href='javascript:void(0)' onclick=\"return waDownloadEmbed('\(embedId)')\">Datei speichern</a></div>")
                         } else {
                             mediaBlocks.append("<div class='fileline'>📎 \(htmlEscape(fn))</div>")
                         }
@@ -2678,7 +2696,7 @@ private static func stageThumbnailForExport(source: URL, thumbsDir: URL) async -
                         let safeName = htmlEscape(fn)
                         mediaBlocks.append("<script id='\(embedId)' type='application/octet-stream' data-mime='\(safeMime)' data-name='\(safeName)'>\(b64)</script>")
                         mediaBlocks.append("<div class='fileline'>📎 <a href='javascript:void(0)' onclick=\"return waOpenEmbed('\(embedId)')\">\(htmlEscape(fn))</a></div>")
-                        mediaBlocks.append("<div class='fileline'>⬇︎ <a href='javascript:void(0)' onclick=\"return waDownloadEmbed('\\(embedId)')\">Datei speichern</a></div>")
+                        mediaBlocks.append("<div class='fileline'>⬇︎ <a href='javascript:void(0)' onclick=\"return waDownloadEmbed('\(embedId)')\">Datei speichern</a></div>")
                     } else {
                         mediaBlocks.append("<div class='fileline'>📎 \(htmlEscape(fn))</div>")
                     }
@@ -2815,114 +2833,116 @@ private static func stageThumbnailForExport(source: URL, thumbsDir: URL) async -
 
         let mtime: Date = (try? FileManager.default.attributesOfItem(atPath: chatURL.path)[.modificationDate] as? Date) ?? Date()
 
-        // message count (exclude WhatsApp system messages)
         let messageCount: Int = msgs.reduce(0) { acc, m in
             let authorNorm = _normSpace(m.author)
             let textWoAttach = stripAttachmentMarkers(m.text)
             return acc + (isSystemMessage(authorRaw: authorNorm, text: textWoAttach) ? 0 : 1)
         }
 
-        var lines: [String] = []
-        lines.append("# WhatsApp Chat: \(titleNames)")
-        lines.append("")
-        // Python writes full chat_path object; in Swift we mirror with full path.
-        lines.append("- Quelle: \(chatURL.path)")
-        lines.append("- Export (file mtime): \(exportDTFormatter.string(from: mtime))")
-        lines.append("- Nachrichten: \(messageCount)")
-        lines.append("")
+        var out: [String] = []
+        out.reserveCapacity(max(256, msgs.count * 3))
+
+        out.append("# WhatsApp Chat")
+        out.append("")
+        out.append("**\(titleNames)**")
+        out.append("")
+        out.append("- Quelle: \(chatURL.lastPathComponent)")
+        out.append("- Export: \(exportDTFormatter.string(from: mtime))")
+        out.append("- Nachrichten: \(messageCount)")
+        out.append("")
 
         var lastDayKey: String? = nil
-        let exportAttachmentsDir: URL? = embedAttachments
-            ? nil
-            : outMD.deletingLastPathComponent().appendingPathComponent("attachments", isDirectory: true)
+        let sourceDir = chatURL.deletingLastPathComponent().standardizedFileURL
+        let attachmentsDir = outMD.deletingLastPathComponent().appendingPathComponent("attachments", isDirectory: true)
 
         for m in msgs {
             let dayKey = isoDateOnly(m.ts)
             if lastDayKey != dayKey {
                 let wd = weekdayDE[weekdayIndexMonday0(m.ts)] ?? ""
-                lines.append("## \(wd), \(fmtDateFull(m.ts))")
-                lines.append("")
+                out.append("## \(wd), \(fmtDateFull(m.ts))")
+                out.append("")
                 lastDayKey = dayKey
             }
 
-            let author = _normSpace(m.author).isEmpty ? "Unbekannt" : _normSpace(m.author)
-            let tsLine = "\(fmtTime(m.ts)) / \(fmtDateFull(m.ts))"
+            let authorRaw = _normSpace(m.author)
+            let author = authorRaw.isEmpty ? "Unbekannt" : authorRaw
 
             let textRaw = m.text
-            // Minimal mode (no attachments): only include attachments for full-embed or thumbnails-only.
-            let attachments = (embedAttachments || embedAttachmentThumbnailsOnly) ? findAttachments(textRaw) : []
+            let attachmentsAll = findAttachments(textRaw)
             let textWoAttach = stripAttachmentMarkers(textRaw)
 
-            lines.append("**\(author)**  ")
-            lines.append("*\(tsLine)*  ")
-            if !textWoAttach.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                lines.append(textWoAttach.trimmingCharacters(in: .whitespacesAndNewlines))
+            let isSystemMsg = isSystemMessage(authorRaw: authorRaw, text: textWoAttach)
+            let isMe = (!isSystemMsg) && (authorRaw.lowercased() == _normSpace(meName).lowercased())
+
+            let trimmedText = textWoAttach.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            // URLs: nur als extra Link-Liste, wenn enablePreviews=true (analog HTML)
+            let urls = enablePreviews ? extractURLs(trimmedText) : []
+            let urlOnly = enablePreviews ? isURLOnlyText(trimmedText) : false
+
+            // Headerzeile pro Message
+            if isSystemMsg {
+                out.append("> **System** · \(fmtTime(m.ts)) · \(fmtDateFull(m.ts))")
+            } else {
+                let who = isMe ? "\(author) (Ich)" : author
+                out.append("**\(who)** · \(fmtTime(m.ts)) · \(fmtDateFull(m.ts))")
             }
 
-            let urls = enablePreviews ? extractURLs(textWoAttach) : []
-            if !urls.isEmpty {
-                for u in urls { lines.append("- \(u)") }
-            }
-
-            for fn in attachments {
-                let p = chatURL.deletingLastPathComponent().appendingPathComponent(fn).standardizedFileURL
-
-                // Thumbnails-only mode: do not link to the full attachment in Markdown.
-                if embedAttachmentThumbnailsOnly {
-                    let n = fn.lowercased()
-                    if n.hasSuffix(".mp4") || n.hasSuffix(".mov") || n.hasSuffix(".m4v") {
-                        lines.append("- 🎬 \(fn)")
-                    } else if n.hasSuffix(".mp3") || n.hasSuffix(".m4a") || n.hasSuffix(".aac") || n.hasSuffix(".wav") || n.hasSuffix(".ogg") || n.hasSuffix(".opus") || n.hasSuffix(".flac") || n.hasSuffix(".caf") || n.hasSuffix(".aiff") || n.hasSuffix(".aif") || n.hasSuffix(".amr") {
-                        lines.append("- 🎧 \(fn)")
-                    } else if n.hasSuffix(".jpg") || n.hasSuffix(".jpeg") || n.hasSuffix(".png") || n.hasSuffix(".gif") || n.hasSuffix(".webp") || n.hasSuffix(".heic") || n.hasSuffix(".heif") {
-                        lines.append("- 🖼️ \(fn)")
-                    } else {
-                        lines.append("- 📎 \(fn)")
-                    }
-                    continue
-                }
-
-                let href: String? = {
-                    if embedAttachments {
-                        // No staging in embed mode; keep the markdown portable by avoiding a new attachments/ folder.
-                        // If the file exists, link to the original file URL.
-                        return FileManager.default.fileExists(atPath: p.path) ? p.absoluteURL.absoluteString : nil
-                    }
-                    guard let dir = exportAttachmentsDir else { return nil }
-                    return stageAttachmentForExport(source: p, attachmentsDir: dir)?.relHref
-                }()
-
-                let n = fn.lowercased()
-                if n.hasSuffix(".mp4") || n.hasSuffix(".mov") || n.hasSuffix(".m4v") {
-                    if let href {
-                        lines.append("- 🎬 [\(fn)](\(href))")
-                    } else {
-                        lines.append("- 🎬 \(fn)")
-                    }
-                } else if n.hasSuffix(".mp3") || n.hasSuffix(".m4a") || n.hasSuffix(".aac") || n.hasSuffix(".wav") || n.hasSuffix(".ogg") || n.hasSuffix(".opus") || n.hasSuffix(".flac") || n.hasSuffix(".caf") || n.hasSuffix(".aiff") || n.hasSuffix(".aif") || n.hasSuffix(".amr") {
-                    if let href {
-                        lines.append("- 🎧 [\(fn)](\(href))")
-                    } else {
-                        lines.append("- 🎧 \(fn)")
-                    }
-                } else if n.hasSuffix(".jpg") || n.hasSuffix(".jpeg") || n.hasSuffix(".png") || n.hasSuffix(".gif") || n.hasSuffix(".webp") || n.hasSuffix(".heic") || n.hasSuffix(".heif") {
-                    if let href {
-                        lines.append("- 🖼️ [\(fn)](\(href))")
-                    } else {
-                        lines.append("- 🖼️ \(fn)")
-                    }
-                } else {
-                    if let href {
-                        lines.append("- 📎 [\(fn)](\(href))")
-                    } else {
-                        lines.append("- 📎 \(fn)")
-                    }
+            // Text / Placeholder
+            if !urlOnly {
+                if trimmedText.isEmpty, !embedAttachments, !embedAttachmentThumbnailsOnly, !attachmentsAll.isEmpty {
+                    out.append(attachmentPlaceholderText(forAttachments: attachmentsAll))
+                } else if !trimmedText.isEmpty {
+                    out.append(trimmedText)
                 }
             }
-            lines.append("")
+
+            // Link lines (optional)
+            if enablePreviews, !urls.isEmpty {
+                out.append("")
+                for u in urls {
+                    // Markdown-friendly clickable link with compact display label
+                    let shown = displayURL(u)
+                    out.append("- [\(shown)](\(u))")
+                }
+            }
+
+            // Attachments
+            if !attachmentsAll.isEmpty {
+                out.append("")
+                for fn in attachmentsAll {
+                    let ext = (fn as NSString).pathExtension.lowercased()
+                    let emoji = attachmentEmoji(forExtension: ext)
+
+                    if embedAttachmentThumbnailsOnly {
+                        // MD: thumbnails-only macht als inline-thumb selten Sinn -> nur Textliste
+                        out.append("- \(emoji) \(fn)")
+                        continue
+                    }
+
+                    // Resolve file location (direct or Media/ or recursive)
+                    guard let src = resolveAttachmentURL(fileName: fn, sourceDir: sourceDir) else {
+                        out.append("- \(emoji) \(fn)")
+                        continue
+                    }
+
+                    // Stage into ./attachments for portability (wie HTML default Mode B)
+                    let staged = stageAttachmentForExport(source: src, attachmentsDir: attachmentsDir)
+                    let href = staged?.relHref ?? src.absoluteURL.absoluteString
+
+                    // Images as inline preview, others as links
+                    if ["jpg","jpeg","png","gif","webp","heic","heif"].contains(ext) {
+                        out.append("![\(fn)](\(href))")
+                    } else {
+                        out.append("- [\(emoji) \(fn)](\(href))")
+                    }
+                }
+            }
+
+            out.append("") // blank line between messages
         }
 
-        try lines.joined(separator: "\n").write(to: outMD, atomically: true, encoding: .utf8)
+        try out.joined(separator: "\n").write(to: outMD, atomically: true, encoding: .utf8)
     }
     /// Best-effort: make dest carry the same filesystem timestamps as source.
     /// We intentionally do not throw if the filesystem refuses to set attributes.
@@ -3085,4 +3105,3 @@ private static func stageThumbnailForExport(source: URL, thumbsDir: URL) async -
         return dir.appendingPathComponent(newName, isDirectory: false)
     }
 }
-
