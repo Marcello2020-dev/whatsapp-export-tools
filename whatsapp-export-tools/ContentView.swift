@@ -160,6 +160,7 @@ struct ContentView: View {
     // NEW: Optional "Sidecar" folder export (sorted attachments) next to the HTML/MD export.
     // IMPORTANT: HTML outputs must remain standalone and must NOT depend on the Sidecar folder.
     @State private var exportSortedAttachments: Bool = true
+    @State private var deleteOriginalsAfterSidecar: Bool = false
 
     @State private var detectedParticipants: [String] = []
     @State private var meSelection: String = ""
@@ -174,6 +175,8 @@ struct ContentView: View {
 
     @State private var showReplaceAlert: Bool = false
     @State private var replaceExistingNames: [String] = []
+    @State private var showDeleteOriginalsAlert: Bool = false
+    @State private var deleteOriginalCandidates: [URL] = []
 
     // MARK: - View
 
@@ -240,6 +243,13 @@ struct ContentView: View {
                                 .disabled(isRunning)
 
                             Text("Erzeugt im Zielordner einen zusätzlichen Sidecar-Ordner und kopiert Attachments aus der WhatsApp-Quelle sortiert in Unterordner (videos/audios/documents). Dateinamen beginnen mit YYYY-MM-DD und behalten die WhatsApp-ID. Die HTML-Dateien bleiben vollständig standalone (keine Abhängigkeit vom Sidecar).")
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+
+                            Toggle("Originaldaten nach Sidecar-Export löschen (optional, nach Prüfung)", isOn: $deleteOriginalsAfterSidecar)
+                                .disabled(isRunning || !exportSortedAttachments)
+
+                            Text("Vergleicht die kopierten Sidecar-Daten mit den Originalen. Nur bei identischer Kopie erscheint eine Nachfrage zum Löschen der Originale.")
                                 .font(.system(size: 12))
                                 .foregroundStyle(.secondary)
                         }
@@ -366,6 +376,22 @@ struct ContentView: View {
                 "Im Zielordner existieren bereits:\n" +
                 replaceExistingNames.joined(separator: "\n") +
                 "\n\nSoll(en) diese Datei(en) ersetzt werden?"
+            )
+        }
+        .alert("Originaldaten löschen?", isPresented: $showDeleteOriginalsAlert) {
+            Button("Abbrechen", role: .cancel) {
+                deleteOriginalCandidates = []
+            }
+            Button("Originale löschen", role: .destructive) {
+                let items = deleteOriginalCandidates
+                deleteOriginalCandidates = []
+                Task { await deleteOriginalItems(items) }
+            }
+        } message: {
+            let lines = deleteOriginalCandidates.map { $0.path }.joined(separator: "\n")
+            Text(
+                "Die Sidecar-Kopie wurde geprüft. Diese Originale können gelöscht werden:\n" +
+                lines
             )
         }
         .frame(minWidth: 980, minHeight: 780)
@@ -551,6 +577,8 @@ struct ContentView: View {
         appendLog("HTML: \(htmlLabel)")
         appendLog("Markdown: \(wantsMD ? "AN" : "AUS")")
         appendLog("Sidecar: \(wantsSidecar ? "AN" : "AUS")")
+        let wantsDeleteOriginals = wantsSidecar && deleteOriginalsAfterSidecar
+        appendLog("Originale löschen: \(wantsDeleteOriginals ? "AN" : "AUS")")
         appendLog("Ich: \(meTrim)")
 
         let participantNameOverrides: [String: String] = phoneParticipantOverrides.reduce(into: [:]) { acc, kv in
@@ -705,6 +733,14 @@ struct ContentView: View {
             } else {
                 appendLog("OK: Markdown: AUS")
             }
+
+            if wantsDeleteOriginals {
+                await offerSidecarDeletionIfPossible(
+                    chatURL: chatURL,
+                    outDir: outDir,
+                    baseHTMLName: baseHTMLName
+                )
+            }
         } catch {
             if let waErr = error as? WAExportError {
                 switch waErr {
@@ -716,6 +752,67 @@ struct ContentView: View {
                 }
             }
             appendLog("ERROR: \(error)")
+        }
+    }
+
+    @MainActor
+    private func offerSidecarDeletionIfPossible(chatURL: URL, outDir: URL, baseHTMLName: String) async {
+        let baseStem = (baseHTMLName as NSString).deletingPathExtension
+        let sidecarBaseDir = outDir.appendingPathComponent(baseStem, isDirectory: true)
+        let originalDir = chatURL.deletingLastPathComponent()
+
+        appendLog("Sidecar: Prüfe Originaldaten…")
+
+        let verification = await Task.detached(priority: .utility) {
+            WhatsAppExportService.verifySidecarCopies(
+                originalExportDir: originalDir,
+                sidecarBaseDir: sidecarBaseDir
+            )
+        }.value
+
+        if !verification.exportDirMatches {
+            appendLog("Sidecar: Export-Ordner stimmt nicht mit der Kopie überein.")
+        }
+        if verification.zipMatches == false {
+            appendLog("Sidecar: Export-ZIP stimmt nicht mit der Kopie überein.")
+        }
+
+        let candidates = verification.deletableOriginals
+        if candidates.isEmpty {
+            appendLog("Sidecar: Keine löschbaren Originale gefunden.")
+            return
+        }
+
+        deleteOriginalCandidates = candidates
+        showDeleteOriginalsAlert = true
+        appendLog("Sidecar: Löschung anbieten für \(candidates.map { $0.lastPathComponent }.joined(separator: ", "))")
+    }
+
+    @MainActor
+    private func deleteOriginalItems(_ items: [URL]) async {
+        let result = await Task.detached(priority: .utility) {
+            var deleted: [URL] = []
+            var failed: [URL] = []
+            let fm = FileManager.default
+
+            for u in items {
+                do {
+                    try fm.removeItem(at: u)
+                    deleted.append(u)
+                } catch {
+                    failed.append(u)
+                }
+            }
+            return (deleted, failed)
+        }.value
+
+        let (deleted, failed) = result
+
+        for u in deleted {
+            appendLog("OK: gelöscht \(u.path)")
+        }
+        if !failed.isEmpty {
+            appendLog("ERROR: Löschen fehlgeschlagen: \(failed.map { $0.path }.joined(separator: ", "))")
         }
     }
 }

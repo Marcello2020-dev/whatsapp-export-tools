@@ -105,6 +105,22 @@ public struct ExportMultiResult: Sendable {
     }
 }
 
+public struct SidecarVerificationResult: Sendable {
+    public let originalExportDir: URL
+    public let copiedExportDir: URL
+    public let originalZip: URL?
+    public let copiedZip: URL?
+    public let exportDirMatches: Bool
+    public let zipMatches: Bool?
+
+    public var deletableOriginals: [URL] {
+        var out: [URL] = []
+        if exportDirMatches { out.append(originalExportDir) }
+        if let z = originalZip, zipMatches == true { out.append(z) }
+        return out
+    }
+}
+
 
 // MARK: - Service
 
@@ -294,6 +310,41 @@ public enum WhatsAppExportService {
 
         let filtered = uniq.filter { !isSystemAuthor($0) }
         return filtered.isEmpty ? uniq : filtered
+    }
+
+    /// Compare the original WhatsApp export folder (and sibling zip, if present) with the sidecar copies.
+    /// Returns which originals are byte-identical and can be safely deleted.
+    public nonisolated static func verifySidecarCopies(
+        originalExportDir: URL,
+        sidecarBaseDir: URL
+    ) -> SidecarVerificationResult {
+        let originalDir = originalExportDir.standardizedFileURL
+        let baseDir = sidecarBaseDir.standardizedFileURL
+        let copiedDir = baseDir.appendingPathComponent(originalDir.lastPathComponent, isDirectory: true)
+
+        let exportDirMatches = directoriesEqual(src: originalDir, dst: copiedDir)
+
+        let originalZip = pickSiblingZipURL(sourceDir: originalDir)
+        var copiedZip: URL? = nil
+        var zipMatches: Bool? = nil
+
+        if let zip = originalZip {
+            copiedZip = baseDir.appendingPathComponent(zip.lastPathComponent)
+            if let copiedZip, FileManager.default.fileExists(atPath: copiedZip.path) {
+                zipMatches = filesEqual(zip, copiedZip)
+            } else {
+                zipMatches = false
+            }
+        }
+
+        return SidecarVerificationResult(
+            originalExportDir: originalDir,
+            copiedExportDir: copiedDir,
+            originalZip: originalZip,
+            copiedZip: copiedZip,
+            exportDirMatches: exportDirMatches,
+            zipMatches: zipMatches
+        )
     }
 
     /// 1:1-Export: parses chat, decides me-name, renders HTML+MD, writes files.
@@ -3279,29 +3330,7 @@ private static func stageThumbnailForExport(
     ) throws {
         let fm = FileManager.default
 
-        let parent = sourceDir.deletingLastPathComponent()
-        let folderName = sourceDir.lastPathComponent.lowercased()
-
-        // Candidate zips in the parent directory
-        let candidates: [URL]
-        do {
-            let items = try fm.contentsOfDirectory(at: parent, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles])
-            candidates = items
-                .filter { $0.pathExtension.lowercased() == "zip" }
-                .sorted { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending }
-        } catch {
-            return // best-effort: treat as no zip
-        }
-
-        if candidates.isEmpty { return }
-
-        // Prefer a zip that matches the extracted folder name (common pattern).
-        let picked: URL? = candidates.first(where: { $0.deletingPathExtension().lastPathComponent.lowercased() == folderName })
-            ?? candidates.first(where: { $0.lastPathComponent.lowercased().contains(folderName) })
-            ?? candidates.first(where: { $0.lastPathComponent.lowercased().contains("whatsapp") })
-            ?? candidates.first
-
-        guard let zipURL = picked else { return }
+        guard let zipURL = pickSiblingZipURL(sourceDir: sourceDir) else { return }
 
         try ensureDirectory(destParentDir)
 
@@ -3320,6 +3349,118 @@ private static func stageThumbnailForExport(
         } catch {
             // best-effort: ignore copy errors
         }
+    }
+
+    private nonisolated static func pickSiblingZipURL(sourceDir: URL) -> URL? {
+        let fm = FileManager.default
+        let parent = sourceDir.deletingLastPathComponent()
+        let folderName = sourceDir.lastPathComponent.lowercased()
+
+        let candidates: [URL]
+        do {
+            let items = try fm.contentsOfDirectory(
+                at: parent,
+                includingPropertiesForKeys: [.isRegularFileKey],
+                options: [.skipsHiddenFiles]
+            )
+            candidates = items
+                .filter { $0.pathExtension.lowercased() == "zip" }
+                .sorted { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending }
+        } catch {
+            return nil
+        }
+
+        if candidates.isEmpty { return nil }
+
+        return candidates.first(where: { $0.deletingPathExtension().lastPathComponent.lowercased() == folderName })
+            ?? candidates.first(where: { $0.lastPathComponent.lowercased().contains(folderName) })
+            ?? candidates.first(where: { $0.lastPathComponent.lowercased().contains("whatsapp") })
+            ?? candidates.first
+    }
+
+    private nonisolated static func filesEqual(_ a: URL, _ b: URL) -> Bool {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: a.path), fm.fileExists(atPath: b.path) else { return false }
+
+        guard
+            let attrsA = try? fm.attributesOfItem(atPath: a.path),
+            let attrsB = try? fm.attributesOfItem(atPath: b.path),
+            let sizeA = attrsA[.size] as? NSNumber,
+            let sizeB = attrsB[.size] as? NSNumber
+        else {
+            return false
+        }
+
+        if sizeA.uint64Value != sizeB.uint64Value { return false }
+        if sizeA.uint64Value == 0 { return true }
+
+        do {
+            let fhA = try FileHandle(forReadingFrom: a)
+            let fhB = try FileHandle(forReadingFrom: b)
+            defer {
+                try? fhA.close()
+                try? fhB.close()
+            }
+
+            let chunkSize = 1_048_576
+            while true {
+                let dataA = try fhA.read(upToCount: chunkSize) ?? Data()
+                let dataB = try fhB.read(upToCount: chunkSize) ?? Data()
+                if dataA != dataB { return false }
+                if dataA.isEmpty { break }
+            }
+        } catch {
+            return false
+        }
+
+        return true
+    }
+
+    private nonisolated static func listRegularFiles(in root: URL) -> [String: URL]? {
+        let fm = FileManager.default
+        let base = root.standardizedFileURL
+        guard fm.fileExists(atPath: base.path) else { return nil }
+
+        guard let en = fm.enumerator(
+            at: base,
+            includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else {
+            return nil
+        }
+
+        var out: [String: URL] = [:]
+        for case let u as URL in en {
+            let rv = try? u.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey])
+            if rv?.isDirectory == true { continue }
+            if rv?.isRegularFile != true { continue }
+
+            let fullPath = u.standardizedFileURL.path
+            let basePath = base.path.hasSuffix("/") ? base.path : base.path + "/"
+            guard fullPath.hasPrefix(basePath) else { continue }
+
+            var rel = String(fullPath.dropFirst(basePath.count))
+            if rel.hasPrefix("/") { rel.removeFirst() }
+            if rel.isEmpty { continue }
+
+            out[rel] = u
+        }
+
+        return out
+    }
+
+    private nonisolated static func directoriesEqual(src: URL, dst: URL) -> Bool {
+        guard let srcFiles = listRegularFiles(in: src) else { return false }
+        guard let dstFiles = listRegularFiles(in: dst) else { return false }
+
+        if srcFiles.count != dstFiles.count { return false }
+
+        for (rel, srcURL) in srcFiles {
+            guard let dstURL = dstFiles[rel] else { return false }
+            if !filesEqual(srcURL, dstURL) { return false }
+        }
+
+        return true
     }
     
     private static func withHTMLSuffix(_ htmlURL: URL, suffix: String) -> URL {
