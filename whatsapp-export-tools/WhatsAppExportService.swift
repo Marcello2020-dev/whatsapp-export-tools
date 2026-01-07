@@ -249,6 +249,7 @@ public enum WhatsAppExportService {
         enablePreviews: Bool,
         embedAttachments: Bool,
         embedAttachmentThumbnailsOnly: Bool = false,
+        exportSortedAttachments: Bool = false,
         allowOverwrite: Bool = false
     ) async throws -> (html: URL, md: URL) {
 
@@ -324,23 +325,25 @@ public enum WhatsAppExportService {
 
         let outHTML = outPath.appendingPathComponent("\(base).html")
         let outMD = outPath.appendingPathComponent("\(base).md")
-            
-            // If outputs already exist, ask the GUI to confirm replacement.
-            let fm = FileManager.default
-            var existing: [URL] = []
-            if fm.fileExists(atPath: outHTML.path) { existing.append(outHTML) }
-            if fm.fileExists(atPath: outMD.path) { existing.append(outMD) }
+        let sortedFolderURL = outPath.appendingPathComponent(base, isDirectory: true)
 
-            if !existing.isEmpty {
-                if allowOverwrite {
-                    // Remove old outputs so the subsequent atomic writes cannot collide.
-                    for u in existing {
-                        try? fm.removeItem(at: u)
-                    }
-                } else {
-                    throw WAExportError.outputAlreadyExists(urls: existing)
+        // If outputs already exist, ask the GUI to confirm replacement.
+        let fm = FileManager.default
+        var existing: [URL] = []
+        if fm.fileExists(atPath: outHTML.path) { existing.append(outHTML) }
+        if fm.fileExists(atPath: outMD.path) { existing.append(outMD) }
+        if exportSortedAttachments && fm.fileExists(atPath: sortedFolderURL.path) { existing.append(sortedFolderURL) }
+
+        if !existing.isEmpty {
+            if allowOverwrite {
+                // Remove old outputs so the subsequent atomic writes cannot collide.
+                for u in existing {
+                    try? fm.removeItem(at: u)
                 }
+            } else {
+                throw WAExportError.outputAlreadyExists(urls: existing)
             }
+        }
 
         try await renderHTML(
             msgs: msgs,
@@ -361,6 +364,16 @@ public enum WhatsAppExportService {
             embedAttachments: embedAttachments,
             embedAttachmentThumbnailsOnly: embedAttachmentThumbnailsOnly
         )
+
+        if exportSortedAttachments {
+            try exportSortedAttachmentsFolder(
+                chatURL: chatPath,
+                messages: msgs,
+                outDir: outPath,
+                folderName: base,
+                allowOverwrite: allowOverwrite
+            )
+        }
 
         return (outHTML, outMD)
     }
@@ -801,6 +814,166 @@ public enum WhatsAppExportService {
         let ns = text as NSString
         let matches = attachRe.matches(in: text, options: [], range: NSRange(location: 0, length: ns.length))
         return matches.map { ns.substring(with: $0.range(at: 1)).trimmingCharacters(in: .whitespacesAndNewlines) }
+    }
+
+    // ---------------------------
+    // Sorted attachments folder (standalone export)
+    // ---------------------------
+
+    private enum SortedAttachmentBucket: String {
+        case images
+        case videos
+        case audios
+        case documents
+    }
+
+    private static func bucketForExtension(_ ext: String) -> SortedAttachmentBucket {
+        let e = ext.lowercased()
+        switch e {
+        case "jpg", "jpeg", "png", "gif", "heic", "heif", "webp", "tiff", "tif", "bmp":
+            return .images
+        case "mp4", "mov", "m4v", "mkv", "webm", "avi", "3gp":
+            return .videos
+        case "m4a", "mp3", "wav", "aac", "caf", "ogg", "opus", "flac", "amr", "aiff", "aif":
+            return .audios
+        default:
+            return .documents
+        }
+    }
+
+    private static func resolveAttachmentURL(fileName: String, sourceDir: URL) -> URL? {
+        let fm = FileManager.default
+
+        // 1) Most common: attachment is next to the chat.txt
+        let direct = sourceDir.appendingPathComponent(fileName)
+        if fm.fileExists(atPath: direct.path) { return direct }
+
+        // 2) Common alternative: inside a "Media" folder
+        let media = sourceDir.appendingPathComponent("Media", isDirectory: true).appendingPathComponent(fileName)
+        if fm.fileExists(atPath: media.path) { return media }
+
+        // 3) Last resort: search recursively for a matching lastPathComponent (can be slower)
+        if let en = fm.enumerator(
+            at: sourceDir,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) {
+            for case let u as URL in en {
+                if u.lastPathComponent == fileName {
+                    return u
+                }
+            }
+        }
+
+        return nil
+    }
+
+    private static func exportSortedAttachmentsFolder(
+        chatURL: URL,
+        messages: [WAMessage],
+        outDir: URL,
+        folderName: String,
+        allowOverwrite: Bool
+    ) throws {
+        let fm = FileManager.default
+
+        let baseFolderURL = outDir.appendingPathComponent(folderName, isDirectory: true)
+        try fm.createDirectory(at: baseFolderURL, withIntermediateDirectories: true)
+
+        // Additionally copy the original WhatsApp export folder (the folder that contains chat.txt)
+        // into the sorted attachments folder, preserving the original folder name.
+        // Example: <out>/<folderName>/<OriginalExportFolderName>/chat.txt
+        let sourceDir = chatURL.deletingLastPathComponent().standardizedFileURL
+        let originalFolderName = sourceDir.lastPathComponent
+        let originalCopyDir = baseFolderURL.appendingPathComponent(originalFolderName, isDirectory: true)
+        try fm.createDirectory(at: originalCopyDir, withIntermediateDirectories: true)
+
+        // Copy recursively, but avoid recursion if the chosen output directory is inside the source directory.
+        // (e.g. user selects the same folder or a subfolder as output)
+        let outDirPath = outDir.standardizedFileURL.path
+        let baseFolderPath = baseFolderURL.standardizedFileURL.path
+        try copyDirectoryPreservingStructure(
+            from: sourceDir,
+            to: originalCopyDir,
+            skippingPathPrefixes: [outDirPath, baseFolderPath]
+        )
+        
+        try copySiblingZipIfPresent(
+            sourceDir: sourceDir,
+            destParentDir: baseFolderURL,
+            allowOverwrite: allowOverwrite
+        )
+
+        let imagesDir = baseFolderURL.appendingPathComponent(SortedAttachmentBucket.images.rawValue, isDirectory: true)
+        let videosDir = baseFolderURL.appendingPathComponent(SortedAttachmentBucket.videos.rawValue, isDirectory: true)
+        let audiosDir = baseFolderURL.appendingPathComponent(SortedAttachmentBucket.audios.rawValue, isDirectory: true)
+        let docsDir = baseFolderURL.appendingPathComponent(SortedAttachmentBucket.documents.rawValue, isDirectory: true)
+
+        try fm.createDirectory(at: imagesDir, withIntermediateDirectories: true)
+        try fm.createDirectory(at: videosDir, withIntermediateDirectories: true)
+        try fm.createDirectory(at: audiosDir, withIntermediateDirectories: true)
+        try fm.createDirectory(at: docsDir, withIntermediateDirectories: true)
+
+        // Build: filename -> earliest timestamp
+        var earliestDateByFile: [String: Date] = [:]
+        earliestDateByFile.reserveCapacity(64)
+
+        for m in messages {
+            let fns = findAttachments(m.text)
+            if fns.isEmpty { continue }
+
+            for fn in fns {
+                if let existing = earliestDateByFile[fn] {
+                    if m.ts < existing { earliestDateByFile[fn] = m.ts }
+                } else {
+                    earliestDateByFile[fn] = m.ts
+                }
+            }
+        }
+
+        // Always create the folder structure so the user sees it even if nothing could be copied.
+        if earliestDateByFile.isEmpty {
+            return
+        }
+
+        let df = DateFormatter()
+        df.locale = Locale(identifier: "en_US_POSIX")
+        df.timeZone = TimeZone.current
+        // Filename prefix: YYYY MM DD HH MM SS (spaces, no dashes)
+        df.dateFormat = "yyyy MM dd HH mm ss"
+
+        let chatSourceDir = chatURL.deletingLastPathComponent()
+
+        for (fn, ts) in earliestDateByFile.sorted(by: { $0.key < $1.key }) {
+            guard let src = resolveAttachmentURL(fileName: fn, sourceDir: chatSourceDir) else {
+                continue
+            }
+
+            let bucket = bucketForExtension(src.pathExtension)
+            let dstFolder: URL = {
+                switch bucket {
+                case .images: return imagesDir
+                case .videos: return videosDir
+                case .audios: return audiosDir
+                case .documents: return docsDir
+                }
+            }()
+
+            let prefix = df.string(from: ts)
+            let dstName = "\(prefix) \(fn)"
+            var dst = dstFolder.appendingPathComponent(dstName)
+            dst = uniqueDestinationURL(dst)
+
+            // Copy (no overwrite expected because folder is removed when allowOverwrite=true)
+            if !fm.fileExists(atPath: dst.path) {
+                do {
+                    try fm.copyItem(at: src, to: dst)
+                    syncFileSystemTimestamps(from: src, to: dst)
+                } catch {
+                    // keep export resilient
+                }
+            }
+        }
     }
 
     private static func stripAttachmentMarkers(_ text: String) -> String {
@@ -2546,4 +2719,158 @@ private static func stageThumbnailForExport(source: URL, thumbsDir: URL) async -
 
         try lines.joined(separator: "\n").write(to: outMD, atomically: true, encoding: .utf8)
     }
+    /// Best-effort: make dest carry the same filesystem timestamps as source.
+    /// We intentionally do not throw if the filesystem refuses to set attributes.
+    private static func syncFileSystemTimestamps(from source: URL, to dest: URL) {
+        let fm = FileManager.default
+        guard let attrs = try? fm.attributesOfItem(atPath: source.path) else { return }
+
+        var newAttrs: [FileAttributeKey: Any] = [:]
+        if let c = attrs[.creationDate] as? Date { newAttrs[.creationDate] = c }
+        if let m = attrs[.modificationDate] as? Date { newAttrs[.modificationDate] = m }
+
+        if !newAttrs.isEmpty {
+            try? fm.setAttributes(newAttrs, ofItemAtPath: dest.path)
+        }
+    }
+
+    private static func copyDirectoryPreservingStructure(
+        from sourceDir: URL,
+        to destDir: URL,
+        skippingPathPrefixes: [String]
+    ) throws {
+        let fm = FileManager.default
+
+        // Ensure destination exists.
+        try fm.createDirectory(at: destDir, withIntermediateDirectories: true)
+
+        // We MUST apply directory timestamps only AFTER all children have been copied.
+        // Otherwise, creating/copying files will update the directory modification date again.
+        var dirPairs: [(src: URL, dst: URL)] = []
+        dirPairs.append((src: sourceDir, dst: destDir))
+
+        // Enumerate everything under the source directory.
+        guard let en = fm.enumerator(
+            at: sourceDir,
+            includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else {
+            return
+        }
+
+        let srcBasePath = sourceDir.standardizedFileURL.path
+        let dstBasePath = destDir.standardizedFileURL.path
+
+        func shouldSkip(_ url: URL) -> Bool {
+            let p = url.standardizedFileURL.path
+
+            // Skip if the enumerated path is under any excluded prefix (prevents copying the output into itself).
+            for pref in skippingPathPrefixes {
+                if !pref.isEmpty, p.hasPrefix(pref) { return true }
+            }
+
+            // Also skip if this is inside the destination itself (extra safety).
+            if p.hasPrefix(dstBasePath) { return true }
+
+            return false
+        }
+
+        for case let u as URL in en {
+            if shouldSkip(u) {
+                // If this is a directory, skip its descendants to prevent deep recursion.
+                if (try? u.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
+                    en.skipDescendants()
+                }
+                continue
+            }
+
+            // Compute relative path from sourceDir.
+            let fullPath = u.standardizedFileURL.path
+            guard fullPath.hasPrefix(srcBasePath) else { continue }
+
+            var relPath = String(fullPath.dropFirst(srcBasePath.count))
+            if relPath.hasPrefix("/") { relPath.removeFirst() }
+            if relPath.isEmpty { continue }
+
+            let dst = destDir.appendingPathComponent(relPath)
+
+            let rv = try? u.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey])
+
+            if rv?.isDirectory == true {
+                try fm.createDirectory(at: dst, withIntermediateDirectories: true)
+                dirPairs.append((src: u, dst: dst))
+            } else if rv?.isRegularFile == true {
+                if !fm.fileExists(atPath: dst.path) {
+                    try fm.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    try fm.copyItem(at: u, to: dst)
+
+                    // Ensure copied files carry original creation/modification timestamps.
+                    syncFileSystemTimestamps(from: u, to: dst)
+                }
+            }
+        }
+
+        // Apply directory timestamps bottom-up (deepest paths first), root last.
+        let sorted = dirPairs.sorted {
+            $0.dst.standardizedFileURL.path.count > $1.dst.standardizedFileURL.path.count
+        }
+        for pair in sorted {
+            syncFileSystemTimestamps(from: pair.src, to: pair.dst)
+        }
+    }
+    
+    /// Copies a sibling .zip next to the WhatsApp export folder into the sorted export folder.
+    /// WhatsApp exports are often shared as "<ExportFolder>.zip" alongside the extracted folder.
+    /// Best-effort: if no reasonable zip is found, this is a no-op.
+    private static func copySiblingZipIfPresent(
+        sourceDir: URL,
+        destParentDir: URL,
+        allowOverwrite: Bool
+    ) throws {
+        let fm = FileManager.default
+
+        let parent = sourceDir.deletingLastPathComponent()
+        let folderName = sourceDir.lastPathComponent.lowercased()
+
+        // Candidate zips in the parent directory
+        let candidates: [URL]
+        do {
+            let items = try fm.contentsOfDirectory(at: parent, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles])
+            candidates = items
+                .filter { $0.pathExtension.lowercased() == "zip" }
+                .sorted { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending }
+        } catch {
+            return // best-effort: treat as no zip
+        }
+
+        if candidates.isEmpty { return }
+
+        // Prefer a zip that matches the extracted folder name (common pattern).
+        let picked: URL? = candidates.first(where: { $0.deletingPathExtension().lastPathComponent.lowercased() == folderName })
+            ?? candidates.first(where: { $0.lastPathComponent.lowercased().contains(folderName) })
+            ?? candidates.first(where: { $0.lastPathComponent.lowercased().contains("whatsapp") })
+            ?? candidates.first
+
+        guard let zipURL = picked else { return }
+
+        try ensureDirectory(destParentDir)
+
+        let dest = destParentDir.appendingPathComponent(zipURL.lastPathComponent)
+        if fm.fileExists(atPath: dest.path) {
+            if allowOverwrite {
+                try? fm.removeItem(at: dest)
+            } else {
+                return
+            }
+        }
+
+        do {
+            try fm.copyItem(at: zipURL, to: dest)
+            syncFileSystemTimestamps(from: zipURL, to: dest)
+        } catch {
+            // best-effort: ignore copy errors
+        }
+    }
+
 }
+

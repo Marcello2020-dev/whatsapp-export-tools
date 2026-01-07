@@ -10,7 +10,7 @@ struct ContentView: View {
     }
 
     private static let customMeTag = "__CUSTOM_ME__"
-    
+
 
     // MARK: - Export options
 
@@ -141,8 +141,11 @@ struct ContentView: View {
     @State private var chatURL: URL?
     @State private var outBaseURL: URL?
 
-    // HTML output variant (ordered by typical size: largest → smallest)
+    // HTML output variant (ordered by typical output size: largest → smallest)
     @State private var htmlVariant: HTMLVariant = .embedAll
+    
+    // NEW: Create a separate, sorted attachments folder next to the HTML/MD export
+    @State private var exportSortedAttachments: Bool = false
 
     @State private var detectedParticipants: [String] = []
     @State private var meSelection: String = ""
@@ -154,7 +157,7 @@ struct ContentView: View {
 
     @State private var isRunning: Bool = false
     @State private var logText: String = ""
-    
+
     @State private var showReplaceAlert: Bool = false
     @State private var replaceExistingNames: [String] = []
 
@@ -211,6 +214,13 @@ struct ContentView: View {
                             .pickerStyle(.radioGroup)
 
                             Text("Reihenfolge nach Dateigröße: Maximal → Mittel → Minimal.")
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+
+                            Toggle("Attachments zusätzlich sortiert exportieren (Ordnerstruktur neben HTML/MD)", isOn: $exportSortedAttachments)
+                                .disabled(isRunning)
+
+                            Text("Erzeugt im Zielordner einen Ordner mit gleichem Namen wie HTML/MD und kopiert Attachments aus der WhatsApp-Quelle sortiert in Unterordner (videos/audios/documents). Dateinamen beginnen mit YYYY-MM-DD und behalten die WhatsApp-ID.")
                                 .font(.system(size: 12))
                                 .foregroundStyle(.secondary)
                         }
@@ -367,7 +377,7 @@ struct ContentView: View {
             Spacer(minLength: 0)
         }
     }
-    
+
     // MARK: - Phone-only participant override helpers
 
     /// Heuristic: treat strings without letters and with enough digits as "phone-number-like".
@@ -503,6 +513,7 @@ struct ContentView: View {
         appendLog("Ziel: \(outDir.path)")
         appendLog("HTML-Variante: \(htmlVariant.title)")
         appendLog("Ich: \(meTrim)")
+        appendLog("Attachment-Sortierung: \(exportSortedAttachments ? "AN" : "AUS")")
 
         let participantNameOverrides: [String: String] = phoneParticipantOverrides.reduce(into: [:]) { acc, kv in
             let key = kv.key.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -521,6 +532,7 @@ struct ContentView: View {
                 enablePreviews: htmlVariant.enablePreviews,
                 embedAttachments: htmlVariant.embedAttachments,
                 embedAttachmentThumbnailsOnly: htmlVariant.thumbnailsOnly,
+                exportSortedAttachments: exportSortedAttachments,
                 allowOverwrite: allowOverwrite
             )
             lastResult = ExportResult(html: r.html, md: r.md)
