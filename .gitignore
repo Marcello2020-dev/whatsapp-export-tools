@@ -28,3 +28,6 @@ venv/
 
 # Output artifacts (optional - remove if you want to version outputs)
 output/
+
+# Codex local scratch files
+codex-files/

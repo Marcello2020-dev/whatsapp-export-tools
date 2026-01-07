@@ -116,6 +116,8 @@ public enum WhatsAppExportService {
 
     private static let systemAuthor = "System"
 
+    private static let attachmentRelBaseDir: URL? = nil
+
     // Shared system markers (used for participant filtering, title building, and me-name selection)
     private static let systemMarkers: Set<String> = [
         "system",
@@ -424,12 +426,34 @@ public enum WhatsAppExportService {
         )
 
         if exportSortedAttachments {
-            try exportSortedAttachmentsFolder(
+            let sidecarOriginalDir = try exportSortedAttachmentsFolder(
                 chatURL: chatPath,
                 messages: msgs,
                 outDir: outPath,
                 folderName: base,
                 allowOverwrite: allowOverwrite
+            )
+            let sidecarBaseDir = sidecarOriginalDir.deletingLastPathComponent()
+
+            // Sidecar HTML: renders like __max but references media in the sidecar folder via relative links.
+            let sidecarChatURL = sidecarOriginalDir.appendingPathComponent(chatPath.lastPathComponent)
+            // Write sidecar HTML next to the other outputs (root of outDir) and name it consistently.
+            let sidecarHTML = outPath.appendingPathComponent("\(base)__sidecar.html")
+
+            try await renderHTML(
+                msgs: msgs,
+                chatURL: sidecarChatURL,
+                outHTML: sidecarHTML,
+                meName: meName,
+                enablePreviews: true,
+                // Sidecar must stay small: do NOT embed media as data-URLs; reference files in the copied export folder.
+                embedAttachments: false,
+                embedAttachmentThumbnailsOnly: false,
+                attachmentRelBaseDir: outPath,
+                disableThumbStaging: false,
+                externalAttachments: true,
+                externalPreviews: true,
+                externalAssetsDir: sidecarBaseDir
             )
         }
 
@@ -574,12 +598,34 @@ public enum WhatsAppExportService {
         )
 
         if exportSortedAttachments {
-            try exportSortedAttachmentsFolder(
+            let sidecarOriginalDir = try exportSortedAttachmentsFolder(
                 chatURL: chatPath,
                 messages: msgs,
                 outDir: outPath,
                 folderName: base,
                 allowOverwrite: allowOverwrite
+            )
+            let sidecarBaseDir = sidecarOriginalDir.deletingLastPathComponent()
+
+            // Sidecar HTML: renders like __max but references media in the sidecar folder via relative links.
+            let sidecarChatURL = sidecarOriginalDir.appendingPathComponent(chatPath.lastPathComponent)
+            // Write sidecar HTML next to the other outputs (root of outDir) and name it consistently.
+            let sidecarHTML = outPath.appendingPathComponent("\(base)__sidecar.html")
+
+            try await renderHTML(
+                msgs: msgs,
+                chatURL: sidecarChatURL,
+                outHTML: sidecarHTML,
+                meName: meName,
+                enablePreviews: true,
+                // Sidecar must stay small: do NOT embed media as data-URLs; reference files in the copied export folder.
+                embedAttachments: false,
+                embedAttachmentThumbnailsOnly: false,
+                attachmentRelBaseDir: outPath,
+                disableThumbStaging: false,
+                externalAttachments: true,
+                externalPreviews: true,
+                externalAssetsDir: sidecarBaseDir
             )
         }
 
@@ -1082,7 +1128,7 @@ public enum WhatsAppExportService {
         outDir: URL,
         folderName: String,
         allowOverwrite: Bool
-    ) throws {
+    ) throws -> URL {
         let fm = FileManager.default
 
         let baseFolderURL = outDir.appendingPathComponent(folderName, isDirectory: true)
@@ -1140,9 +1186,7 @@ public enum WhatsAppExportService {
         }
 
         // Always create the folder structure so the user sees it even if nothing could be copied.
-        if earliestDateByFile.isEmpty {
-            return
-        }
+        if earliestDateByFile.isEmpty { return originalCopyDir }
 
         let df = DateFormatter()
         df.locale = Locale(identifier: "en_US_POSIX")
@@ -1182,6 +1226,8 @@ public enum WhatsAppExportService {
                 }
             }
         }
+
+        return originalCopyDir
     }
 
     private static func stripAttachmentMarkers(_ text: String) -> String {
@@ -1290,29 +1336,113 @@ public enum WhatsAppExportService {
         }
     }
 
+    private static func escapeRelPath(_ rel: String) -> String {
+        // Escape each component individually so slashes stay as separators.
+        let parts = rel.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        return parts.map { urlPathEscapeComponent($0) }.joined(separator: "/")
+    }
+
+    private static func relativeHref(for file: URL, relativeTo baseDir: URL?) -> String {
+        let src = file.standardizedFileURL
+        guard let basePath = baseDir?.standardizedFileURL.path, !basePath.isEmpty else {
+            return src.absoluteURL.absoluteString
+        }
+
+        let prefix = basePath.hasSuffix("/") ? basePath : (basePath + "/")
+        if src.path.hasPrefix(prefix) {
+            let rel = String(src.path.dropFirst(prefix.count))
+            return escapeRelPath(rel)
+        }
+
+        return src.absoluteURL.absoluteString
+    }
+
+    private static func decodeDataURL(_ s: String) -> (data: Data, mime: String)? {
+        guard s.hasPrefix("data:") else { return nil }
+        guard let comma = s.firstIndex(of: ",") else { return nil }
+
+        let meta = String(s[s.index(s.startIndex, offsetBy: 5)..<comma])
+        let dataPart = String(s[s.index(after: comma)...])
+
+        let metaParts = meta.split(separator: ";")
+        let mime = metaParts.first.map(String.init) ?? "application/octet-stream"
+        let isBase64 = metaParts.contains { String($0).lowercased() == "base64" }
+        guard isBase64, let data = Data(base64Encoded: dataPart) else { return nil }
+
+        return (data: data, mime: mime)
+    }
+
+    private static func fileExtension(forMime mime: String) -> String {
+        let m = mime.lowercased()
+        if m.contains("png") { return "png" }
+        if m.contains("jpeg") || m.contains("jpg") { return "jpg" }
+        if m.contains("gif") { return "gif" }
+        if m.contains("webp") { return "webp" }
+        if m.contains("heic") { return "heic" }
+        return "bin"
+    }
+
+    private static func fnv1a64Hex(_ data: Data) -> String {
+        var hash: UInt64 = 0xcbf29ce484222325
+        for b in data {
+            hash ^= UInt64(b)
+            hash &*= 0x100000001b3
+        }
+        return String(format: "%016llx", hash)
+    }
+
+    private static func stagePreviewImageDataURL(
+        _ dataURL: String,
+        previewsDir: URL,
+        relativeTo baseDir: URL?
+    ) -> String? {
+        guard let decoded = decodeDataURL(dataURL) else { return nil }
+
+        let ext = fileExtension(forMime: decoded.mime)
+        let hash = fnv1a64Hex(decoded.data)
+        let dest = previewsDir.appendingPathComponent("preview_\(hash)").appendingPathExtension(ext)
+
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: dest.path) {
+            do {
+                try ensureDirectory(previewsDir)
+                try decoded.data.write(to: dest, options: .atomic)
+            } catch {
+                return nil
+            }
+        }
+
+        return relativeHref(for: dest, relativeTo: baseDir)
+    }
+
     /// Returns an href for an attachment without staging/copying it into an extra output folder.
     ///
-    /// Rationale: The WhatsApp export already ships the media next to `chat.txt` (or inside `Media`).
-    /// Creating an additional `./attachments` folder next to the sidecar output is redundant and can
-    /// confuse the user. Therefore we reference the existing file in-place via its file URL.
-    ///
-    /// NOTE: This keeps the HTML working locally. If you need fully portable exports later,
-    /// re-introduce staging into a dedicated sidecar folder (not a sibling `attachments` folder).
-    private static func stageAttachmentForExport(source: URL, attachmentsDir _: URL) -> (relHref: String, stagedURL: URL)? {
+    /// - If `relativeTo` is provided and `source` is located under that directory, the returned href is a
+    ///   relative path (URL-escaped per path component) so the exported HTML can reference media inside
+    ///   a sidecar folder without creating a sibling `attachments/` folder.
+    /// - Otherwise, the returned href is a `file://` URL string to the original file.
+    private static func stageAttachmentForExport(
+        source: URL,
+        attachmentsDir _: URL,
+        relativeTo baseDir: URL? = nil
+    ) -> (relHref: String, stagedURL: URL)? {
         let fm = FileManager.default
         let src = source.standardizedFileURL
         guard fm.fileExists(atPath: src.path) else { return nil }
 
-        // Dedupe: if we already staged this exact source path, return the same reference.
+        let basePath = baseDir?.standardizedFileURL.path
+        let cacheKey = src.path + "||" + (basePath ?? "")
+
+        // Dedupe: if we already produced an href for this (source, base) pair, reuse it.
         stagedAttachmentLock.lock()
-        if let cached = stagedAttachmentMap[src.path] {
+        if let cached = stagedAttachmentMap[cacheKey] {
             stagedAttachmentLock.unlock()
             return (relHref: cached.relHref, stagedURL: cached.stagedURL)
         }
 
-        // No staging/copying: reference the original file.
-        let href = src.absoluteURL.absoluteString
-        stagedAttachmentMap[src.path] = (relHref: href, stagedURL: src)
+        let href = relativeHref(for: src, relativeTo: baseDir)
+
+        stagedAttachmentMap[cacheKey] = (relHref: href, stagedURL: src)
         stagedAttachmentLock.unlock()
 
         return (relHref: href, stagedURL: src)
@@ -1429,7 +1559,11 @@ private static func thumbnailJPEGData(for fileURL: URL, maxPixel: CGFloat = 900,
 }
 #endif
 
-private static func stageThumbnailForExport(source: URL, thumbsDir: URL) async -> String? {
+private static func stageThumbnailForExport(
+    source: URL,
+    thumbsDir: URL,
+    relativeTo baseDir: URL?
+) async -> String? {
     let fm = FileManager.default
     let src = source.standardizedFileURL
     guard fm.fileExists(atPath: src.path) else { return nil }
@@ -1445,13 +1579,13 @@ private static func stageThumbnailForExport(source: URL, thumbsDir: URL) async -
 
         // If a thumbnail already exists, reuse it.
         if fm.fileExists(atPath: dest.path) {
-            return "attachments/_thumbs/\(urlPathEscapeComponent(dest.lastPathComponent))"
+            return relativeHref(for: dest, relativeTo: baseDir)
         }
 
         #if canImport(QuickLookThumbnailing)
         if let jpg = await thumbnailJPEGData(for: src, maxPixel: 900, quality: 0.72) {
             try jpg.write(to: dest, options: .atomic)
-            return "attachments/_thumbs/\(urlPathEscapeComponent(dest.lastPathComponent))"
+            return relativeHref(for: dest, relativeTo: baseDir)
         }
         #endif
 
@@ -2103,7 +2237,12 @@ private static func stageThumbnailForExport(source: URL, thumbsDir: URL) async -
         meName: String,
         enablePreviews: Bool,
         embedAttachments: Bool,
-        embedAttachmentThumbnailsOnly: Bool
+        embedAttachmentThumbnailsOnly: Bool,
+        attachmentRelBaseDir: URL? = nil,
+        disableThumbStaging: Bool = false,
+        externalAttachments: Bool = false,
+        externalPreviews: Bool = false,
+        externalAssetsDir: URL? = nil
     ) async throws {
 
         // participants -> title_names
@@ -2444,7 +2583,10 @@ private static func stageThumbnailForExport(source: URL, thumbsDir: URL) async -
         parts.append("</div>")
 
         var lastDayKey: String? = nil
-        let exportAttachmentsDir = outHTML.deletingLastPathComponent().appendingPathComponent("attachments", isDirectory: true)
+        let chatDir = chatURL.deletingLastPathComponent().standardizedFileURL
+        let externalAssetsRoot = externalAssetsDir?.standardizedFileURL
+        let externalThumbsDir = externalAssetsRoot?.appendingPathComponent("_thumbs", isDirectory: true)
+        let externalPreviewsDir = externalAssetsRoot?.appendingPathComponent("_previews", isDirectory: true)
 
         var embedCounter = 0
         for m in msgs {
@@ -2461,7 +2603,8 @@ private static func stageThumbnailForExport(source: URL, thumbsDir: URL) async -
             let textRaw = m.text
             // Minimal mode (no attachments): only include attachments when we either embed full files
             // or explicitly render thumbnails-only.
-            let attachments = (embedAttachments || embedAttachmentThumbnailsOnly) ? findAttachments(textRaw) : []
+            let shouldRenderAttachments = embedAttachments || embedAttachmentThumbnailsOnly || externalAttachments
+            let attachments = shouldRenderAttachments ? findAttachments(textRaw) : []
             let textWoAttach = stripAttachmentMarkers(textRaw)
             let attachmentsAll = findAttachments(textRaw)
 
@@ -2479,7 +2622,7 @@ private static func stageThumbnailForExport(source: URL, thumbsDir: URL) async -
                 if urlOnly { return "" }
 
                 // WICHTIG: Text-only Export soll Attachments sichtbar lassen
-                if trimmedText.isEmpty, !embedAttachments, !embedAttachmentThumbnailsOnly, !attachmentsAll.isEmpty {
+                if trimmedText.isEmpty, !embedAttachments, !embedAttachmentThumbnailsOnly, !externalAttachments, !attachmentsAll.isEmpty {
                     return htmlEscapeKeepNewlines(attachmentPlaceholderText(forAttachments: attachmentsAll))
                 }
 
@@ -2500,7 +2643,15 @@ private static func stageThumbnailForExport(source: URL, thumbsDir: URL) async -
                     if let prev = await buildPreview(u) {
                         var imgBlock = ""
                         if let img = prev.imageDataURL {
-                            imgBlock = "<div class='pimg'><img alt='' src='\(img)'></div>"
+                            if externalPreviews, let previewsDir = externalPreviewsDir {
+                                if let href = stagePreviewImageDataURL(img, previewsDir: previewsDir, relativeTo: attachmentRelBaseDir) {
+                                    imgBlock = "<div class='pimg'><img alt='' src='\(htmlEscape(href))'></div>"
+                                } else {
+                                    imgBlock = "<div class='pimg'><img alt='' src='\(img)'></div>"
+                                }
+                            } else {
+                                imgBlock = "<div class='pimg'><img alt='' src='\(img)'></div>"
+                            }
                         }
                         let ptitle = htmlEscape(prev.title.isEmpty ? u : prev.title)
                         let pdesc = htmlEscape(prev.description)
@@ -2522,7 +2673,10 @@ private static func stageThumbnailForExport(source: URL, thumbsDir: URL) async -
             // Make previews + filenames clickable to the local file (file://...) when it exists.
             var mediaBlocks: [String] = []
             for fn in attachments {
-                let p = chatURL.deletingLastPathComponent().appendingPathComponent(fn).standardizedFileURL
+                let direct = chatDir.appendingPathComponent(fn).standardizedFileURL
+                let p = FileManager.default.fileExists(atPath: direct.path)
+                    ? direct
+                    : (resolveAttachmentURL(fileName: fn, sourceDir: chatDir) ?? direct)
                 let ext = p.pathExtension.lowercased()
 
                 if embedAttachmentThumbnailsOnly {
@@ -2703,8 +2857,77 @@ private static func stageThumbnailForExport(source: URL, thumbsDir: URL) async -
                     continue
                 }
 
+                if externalAttachments {
+                    let staged = stageAttachmentForExport(
+                        source: p,
+                        attachmentsDir: chatDir,
+                        relativeTo: attachmentRelBaseDir
+                    )
+                    guard let href = staged?.relHref else {
+                        mediaBlocks.append("<div class='fileline'>\(attachmentEmoji(forExtension: ext)) \(htmlEscape(fn))</div>")
+                        continue
+                    }
+                    let safeHref = htmlEscape(href)
+
+                    if ["mp4", "mov", "m4v"].contains(ext) {
+                        let mime = guessMime(fromName: fn)
+                        var posterAttr = ""
+                        if !disableThumbStaging, let thumbsDir = externalThumbsDir {
+                            if let poster = await stageThumbnailForExport(source: p, thumbsDir: thumbsDir, relativeTo: attachmentRelBaseDir) {
+                                posterAttr = " poster='\(htmlEscape(poster))'"
+                            }
+                        }
+                        mediaBlocks.append(
+                            "<div class='media'><video controls preload='metadata' playsinline\(posterAttr)><source src='\(safeHref)' type='\(htmlEscape(mime))'>Dein Browser kann dieses Video nicht abspielen. <a href='\(safeHref)'>Video öffnen</a>.</video></div>"
+                        )
+                        mediaBlocks.append("<div class='fileline'>⬇︎ <a href='\(safeHref)' download>Video herunterladen</a></div>")
+                        continue
+                    }
+
+                    if ["mp3","m4a","aac","wav","ogg","opus","flac","caf","aiff","aif","amr"].contains(ext) {
+                        let mime = guessMime(fromName: fn)
+                        mediaBlocks.append(
+                            "<div class='media'><audio controls preload='metadata'><source src='\(safeHref)' type='\(htmlEscape(mime))'>Dein Browser kann dieses Audio nicht abspielen. <a href='\(safeHref)'>Audio öffnen</a>.</audio></div>"
+                        )
+                        mediaBlocks.append("<div class='fileline'>🎧 \(htmlEscape(fn))</div>")
+                        mediaBlocks.append("<div class='fileline'>⬇︎ <a href='\(safeHref)' download>Audio herunterladen</a></div>")
+                        continue
+                    }
+
+                    if ["pdf", "doc", "docx"].contains(ext) {
+                        var thumbHref: String? = nil
+                        if !disableThumbStaging, let thumbsDir = externalThumbsDir {
+                            thumbHref = await stageThumbnailForExport(source: p, thumbsDir: thumbsDir, relativeTo: attachmentRelBaseDir)
+                        }
+                        if let thumbHref {
+                            mediaBlocks.append(
+                                "<div class='media'><a href='\(safeHref)' target='_blank' rel='noopener'><img alt='' src='\(htmlEscape(thumbHref))'></a></div>"
+                            )
+                        }
+                        mediaBlocks.append("<div class='fileline'>📎 <a href='\(safeHref)' target='_blank' rel='noopener'>\(htmlEscape(fn))</a></div>")
+                        mediaBlocks.append("<div class='fileline'>⬇︎ <a href='\(safeHref)' download>Datei speichern</a></div>")
+                        continue
+                    }
+
+                    if ["jpg", "jpeg", "png", "gif", "webp", "heic", "heif"].contains(ext) {
+                        mediaBlocks.append(
+                            "<div class='media media-img'><a href='\(safeHref)' target='_blank' rel='noopener'><img alt='' src='\(safeHref)'></a></div>"
+                        )
+                        mediaBlocks.append("<div class='fileline'>⬇︎ <a href='\(safeHref)' download>Bild speichern</a></div>")
+                        continue
+                    }
+
+                    mediaBlocks.append("<div class='fileline'>📎 <a href='\(safeHref)' target='_blank' rel='noopener'>\(htmlEscape(fn))</a></div>")
+                    mediaBlocks.append("<div class='fileline'>⬇︎ <a href='\(safeHref)' download>Datei speichern</a></div>")
+                    continue
+                }
+
                 // Mode B (default): stage attachments into ./attachments for portable HTML/MD.
-                let staged = stageAttachmentForExport(source: p, attachmentsDir: exportAttachmentsDir)
+                let staged = stageAttachmentForExport(
+                    source: p,
+                    attachmentsDir: chatDir,
+                    relativeTo: attachmentRelBaseDir
+                )
                 let href = staged?.relHref
                 let stagedURL = staged?.stagedURL
 
@@ -2853,8 +3076,6 @@ private static func stageThumbnailForExport(source: URL, thumbsDir: URL) async -
 
         var lastDayKey: String? = nil
         let sourceDir = chatURL.deletingLastPathComponent().standardizedFileURL
-        let attachmentsDir = outMD.deletingLastPathComponent().appendingPathComponent("attachments", isDirectory: true)
-
         for m in msgs {
             let dayKey = isoDateOnly(m.ts)
             if lastDayKey != dayKey {
@@ -2927,7 +3148,11 @@ private static func stageThumbnailForExport(source: URL, thumbsDir: URL) async -
                     }
 
                     // Stage into ./attachments for portability (wie HTML default Mode B)
-                    let staged = stageAttachmentForExport(source: src, attachmentsDir: attachmentsDir)
+                    let staged = stageAttachmentForExport(
+                        source: src,
+                        attachmentsDir: chatURL.deletingLastPathComponent(),
+                        relativeTo: attachmentRelBaseDir
+                    )
                     let href = staged?.relHref ?? src.absoluteURL.absoluteString
 
                     // Images as inline preview, others as links
