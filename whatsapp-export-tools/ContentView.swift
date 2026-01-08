@@ -14,7 +14,18 @@ struct ContentView: View {
     private static let labelWidth: CGFloat = 110
     private static let designMaxWidth: CGFloat = 1440
     private static let designMaxHeight: CGFloat = 900
-    private static let optionsColumnMaxWidth: CGFloat = 640
+    private static let optionsColumnMaxWidth: CGFloat = 480
+    private static let aiGlowColors: [Color] = [
+        Color(red: 0.98, green: 0.42, blue: 0.84),
+        Color(red: 0.72, green: 0.45, blue: 0.98),
+        Color(red: 0.36, green: 0.66, blue: 1.00),
+        Color(red: 0.28, green: 0.86, blue: 0.96),
+        Color(red: 0.43, green: 0.96, blue: 0.66),
+        Color(red: 0.99, green: 0.92, blue: 0.52),
+        Color(red: 0.99, green: 0.66, blue: 0.40),
+        Color(red: 0.99, green: 0.40, blue: 0.38),
+        Color(red: 0.98, green: 0.42, blue: 0.84)
+    ]
 
 
     // MARK: - Export options
@@ -183,243 +194,12 @@ struct ContentView: View {
     @State private var showDeleteOriginalsAlert: Bool = false
     @State private var deleteOriginalCandidates: [URL] = []
     @State private var didSetInitialWindowSize: Bool = false
+    @State private var aiHighlightPhase: Double = 0
 
     // MARK: - View
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            header
-                .waCard()
-
-            WASection(title: "Eingaben", systemImage: "bubble.left.and.bubble.right.fill") {
-                VStack(alignment: .leading, spacing: 10) {
-                    Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 8) {
-                        GridRow {
-                            Text("Chat-Export:")
-                                .frame(width: Self.labelWidth, alignment: .leading)
-
-                            Text(displayChatPath(chatURL) ?? "—")
-                                .multilineTextAlignment(.leading)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .help(chatURL?.path ?? "")
-
-                            Button("Auswählen…") { pickChatFile() }
-                                .buttonStyle(.bordered)
-                        }
-
-                        GridRow {
-                            Text("Zielordner:")
-                                .frame(width: Self.labelWidth, alignment: .leading)
-
-                            Text(displayOutputPath(outBaseURL) ?? "—")
-                                .multilineTextAlignment(.leading)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .help(outBaseURL?.path ?? "")
-
-                            Button("Auswählen…") { pickOutputFolder() }
-                                .buttonStyle(.bordered)
-                        }
-                    }
-                }
-            }
-            .waCard()
-
-            HStack(alignment: .top, spacing: 12) {
-                ScrollView(.vertical) {
-                    VStack(alignment: .leading, spacing: 12) {
-                        WASection(title: "Optionen", systemImage: "slider.horizontal.3") {
-                            VStack(alignment: .leading, spacing: 10) {
-                                VStack(alignment: .leading, spacing: 8) {
-                                    HStack(spacing: 6) {
-                                        Text("Ausgaben")
-                                            .font(.system(size: 12, weight: .semibold))
-                                            .foregroundStyle(.secondary)
-                                        helpIcon("Jede Ausgabe ist unabhängig aktivierbar. Standard: alles aktiviert (inkl. Sidecar).")
-                                    }
-
-                                    Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 6) {
-                                        GridRow {
-                                            Toggle(isOn: $exportHTMLMax) {
-                                                HStack(spacing: 6) {
-                                                    Text("HTML __max (Maximal: Alles einbetten)")
-                                                    helpIcon("Bettet alle Medien per Base64 direkt in die HTML ein (größte Datei, komplett offline).")
-                                                }
-                                            }
-                                            .disabled(isRunning)
-                                            .frame(maxWidth: .infinity, alignment: .leading)
-
-                                            Toggle(isOn: $exportHTMLMid) {
-                                                HStack(spacing: 6) {
-                                                    Text("HTML __mid (Mittel: Nur Thumbnails)")
-                                                    helpIcon("Bettet nur Thumbnails ein; größere Medien werden referenziert.")
-                                                }
-                                            }
-                                            .disabled(isRunning)
-                                            .frame(maxWidth: .infinity, alignment: .leading)
-                                        }
-                                        GridRow {
-                                            Toggle(isOn: $exportHTMLMin) {
-                                                HStack(spacing: 6) {
-                                                    Text("HTML __min (Minimal: Nur Text)")
-                                                    helpIcon("Gibt nur Text aus, keine Medien oder Thumbnails.")
-                                                }
-                                            }
-                                            .disabled(isRunning)
-                                            .frame(maxWidth: .infinity, alignment: .leading)
-
-                                            Toggle(isOn: $exportMarkdown) {
-                                                HStack(spacing: 6) {
-                                                    Text("Markdown (.md)")
-                                                    helpIcon("Erzeugt eine Markdown-Ausgabe des Chats.")
-                                                }
-                                            }
-                                            .disabled(isRunning)
-                                            .frame(maxWidth: .infinity, alignment: .leading)
-                                        }
-                                    }
-                                    .controlSize(.small)
-
-                                    Divider()
-                                        .padding(.vertical, 1)
-
-                                    Toggle(isOn: $exportSortedAttachments) {
-                                        HStack(spacing: 6) {
-                                            Text("Sidecar exportieren (optional, unabhängig von HTML/MD)")
-                                            helpIcon("Erzeugt im Zielordner einen zusätzlichen Sidecar-Ordner und kopiert Attachments aus der WhatsApp-Quelle sortiert in Unterordner (videos/audios/documents). Dateinamen beginnen mit YYYY-MM-DD und behalten die WhatsApp-ID. Die HTML-Dateien bleiben vollständig standalone (keine Abhängigkeit vom Sidecar).")
-                                        }
-                                    }
-                                    .disabled(isRunning)
-
-                                    Toggle(isOn: $deleteOriginalsAfterSidecar) {
-                                        HStack(spacing: 6) {
-                                            Text("Originaldaten nach Sidecar-Export löschen (optional, nach Prüfung)")
-                                            helpIcon("Vergleicht die kopierten Sidecar-Daten mit den Originalen. Nur bei identischer Kopie erscheint eine Nachfrage zum Löschen der Originale.")
-                                        }
-                                    }
-                                    .disabled(isRunning || !exportSortedAttachments)
-                                }
-                                .controlSize(.small)
-
-                                HStack(spacing: 12) {
-                                    HStack(spacing: 6) {
-                                        Text("Ich:")
-                                        helpIcon("Wähle, welcher Name als \"Ich\" markiert wird. Auto-Erkennung kann überschrieben werden.")
-                                    }
-                                    .frame(width: Self.labelWidth, alignment: .leading)
-
-                                    Picker("Ich", selection: $meSelection) {
-                                        ForEach(detectedParticipants, id: \.self) { n in
-                                            Text(n).tag(n)
-                                        }
-                                        Divider()
-                                        Text("Benutzerdefiniert…").tag(Self.customMeTag)
-                                    }
-                                    .pickerStyle(.menu)
-                                    .frame(width: 210, alignment: .leading)
-
-                                    if let autoDetectedMeName {
-                                        autoBadge(autoDetectedMeName)
-                                    }
-
-                                    if meSelection == Self.customMeTag {
-                                        TextField("z. B. Marcel", text: $meCustomName)
-                                            .textFieldStyle(.roundedBorder)
-                                            .frame(minWidth: 210)
-                                    }
-
-                                    Spacer(minLength: 0)
-                                }
-
-                                if !phoneOnlyParticipants.isEmpty {
-                                    Divider()
-                                        .padding(.vertical, 4)
-
-                                    VStack(alignment: .leading, spacing: 8) {
-                                        HStack(spacing: 6) {
-                                            Text("Unbekannte Telefonnummern (optional umbenennen)")
-                                                .font(.system(size: 12, weight: .semibold))
-                                                .foregroundStyle(.secondary)
-                                            helpIcon("Diese Eingabe wird nur für Teilnehmende angeboten, die im Export ausschließlich als Telefonnummer erscheinen.")
-                                        }
-
-                                        ForEach(phoneOnlyParticipants, id: \.self) { num in
-                                            HStack(spacing: 12) {
-                                                Text(num)
-                                                    .font(.system(.body, design: .monospaced))
-                                                    .lineLimit(1)
-                                                    .truncationMode(.middle)
-                                                    .frame(width: 210, alignment: .leading)
-
-                                                TextField("Name (z. B. Max Mustermann)", text: bindingForPhoneOverride(num))
-                                                    .textFieldStyle(.roundedBorder)
-
-                                                Spacer(minLength: 0)
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        .waCard()
-
-                        HStack(spacing: 12) {
-                            Button {
-                                Task {
-                                    guard let chatURL, let outBaseURL else {
-                                        appendLog("ERROR: Bitte zuerst Chat-Export und Zielordner auswählen.")
-                                        return
-                                    }
-                                    await runExportFlow(chatURL: chatURL, outDir: outBaseURL, allowOverwrite: false)
-                                }
-                            } label: {
-                                HStack(spacing: 8) {
-                                    if isRunning {
-                                        ProgressView()
-                                            .progressViewStyle(.circular)
-                                            .controlSize(.small)
-                                            .tint(.red)
-                                    }
-                                    Label(isRunning ? "Läuft…" : "Exportieren", systemImage: "square.and.arrow.up")
-                                }
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .disabled(isRunning)
-
-                            Button {
-                                logText = ""
-                            } label: {
-                                Label("Log leeren", systemImage: "trash")
-                            }
-                            .buttonStyle(.bordered)
-                            .disabled(isRunning)
-
-                            Spacer()
-                        }
-                        .padding(.top, 2)
-                    }
-                    .frame(maxWidth: Self.optionsColumnMaxWidth, alignment: .topLeading)
-                }
-                .frame(maxWidth: Self.optionsColumnMaxWidth, maxHeight: .infinity, alignment: .topLeading)
-
-                WASection(title: "Log", systemImage: "doc.text.magnifyingglass") {
-                    ScrollView([.vertical, .horizontal]) {
-                        Text(logText)
-                            .font(.system(.body, design: .monospaced))
-                            .textSelection(.enabled)
-                            .fixedSize(horizontal: true, vertical: false)
-                            .frame(maxWidth: .infinity, alignment: .topLeading)
-                            .padding(8)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                }
-                .waCard()
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .layoutPriority(1)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        }
+        mainContent
         .padding(16)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .tint(Self.waGreen)
@@ -428,6 +208,11 @@ struct ContentView: View {
             applyInitialWindowSizeIfNeeded()
             if let u = chatURL, detectedParticipants.isEmpty {
                 refreshParticipants(for: u)
+            }
+            if aiHighlightPhase == 0 {
+                withAnimation(.linear(duration: 6).repeatForever(autoreverses: false)) {
+                    aiHighlightPhase = 360
+                }
             }
         }
         .alert("Datei bereits vorhanden", isPresented: $showReplaceAlert) {
@@ -462,6 +247,341 @@ struct ContentView: View {
             )
         }
         .frame(minWidth: 980, minHeight: 720)
+    }
+
+    private var mainContent: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            header
+                .waCard()
+
+            inputsSection
+
+            optionsAndLogSection
+        }
+    }
+
+    private var inputsSection: some View {
+        WASection(title: "Eingaben", systemImage: "bubble.left.and.bubble.right.fill") {
+            VStack(alignment: .leading, spacing: 10) {
+                Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 8) {
+                    GridRow {
+                        Text("Chat-Export:")
+                            .frame(width: Self.labelWidth, alignment: .leading)
+
+                        Text(displayChatPath(chatURL) ?? "—")
+                            .multilineTextAlignment(.leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .help(chatURL?.path ?? "")
+
+                        Button("Auswählen…") { pickChatFile() }
+                            .buttonStyle(.bordered)
+                    }
+
+                    GridRow {
+                        Text("Zielordner:")
+                            .frame(width: Self.labelWidth, alignment: .leading)
+
+                        Text(displayOutputPath(outBaseURL) ?? "—")
+                            .multilineTextAlignment(.leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .help(outBaseURL?.path ?? "")
+
+                        Button("Auswählen…") { pickOutputFolder() }
+                            .buttonStyle(.bordered)
+                    }
+                }
+            }
+        }
+        .waCard()
+    }
+
+    private var optionsAndLogSection: some View {
+        HStack(alignment: .top, spacing: 12) {
+            optionsColumn
+            logSection
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var optionsColumn: some View {
+        ScrollView(.vertical) {
+            VStack(alignment: .leading, spacing: 12) {
+                optionsSection
+                actionsRow
+            }
+            .frame(width: Self.optionsColumnMaxWidth, alignment: .topLeading)
+        }
+        .frame(width: Self.optionsColumnMaxWidth, alignment: .topLeading)
+        .frame(maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var optionsSection: some View {
+        WASection(title: "Optionen", systemImage: "slider.horizontal.3") {
+            VStack(alignment: .leading, spacing: 10) {
+                outputAndSidecarOptions
+                meSelectionRow
+                phoneOverridesSection
+            }
+        }
+        .waCard()
+    }
+
+    private var outputAndSidecarOptions: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            outputsHeader
+            outputsGrid
+
+            Divider()
+                .padding(.vertical, 1)
+
+            sidecarToggle
+            deleteOriginalsToggle
+        }
+        .controlSize(.small)
+    }
+
+    private var outputsHeader: some View {
+        HStack(spacing: 6) {
+            Text("Ausgaben")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.secondary)
+            helpIcon("Jede Ausgabe ist unabhängig aktivierbar. Standard: alles aktiviert (inkl. Sidecar).")
+        }
+    }
+
+    private var outputsGrid: some View {
+        Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 6) {
+            GridRow {
+                Toggle(isOn: $exportHTMLMax) {
+                    HStack(spacing: 6) {
+                        Text("HTML __max (Maximal: Alles einbetten)")
+                        helpIcon("Bettet alle Medien per Base64 direkt in die HTML ein (größte Datei, komplett offline).")
+                    }
+                }
+                .disabled(isRunning)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                Toggle(isOn: $exportHTMLMid) {
+                    HStack(spacing: 6) {
+                        Text("HTML __mid (Mittel: Nur Thumbnails)")
+                        helpIcon("Bettet nur Thumbnails ein; größere Medien werden referenziert.")
+                    }
+                }
+                .disabled(isRunning)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            GridRow {
+                Toggle(isOn: $exportHTMLMin) {
+                    HStack(spacing: 6) {
+                        Text("HTML __min (Minimal: Nur Text)")
+                        helpIcon("Gibt nur Text aus, keine Medien oder Thumbnails.")
+                    }
+                }
+                .disabled(isRunning)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                Toggle(isOn: $exportMarkdown) {
+                    HStack(spacing: 6) {
+                        Text("Markdown (.md)")
+                        helpIcon("Erzeugt eine Markdown-Ausgabe des Chats.")
+                    }
+                }
+                .disabled(isRunning)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+
+    private var sidecarToggle: some View {
+        Toggle(isOn: $exportSortedAttachments) {
+            HStack(spacing: 6) {
+                Text("Sidecar exportieren (optional, unabhängig von HTML/MD)")
+                helpIcon("Erzeugt im Zielordner einen zusätzlichen Sidecar-Ordner und kopiert Attachments aus der WhatsApp-Quelle sortiert in Unterordner (videos/audios/documents). Dateinamen beginnen mit YYYY-MM-DD und behalten die WhatsApp-ID. Die HTML-Dateien bleiben vollständig standalone (keine Abhängigkeit vom Sidecar).")
+            }
+        }
+        .disabled(isRunning)
+    }
+
+    private var deleteOriginalsToggle: some View {
+        Toggle(isOn: $deleteOriginalsAfterSidecar) {
+            HStack(spacing: 6) {
+                Text("Originaldaten nach Sidecar-Export löschen (optional, nach Prüfung)")
+                helpIcon("Vergleicht die kopierten Sidecar-Daten mit den Originalen. Nur bei identischer Kopie erscheint eine Nachfrage zum Löschen der Originale.")
+            }
+        }
+        .disabled(isRunning || !exportSortedAttachments)
+    }
+
+    private var meSelectionRow: some View {
+        HStack(spacing: 12) {
+            HStack(spacing: 6) {
+                Text("Eigener Name:")
+                helpIcon("Wähle, welcher Name als \"Ich\" markiert wird. Auto-Erkennung kann überschrieben werden. Bei Auto-Erkennung wird die Auswahl farbig hervorgehoben.")
+            }
+            .frame(width: Self.labelWidth, alignment: .leading)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Menu {
+                    ForEach(detectedParticipants, id: \.self) { name in
+                        Button {
+                            meSelection = name
+                        } label: {
+                            HStack {
+                                Text(name)
+                                Spacer()
+                                if meSelection == name {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                    Divider()
+                    Button {
+                        meSelection = Self.customMeTag
+                    } label: {
+                        HStack {
+                            Text("Benutzerdefiniert…")
+                            Spacer()
+                            if meSelection == Self.customMeTag {
+                                Image(systemName: "checkmark")
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 8) {
+                        Text(meSelectionDisplayName)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                        Spacer(minLength: 0)
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .frame(width: mePickerWidth, alignment: .leading)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .stroke(.white.opacity(0.10), lineWidth: 1)
+                    )
+                    .overlay(aiHighlightBorder(active: shouldShowAIGlow))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Eigener Name")
+
+                if meSelection == Self.customMeTag {
+                    TextField("z. B. Marcel", text: $meCustomName)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: mePickerWidth, alignment: .leading)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var mePickerWidth: CGFloat {
+        let cardPadding: CGFloat = 20
+        let labelSpacing: CGFloat = 12
+        let available = Self.optionsColumnMaxWidth - cardPadding - Self.labelWidth - labelSpacing
+        return max(220, available)
+    }
+
+    private var meSelectionDisplayName: String {
+        if meSelection == Self.customMeTag {
+            let trimmed = meCustomName.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? "Benutzerdefiniert…" : trimmed
+        }
+        let trimmed = meSelection.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "Ich" : trimmed
+    }
+
+    @ViewBuilder
+    private var phoneOverridesSection: some View {
+        if !phoneOnlyParticipants.isEmpty {
+            Divider()
+                .padding(.vertical, 4)
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 6) {
+                    Text("Unbekannte Telefonnummern (optional umbenennen)")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    helpIcon("Diese Eingabe wird nur für Teilnehmende angeboten, die im Export ausschließlich als Telefonnummer erscheinen.")
+                }
+
+                ForEach(phoneOnlyParticipants, id: \.self) { num in
+                    HStack(spacing: 12) {
+                        Text(num)
+                            .font(.system(.body, design: .monospaced))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .frame(width: 210, alignment: .leading)
+
+                        TextField("Name (z. B. Max Mustermann)", text: bindingForPhoneOverride(num))
+                            .textFieldStyle(.roundedBorder)
+
+                        Spacer(minLength: 0)
+                    }
+                }
+            }
+        }
+    }
+
+    private var actionsRow: some View {
+        HStack(spacing: 12) {
+            Button {
+                Task {
+                    guard let chatURL, let outBaseURL else {
+                        appendLog("ERROR: Bitte zuerst Chat-Export und Zielordner auswählen.")
+                        return
+                    }
+                    await runExportFlow(chatURL: chatURL, outDir: outBaseURL, allowOverwrite: false)
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    if isRunning {
+                        ProgressView()
+                            .progressViewStyle(.circular)
+                            .controlSize(.small)
+                            .tint(.red)
+                    }
+                    Label(isRunning ? "Läuft…" : "Exportieren", systemImage: "square.and.arrow.up")
+                }
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(isRunning)
+
+            Button {
+                logText = ""
+            } label: {
+                Label("Log leeren", systemImage: "trash")
+            }
+            .buttonStyle(.bordered)
+            .disabled(isRunning)
+
+            Spacer()
+        }
+        .padding(.top, 2)
+    }
+
+    private var logSection: some View {
+        WASection(title: "Log", systemImage: "doc.text.magnifyingglass") {
+            ScrollView([.vertical, .horizontal]) {
+                Text(logText)
+                    .font(.system(.body, design: .monospaced))
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                    .padding(8)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+        .waCard()
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .layoutPriority(1)
     }
 
     private var header: some View {
@@ -533,17 +653,32 @@ struct ContentView: View {
             .help(Text(text))
     }
 
-    private func autoBadge(_ name: String) -> some View {
-        Label("Auto", systemImage: "sparkle")
-            .font(.system(size: 11, weight: .semibold))
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(
-                Capsule()
-                    .fill(.white.opacity(0.08))
-            )
-            .help(Text("Ich-Perspektive automatisch erkannt: \(name)"))
+    private var shouldShowAIGlow: Bool {
+        guard let autoDetectedMeName else { return false }
+        return meSelection == autoDetectedMeName
+    }
+
+    private func aiHighlightBorder(active: Bool) -> some View {
+        let gradient = AngularGradient(
+            gradient: Gradient(colors: Self.aiGlowColors),
+            center: .center,
+            angle: .degrees(aiHighlightPhase)
+        )
+        let pulse = 1 + 0.03 * sin(aiHighlightPhase * .pi / 180)
+
+        return ZStack {
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .stroke(gradient, lineWidth: 1.6)
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(gradient, lineWidth: 6)
+                .blur(radius: 8)
+                .opacity(0.75)
+                .scaleEffect(pulse)
+        }
+        .padding(2)
+        .opacity(active ? 1 : 0)
+        .animation(.easeInOut(duration: 0.25), value: active)
+        .allowsHitTesting(false)
     }
 
     private func applyInitialWindowSizeIfNeeded() {
@@ -675,7 +810,7 @@ struct ContentView: View {
 
         let meTrim = resolvedMeName()
         if meTrim.isEmpty {
-            appendLog("ERROR: Bitte 'Ich' auswählen oder einen benutzerdefinierten Namen eingeben.")
+            appendLog("ERROR: Bitte einen eigenen Namen auswählen oder einen benutzerdefinierten Namen eingeben.")
             return
         }
 
