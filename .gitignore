@@ -10,6 +10,7 @@
 
 # Swift Package Manager
 .build/
+build/
 Packages/
 Package.resolved
 

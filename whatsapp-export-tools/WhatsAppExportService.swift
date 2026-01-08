@@ -149,29 +149,108 @@ public enum WhatsAppExportService {
         return systemMarkers.contains(low)
     }
 
+    private static let systemTextRegexes: [NSRegularExpression] = [
+        // Deleted messages
+        try! NSRegularExpression(pattern: #"^du hast (diese|eine) nachricht gelöscht\.?$"#),
+        try! NSRegularExpression(pattern: #"^diese nachricht wurde gelöscht\.?$"#),
+        try! NSRegularExpression(pattern: #"^you deleted (this|a) message\.?$"#),
+        try! NSRegularExpression(pattern: #"^this message was deleted\.?$"#),
+
+        // Block/unblock contact
+        try! NSRegularExpression(pattern: #"^du hast diesen kontakt (blockiert|freigegeben)\.?$"#),
+        try! NSRegularExpression(pattern: #"^you (blocked|unblocked) this contact\.?$"#),
+
+        // Contact cards
+        try! NSRegularExpression(pattern: #"^.+ (ist ein kontakt|ist ein neuer kontakt|is a contact|is a new contact)\.?$"#),
+
+        // Calls
+        try! NSRegularExpression(pattern: #"^(verpasster|verpasste) (sprachanruf|videoanruf)e?\.?$"#),
+        try! NSRegularExpression(pattern: #"^(sprachanruf|videoanruf)\.?$"#),
+        try! NSRegularExpression(pattern: #"^(missed )?(voice|video) call(, \d{1,2}:\d{2})?\.?$"#),
+
+        // Group actions (DE)
+        try! NSRegularExpression(pattern: #"^.+ hat .+ hinzugefügt\.?$"#),
+        try! NSRegularExpression(pattern: #"^.+ hat .+ entfernt\.?$"#),
+        try! NSRegularExpression(pattern: #"^.+ hat .+ aus der gruppe entfernt\.?$"#),
+        try! NSRegularExpression(pattern: #"^.+ hat die gruppe verlassen\.?$"#),
+        try! NSRegularExpression(pattern: #"^.+ hat die gruppe erstellt\.?$"#),
+        try! NSRegularExpression(pattern: #"^.+ ist der gruppe beigetreten\.?$"#),
+        try! NSRegularExpression(pattern: #"^.+ ist der gruppe über den einladungslink beigetreten\.?$"#),
+        try! NSRegularExpression(pattern: #"^.+ ist über den einladungslink beigetreten\.?$"#),
+        try! NSRegularExpression(pattern: #"^.+ hat den gruppennamen geändert\.?$"#),
+        try! NSRegularExpression(pattern: #"^.+ hat den gruppenbetreff geändert\.?$"#),
+        try! NSRegularExpression(pattern: #"^.+ hat das gruppenbild geändert\.?$"#),
+        try! NSRegularExpression(pattern: #"^.+ hat die gruppenbeschreibung geändert\.?$"#),
+        try! NSRegularExpression(pattern: #"^.+ hat die gruppeninfo geändert\.?$"#),
+        try! NSRegularExpression(pattern: #"^.+ hat die gruppeneinstellungen geändert\.?$"#),
+        try! NSRegularExpression(pattern: #"^.+ hat .+ zum admin gemacht\.?$"#),
+        try! NSRegularExpression(pattern: #"^.+ ist jetzt admin\.?$"#),
+        try! NSRegularExpression(pattern: #"^.+ ist kein admin mehr\.?$"#),
+        try! NSRegularExpression(pattern: #"^du wurdest .+ hinzugefügt\.?$"#),
+        try! NSRegularExpression(pattern: #"^du wurdest .+ entfernt\.?$"#),
+        try! NSRegularExpression(pattern: #"^du bist jetzt admin\.?$"#),
+        try! NSRegularExpression(pattern: #"^du bist kein admin mehr\.?$"#),
+
+        // Group actions (EN)
+        try! NSRegularExpression(pattern: #"^.+ added .+\.?$"#),
+        try! NSRegularExpression(pattern: #"^.+ removed .+\.?$"#),
+        try! NSRegularExpression(pattern: #"^.+ left\.?$"#),
+        try! NSRegularExpression(pattern: #"^.+ joined using (this|the) group['’]s invite link\.?$"#),
+        try! NSRegularExpression(pattern: #"^.+ created (the )?group\.?$"#),
+        try! NSRegularExpression(pattern: #"^.+ changed (the )?group (subject|name|description|icon|settings|info)\.?$"#),
+        try! NSRegularExpression(pattern: #"^.+ changed this group['’]s (subject|name|description|icon|settings|info)\.?$"#),
+        try! NSRegularExpression(pattern: #"^.+ made .+ admin\.?$"#),
+        try! NSRegularExpression(pattern: #"^.+ is now an admin\.?$"#),
+        try! NSRegularExpression(pattern: #"^.+ is no longer an admin\.?$"#),
+        try! NSRegularExpression(pattern: #"^you were added.*$"#),
+        try! NSRegularExpression(pattern: #"^you were removed.*$"#),
+        try! NSRegularExpression(pattern: #"^you left\.?$"#),
+    ]
+
+    private static func matchesAnyRegex(_ text: String, patterns: [NSRegularExpression]) -> Bool {
+        let ns = text as NSString
+        let range = NSRange(location: 0, length: ns.length)
+        for re in patterns {
+            if re.firstMatch(in: text, options: [], range: range) != nil {
+                return true
+            }
+        }
+        return false
+    }
+
     private static func isSystemMessage(authorRaw: String, text: String) -> Bool {
         // Prefer author-based detection.
         if isSystemAuthor(authorRaw) { return true }
 
         // Some exports put WhatsApp notices into the message body (or the author field may be empty/"Unbekannt").
-        let lowText = _normSpace(text).lowercased()
+        let lowText = normalizedSystemText(text)
         if lowText.isEmpty { return false }
 
         // Exact markers (when the whole line matches a known WhatsApp/system notice).
         if systemMarkers.contains(lowText) { return true }
 
-        // Fuzzy markers (when the notice is longer / localized / contains extra words).
-        let needles: [String] = [
-            "ende-zu-ende-verschlüsselt",
-            "end-to-end encrypted",
-            "sicherheitsnummer",
-            "security code",
-            "hat sich geändert",
-            "changed",
-            " ist ein neuer kontakt",
-            " is a new contact",
-        ]
-        return needles.contains(where: { lowText.contains($0) })
+        // Strong keyword pairs (avoid overly-broad matches).
+        if lowText.contains("ende-zu-ende-verschlüsselt") || lowText.contains("end-to-end encrypted") {
+            return true
+        }
+        if lowText.contains("sicherheitsnummer") && (lowText.contains("geändert") || lowText.contains("changed")) {
+            return true
+        }
+        if lowText.contains("security code") && lowText.contains("changed") {
+            return true
+        }
+        if lowText.contains("telefonnummer") && (lowText.contains("geändert") || lowText.contains("changed")) {
+            return true
+        }
+        if lowText.contains("phone number") && lowText.contains("changed") {
+            return true
+        }
+        if lowText.contains("disappearing messages") || lowText.contains("selbstlöschende nachrichten") {
+            return true
+        }
+
+        // Pattern-based detection (covers group actions, contact cards, block/unblock, deletions, calls, etc.)
+        return matchesAnyRegex(lowText, patterns: systemTextRegexes)
     }
 
     // Python:
@@ -312,6 +391,14 @@ public enum WhatsAppExportService {
         return filtered.isEmpty ? uniq : filtered
     }
 
+    /// Best-effort detection of the exporter ("Ich"-Perspektive) from the chat text.
+    /// Returns nil if no reliable signal is found.
+    public static func detectMeName(chatURL: URL) throws -> String? {
+        let chatPath = chatURL.standardizedFileURL
+        let msgs = try parseMessages(chatPath)
+        return inferMeName(messages: msgs)
+    }
+
     /// Compare the original WhatsApp export folder (and sibling zip, if present) with the sidecar copies.
     /// Returns which originals are byte-identical and can be safely deleted.
     public nonisolated static func verifySidecarCopies(
@@ -386,7 +473,7 @@ public enum WhatsAppExportService {
                 // otherwise normalize its representation.
                 return applyParticipantOverride(oRaw, lookup: participantLookup)
             }
-            return chooseMeName(authors: authors)
+            return chooseMeName(messages: msgs)
         }()
 
         // Use the chat export file's creation date/time for the filename stamp.
@@ -545,7 +632,7 @@ public enum WhatsAppExportService {
             if !oRaw.isEmpty {
                 return applyParticipantOverride(oRaw, lookup: participantLookup)
             }
-            return chooseMeName(authors: authors)
+            return chooseMeName(messages: msgs)
         }()
 
         // Use creation date for filename stamp
@@ -1095,11 +1182,109 @@ public enum WhatsAppExportService {
     // "Ich"-Perspektive selection (non-interactive)
     // ---------------------------
 
+    private static let meDeletedMarkers: [String] = [
+        "du hast diese nachricht gelöscht",
+        "du hast eine nachricht gelöscht",
+        "you deleted this message",
+        "you deleted a message",
+    ]
+
+    private static let meGroupActionMarkers: [String] = [
+        "du hast die gruppe erstellt",
+        "du hast diese gruppe erstellt",
+        "du hast den gruppenbetreff geändert",
+        "du hast den gruppennamen geändert",
+        "du hast die gruppenbeschreibung geändert",
+        "du hast das gruppenbild geändert",
+        "du hast die gruppe verlassen",
+        "du hast diese gruppe verlassen",
+        "you created group",
+        "you created the group",
+        "you changed the group subject",
+        "you changed the group name",
+        "you changed the group description",
+        "you changed this group's description",
+        "you changed the group icon",
+        "you changed this group's icon",
+        "you left the group",
+    ]
+
+    private static let otherDeletedMarkers: [String] = [
+        "diese nachricht wurde gelöscht",
+        "this message was deleted",
+    ]
+
+    private static func normalizedSystemText(_ text: String) -> String {
+        let stripped = stripBOMAndBidi(text)
+        return _normSpace(stripped).lowercased()
+    }
+
+    private static func containsAny(_ haystack: String, _ needles: [String]) -> Bool {
+        for n in needles where haystack.contains(n) { return true }
+        return false
+    }
+
+    private static func inferMeName(messages: [WAMessage]) -> String? {
+        var candidates: Set<String> = []
+        var deletedByMe: [String: Int] = [:]
+        var groupActionsByMe: [String: Int] = [:]
+        var deletedByOther: [String: Int] = [:]
+
+        for m in messages {
+            let author = normalizedParticipantIdentifier(m.author)
+            if author.isEmpty { continue }
+            if isSystemAuthor(author) { continue }
+            candidates.insert(author)
+
+            let text = normalizedSystemText(m.text)
+            if text.isEmpty { continue }
+
+            if containsAny(text, meDeletedMarkers) {
+                deletedByMe[author, default: 0] += 1
+                continue
+            }
+            if containsAny(text, meGroupActionMarkers) {
+                groupActionsByMe[author, default: 0] += 1
+                continue
+            }
+            if containsAny(text, otherDeletedMarkers) {
+                deletedByOther[author, default: 0] += 1
+            }
+        }
+
+        if deletedByMe.count == 1, let me = deletedByMe.keys.first {
+            return me
+        }
+
+        if deletedByMe.count > 1 {
+            return nil
+        }
+
+        if groupActionsByMe.count == 1, let me = groupActionsByMe.keys.first {
+            return me
+        }
+
+        if groupActionsByMe.count > 1 {
+            return nil
+        }
+
+        if candidates.count == 2, deletedByOther.count == 1 {
+            let notMe = deletedByOther.keys.first!
+            return candidates.first(where: { $0 != notMe })
+        }
+
+        return nil
+    }
+
     // Python choose_me_name (ohne interaktive stdin-Logik in GUI-Service)
-    private static func chooseMeName(authors: [String]) -> String {
+    private static func chooseMeName(messages: [WAMessage]) -> String {
+        if let guessed = inferMeName(messages: messages) {
+            return guessed
+        }
+
         var uniq: [String] = []
-        for a in authors {
-            let a2 = _normSpace(a)
+        for m in messages {
+            let a2 = normalizedParticipantIdentifier(m.author)
             if a2.isEmpty { continue }
             if !uniq.contains(a2) { uniq.append(a2) }
         }
