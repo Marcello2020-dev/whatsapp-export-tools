@@ -64,9 +64,9 @@ public enum HTMLVariant: String, CaseIterable, Hashable, Sendable {
 
     public var filenameSuffix: String {
         switch self {
-        case .embedAll: return "__max"
-        case .thumbnailsOnly: return "__mid"
-        case .textOnly: return "__min"
+        case .embedAll: return "-max"
+        case .thumbnailsOnly: return "-mid"
+        case .textOnly: return "-min"
         }
     }
 
@@ -573,10 +573,10 @@ public enum WhatsAppExportService {
             )
             let sidecarBaseDir = sidecarOriginalDir.deletingLastPathComponent()
 
-            // Sidecar HTML: renders like __max but references media in the sidecar folder via relative links.
+            // Sidecar HTML: renders like -max but references media in the sidecar folder via relative links.
             let sidecarChatURL = sidecarOriginalDir.appendingPathComponent(chatPath.lastPathComponent)
             // Write sidecar HTML next to the other outputs (root of outDir) and name it consistently.
-            let sidecarHTML = outPath.appendingPathComponent("\(base)__sidecar.html")
+            let sidecarHTML = outPath.appendingPathComponent("\(base)-sdc.html")
 
             try await renderHTML(
                 msgs: msgs,
@@ -598,7 +598,7 @@ public enum WhatsAppExportService {
         return (outHTML, outMD)
     }
     
-    /// Multi-Export: erzeugt alle HTML-Varianten (__max/__mid/__min) + eine MD-Datei.
+    /// Multi-Export: erzeugt alle HTML-Varianten (-max/-mid/-min) + eine MD-Datei.
     public static func exportMulti(
         chatURL: URL,
         outDir: URL,
@@ -745,10 +745,10 @@ public enum WhatsAppExportService {
             )
             let sidecarBaseDir = sidecarOriginalDir.deletingLastPathComponent()
 
-            // Sidecar HTML: renders like __max but references media in the sidecar folder via relative links.
+            // Sidecar HTML: renders like -max but references media in the sidecar folder via relative links.
             let sidecarChatURL = sidecarOriginalDir.appendingPathComponent(chatPath.lastPathComponent)
             // Write sidecar HTML next to the other outputs (root of outDir) and name it consistently.
-            let sidecarHTML = outPath.appendingPathComponent("\(base)__sidecar.html")
+            let sidecarHTML = outPath.appendingPathComponent("\(base)-sdc.html")
 
             try await renderHTML(
                 msgs: msgs,

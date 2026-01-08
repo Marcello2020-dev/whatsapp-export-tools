@@ -26,6 +26,36 @@ struct ContentView: View {
         Color(red: 0.99, green: 0.40, blue: 0.38),
         Color(red: 0.98, green: 0.42, blue: 0.84)
     ]
+    private static let aiGlowNSColors: [NSColor] = [
+        NSColor(calibratedRed: 0.98, green: 0.42, blue: 0.84, alpha: 1),
+        NSColor(calibratedRed: 0.72, green: 0.45, blue: 0.98, alpha: 1),
+        NSColor(calibratedRed: 0.36, green: 0.66, blue: 1.00, alpha: 1),
+        NSColor(calibratedRed: 0.28, green: 0.86, blue: 0.96, alpha: 1),
+        NSColor(calibratedRed: 0.43, green: 0.96, blue: 0.66, alpha: 1),
+        NSColor(calibratedRed: 0.99, green: 0.92, blue: 0.52, alpha: 1),
+        NSColor(calibratedRed: 0.99, green: 0.66, blue: 0.40, alpha: 1),
+        NSColor(calibratedRed: 0.99, green: 0.40, blue: 0.38, alpha: 1),
+        NSColor(calibratedRed: 0.98, green: 0.42, blue: 0.84, alpha: 1)
+    ]
+    private static let aiMenuBadgeImage: NSImage = {
+        let size = NSSize(width: 12, height: 12)
+        let image = NSImage(size: size)
+        image.lockFocus()
+        let rect = NSRect(origin: .zero, size: size).insetBy(dx: 0.5, dy: 0.5)
+        let path = NSBezierPath(ovalIn: rect)
+        if let gradient = NSGradient(colors: aiGlowNSColors) {
+            gradient.draw(in: path, angle: 0)
+        } else {
+            aiGlowNSColors.first?.setFill()
+            path.fill()
+        }
+        NSColor.white.withAlphaComponent(0.65).setStroke()
+        path.lineWidth = 0.8
+        path.stroke()
+        image.unlockFocus()
+        image.isTemplate = false
+        return image
+    }()
 
 
     // MARK: - Export options
@@ -55,9 +85,9 @@ struct ContentView: View {
         /// Suffix appended to the HTML filename (before extension)
         var fileSuffix: String {
             switch self {
-            case .embedAll: return "__max"
-            case .thumbnailsOnly: return "__mid"
-            case .textOnly: return "__min"
+            case .embedAll: return "-max"
+            case .thumbnailsOnly: return "-mid"
+            case .textOnly: return "-min"
             }
         }
 
@@ -185,6 +215,7 @@ struct ContentView: View {
     // Optional overrides for participants that appear only as phone numbers in the WhatsApp export
     // Key = phone-number-like participant string as it appears in the export; Value = user-provided display name
     @State private var phoneParticipantOverrides: [String: String] = [:]
+    @State private var autoSuggestedPhoneNames: [String: String] = [:]
 
     @State private var isRunning: Bool = false
     @State private var logText: String = ""
@@ -356,7 +387,7 @@ struct ContentView: View {
             GridRow {
                 Toggle(isOn: $exportHTMLMax) {
                     HStack(spacing: 6) {
-                        Text("HTML __max (Maximal: Alles einbetten)")
+                        Text("HTML -max (Maximal: Alles einbetten)")
                         helpIcon("Bettet alle Medien per Base64 direkt in die HTML ein (größte Datei, komplett offline).")
                     }
                 }
@@ -365,7 +396,7 @@ struct ContentView: View {
 
                 Toggle(isOn: $exportHTMLMid) {
                     HStack(spacing: 6) {
-                        Text("HTML __mid (Mittel: Nur Thumbnails)")
+                        Text("HTML -mid (Mittel: Nur Thumbnails)")
                         helpIcon("Bettet nur Thumbnails ein; größere Medien werden referenziert.")
                     }
                 }
@@ -375,7 +406,7 @@ struct ContentView: View {
             GridRow {
                 Toggle(isOn: $exportHTMLMin) {
                     HStack(spacing: 6) {
-                        Text("HTML __min (Minimal: Nur Text)")
+                        Text("HTML -min (Minimal: Nur Text)")
                         helpIcon("Gibt nur Text aus, keine Medien oder Thumbnails.")
                     }
                 }
@@ -425,28 +456,33 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 6) {
                 Menu {
                     ForEach(detectedParticipants, id: \.self) { name in
-                        Button {
-                            meSelection = name
-                        } label: {
-                            HStack {
+                        Toggle(isOn: Binding(
+                            get: { meSelection == name },
+                            set: { if $0 { meSelection = name } }
+                        )) {
+                            Label {
                                 Text(name)
-                                Spacer()
-                                if meSelection == name {
-                                    Image(systemName: "checkmark")
+                            } icon: {
+                                if autoDetectedMeName == name {
+                                    Image(nsImage: Self.aiMenuBadgeImage)
+                                        .renderingMode(.original)
+                                } else {
+                                    Image(systemName: "circle")
+                                        .opacity(0)
                                 }
                             }
                         }
                     }
                     Divider()
-                    Button {
-                        meSelection = Self.customMeTag
-                    } label: {
-                        HStack {
+                    Toggle(isOn: Binding(
+                        get: { meSelection == Self.customMeTag },
+                        set: { if $0 { meSelection = Self.customMeTag } }
+                    )) {
+                        Label {
                             Text("Benutzerdefiniert…")
-                            Spacer()
-                            if meSelection == Self.customMeTag {
-                                Image(systemName: "checkmark")
-                            }
+                        } icon: {
+                            Image(systemName: "circle")
+                                .opacity(0)
                         }
                     }
                 } label: {
@@ -513,6 +549,19 @@ struct ContentView: View {
                 }
 
                 ForEach(phoneOnlyParticipants, id: \.self) { num in
+                    let overrideBinding = Binding<String>(
+                        get: { phoneParticipantOverrides[num] ?? "" },
+                        set: { newValue in
+                            phoneParticipantOverrides[num] = newValue
+                            if let suggestion = autoSuggestedPhoneNames[num] {
+                                let match = normalizedDisplayName(newValue).lowercased() == normalizedDisplayName(suggestion).lowercased()
+                                if !match {
+                                    autoSuggestedPhoneNames[num] = nil
+                                }
+                            }
+                        }
+                    )
+
                     HStack(spacing: 12) {
                         Text(num)
                             .font(.system(.body, design: .monospaced))
@@ -520,8 +569,9 @@ struct ContentView: View {
                             .truncationMode(.middle)
                             .frame(width: 210, alignment: .leading)
 
-                        TextField("Name (z. B. Max Mustermann)", text: bindingForPhoneOverride(num))
+                        TextField("Name (z. B. Max Mustermann)", text: overrideBinding)
                             .textFieldStyle(.roundedBorder)
+                            .overlay(aiHighlightBorder(active: shouldShowPhoneSuggestionGlow(for: num), cornerRadius: 6))
 
                         Spacer(minLength: 0)
                     }
@@ -580,6 +630,7 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         .waCard()
+        .overlay(aiHighlightBorder(active: isRunning, cornerRadius: 14))
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .layoutPriority(1)
     }
@@ -627,13 +678,6 @@ struct ContentView: View {
             .sorted()
     }
 
-    private func bindingForPhoneOverride(_ number: String) -> Binding<String> {
-        Binding(
-            get: { phoneParticipantOverrides[number] ?? "" },
-            set: { phoneParticipantOverrides[number] = $0 }
-        )
-    }
-
     private func displayChatPath(_ url: URL?) -> String? {
         guard let url else { return nil }
         return url.path
@@ -644,13 +688,82 @@ struct ContentView: View {
         return url.path
     }
 
+    private func suggestedChatSubfolderName(chatURL: URL, meName: String) -> String {
+        if let fromExportFolder = chatNameFromExportFolder(chatURL: chatURL) {
+            return safeFolderName(fromExportFolder)
+        }
+
+        let meNorm = normalizedDisplayName(meName).lowercased()
+        let partners = detectedParticipants
+            .map { normalizedDisplayName($0) }
+            .filter { !$0.isEmpty && $0.lowercased() != meNorm }
+
+        let raw = partners.first ?? detectedParticipants.first ?? "WhatsApp Chat"
+        return safeFolderName(raw)
+    }
+
+    private func chatNameFromExportFolder(chatURL: URL) -> String? {
+        let folder = normalizedDisplayName(chatURL.deletingLastPathComponent().lastPathComponent)
+        guard !folder.isEmpty else { return nil }
+
+        let lower = folder.lowercased()
+        let genericNames = [
+            "whatsapp chat",
+            "whatsapp-chat"
+        ]
+        if genericNames.contains(lower) {
+            return nil
+        }
+
+        let prefixes = [
+            "WhatsApp Chat - ",
+            "WhatsApp Chat – ",
+            "WhatsApp Chat — ",
+            "WhatsApp Chat with ",
+            "WhatsApp Chat mit ",
+            "WhatsApp-Chat - ",
+            "WhatsApp-Chat – ",
+            "WhatsApp-Chat — ",
+            "WhatsApp-Chat with ",
+            "WhatsApp-Chat mit "
+        ]
+
+        for prefix in prefixes {
+            if lower.hasPrefix(prefix.lowercased()) {
+                let suffix = String(folder.dropFirst(prefix.count))
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                return suffix.isEmpty ? nil : suffix
+            }
+        }
+
+        return folder
+    }
+
+    private func normalizedDisplayName(_ s: String) -> String {
+        let filteredScalars = s.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }
+        let cleaned = String(String.UnicodeScalarView(filteredScalars))
+        return cleaned.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+    }
+
+    private func safeFolderName(_ s: String, maxLen: Int = 120) -> String {
+        var x = s
+            .replacingOccurrences(of: "/", with: " ")
+            .replacingOccurrences(of: ":", with: " ")
+
+        let filteredScalars = x.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }
+        x = String(String.UnicodeScalarView(filteredScalars))
+        x = x.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+        x = x.trimmingCharacters(in: CharacterSet(charactersIn: " ."))
+
+        if x.isEmpty { x = "WhatsApp Chat" }
+        if x.count > maxLen {
+            x = String(x.prefix(maxLen)).trimmingCharacters(in: CharacterSet(charactersIn: " ."))
+        }
+        return x
+    }
+
     private func helpIcon(_ text: String) -> some View {
-        Image(systemName: "questionmark.circle.fill")
-            .font(.system(size: 12, weight: .semibold))
-            .foregroundStyle(.secondary)
-            .symbolRenderingMode(.hierarchical)
-            .imageScale(.medium)
-            .help(Text(text))
+        HelpButton(text: text)
     }
 
     private var shouldShowAIGlow: Bool {
@@ -658,7 +771,14 @@ struct ContentView: View {
         return meSelection == autoDetectedMeName
     }
 
-    private func aiHighlightBorder(active: Bool) -> some View {
+    private func shouldShowPhoneSuggestionGlow(for phone: String) -> Bool {
+        guard let suggestion = autoSuggestedPhoneNames[phone] else { return false }
+        let current = normalizedDisplayName(phoneParticipantOverrides[phone] ?? "")
+        guard !current.isEmpty else { return false }
+        return current.lowercased() == normalizedDisplayName(suggestion).lowercased()
+    }
+
+    private func aiHighlightBorder(active: Bool, cornerRadius: CGFloat = 7) -> some View {
         let gradient = AngularGradient(
             gradient: Gradient(colors: Self.aiGlowColors),
             center: .center,
@@ -667,9 +787,9 @@ struct ContentView: View {
         let pulse = 1 + 0.03 * sin(aiHighlightPhase * .pi / 180)
 
         return ZStack {
-            RoundedRectangle(cornerRadius: 7, style: .continuous)
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                 .stroke(gradient, lineWidth: 1.6)
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
+            RoundedRectangle(cornerRadius: cornerRadius + 1, style: .continuous)
                 .stroke(gradient, lineWidth: 6)
                 .blur(radius: 8)
                 .opacity(0.75)
@@ -745,7 +865,20 @@ struct ContentView: View {
             if parts.isEmpty { parts = ["Ich"] }
             detectedParticipants = parts
             let detectedMeRaw = try? WhatsAppExportService.detectMeName(chatURL: chatURL)
-            let detectedMe = detectedMeRaw.flatMap { parts.contains($0) ? $0 : nil }
+            var detectedMe = detectedMeRaw.flatMap { parts.contains($0) ? $0 : nil }
+
+            let partnerHint = chatNameFromExportFolder(chatURL: chatURL)
+            if detectedMe == nil, let partnerHint, parts.count == 2 {
+                let partnerNorm = normalizedDisplayName(partnerHint).lowercased()
+                if parts.contains(where: { normalizedDisplayName($0).lowercased() == partnerNorm }) {
+                    detectedMe = parts.first(where: { normalizedDisplayName($0).lowercased() != partnerNorm })
+                } else {
+                    let phoneCandidates = parts.filter { Self.isPhoneNumberLike($0) }
+                    if phoneCandidates.count == 1 {
+                        detectedMe = parts.first(where: { $0 != phoneCandidates[0] })
+                    }
+                }
+            }
             autoDetectedMeName = detectedMe
 
             // Keep overrides only for phone-number-like participants; preserve existing typed names.
@@ -754,7 +887,25 @@ struct ContentView: View {
             for p in phones {
                 newOverrides[p] = phoneParticipantOverrides[p] ?? ""
             }
+            var newAutoSuggested: [String: String] = [:]
+            for (phone, suggestion) in autoSuggestedPhoneNames {
+                guard phones.contains(phone) else { continue }
+                let current = normalizedDisplayName(newOverrides[phone] ?? "")
+                if !current.isEmpty,
+                   current.lowercased() == normalizedDisplayName(suggestion).lowercased() {
+                    newAutoSuggested[phone] = suggestion
+                }
+            }
+            if let partnerHint, phones.count == 1, parts.count == 2 {
+                let phone = phones[0]
+                let existing = newOverrides[phone]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                if existing.isEmpty {
+                    newOverrides[phone] = partnerHint
+                    newAutoSuggested[phone] = partnerHint
+                }
+            }
             phoneParticipantOverrides = newOverrides
+            autoSuggestedPhoneNames = newAutoSuggested
 
             if meSelection != Self.customMeTag {
                 let cur = meSelection.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -770,6 +921,7 @@ struct ContentView: View {
             detectedParticipants = ["Ich"]
             if meSelection != Self.customMeTag { meSelection = "Ich" }
             autoDetectedMeName = nil
+            autoSuggestedPhoneNames = [:]
             appendLog("WARN: Teilnehmer konnten nicht ermittelt werden. \(error)")
         }
     }
@@ -796,14 +948,6 @@ struct ContentView: View {
 
     @MainActor
     private func runExportFlow(chatURL: URL, outDir: URL, allowOverwrite: Bool) async {
-        // outDir exists by workflow (picked by user), but creating it is harmless.
-        do {
-            try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
-        } catch {
-            appendLog("ERROR: Failed to create output dir: \(outDir.path)\n\(error)")
-            return
-        }
-
         if detectedParticipants.isEmpty {
             refreshParticipants(for: chatURL)
         }
@@ -814,12 +958,23 @@ struct ContentView: View {
             return
         }
 
+        let subfolderName = suggestedChatSubfolderName(chatURL: chatURL, meName: meTrim)
+        let exportDir = outDir.appendingPathComponent(subfolderName, isDirectory: true)
+
+        // exportDir exists by workflow (picked by user + subfolder), but creating it is harmless.
+        do {
+            try FileManager.default.createDirectory(at: exportDir, withIntermediateDirectories: true)
+        } catch {
+            appendLog("ERROR: Failed to create output dir: \(exportDir.path)\n\(error)")
+            return
+        }
+
         isRunning = true
         defer { isRunning = false }
 
         appendLog("=== Export ===")
         appendLog("Chat: \(chatURL.path)")
-        appendLog("Ziel: \(outDir.path)")
+        appendLog("Ziel: \(exportDir.path)")
         
         let selectedVariantsInOrder: [HTMLVariant] = [
             exportHTMLMax ? .embedAll : nil,
@@ -832,9 +987,9 @@ struct ContentView: View {
 
         let htmlLabel: String = {
             var parts: [String] = []
-            if exportHTMLMax { parts.append("__max") }
-            if exportHTMLMid { parts.append("__mid") }
-            if exportHTMLMin { parts.append("__min") }
+            if exportHTMLMax { parts.append("-max") }
+            if exportHTMLMid { parts.append("-mid") }
+            if exportHTMLMin { parts.append("-min") }
             return parts.isEmpty ? "AUS" : parts.joined(separator: ", ")
         }()
 
@@ -862,7 +1017,7 @@ struct ContentView: View {
             let fm = FileManager.default
 
             func makeTempDir() throws -> URL {
-                let tmp = outDir.appendingPathComponent(".wa_export_tmp_\(UUID().uuidString)", isDirectory: true)
+                let tmp = exportDir.appendingPathComponent(".wa_export_tmp_\(UUID().uuidString)", isDirectory: true)
                 try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
                 return tmp
             }
@@ -876,7 +1031,7 @@ struct ContentView: View {
                 } else {
                     name = stem + variant.fileSuffix + "." + ext
                 }
-                return outDir.appendingPathComponent(name)
+                return exportDir.appendingPathComponent(name)
             }
 
             // Probe once to learn the base filenames produced by the service (no sidecar).
@@ -899,7 +1054,7 @@ struct ContentView: View {
             let baseMDName = probe.md.lastPathComponent
 
             let plannedHTMLs: [URL] = selectedVariantsInOrder.map { htmlDestURL(baseHTMLName: baseHTMLName, variant: $0) }
-            let plannedMD: URL? = wantsMD ? outDir.appendingPathComponent(baseMDName) : nil
+            let plannedMD: URL? = wantsMD ? exportDir.appendingPathComponent(baseMDName) : nil
 
             if !allowOverwrite {
                 var existing: [URL] = []
@@ -915,14 +1070,14 @@ struct ContentView: View {
                 if let md = plannedMD, fm.fileExists(atPath: md.path) { try? fm.removeItem(at: md) }
             }
 
-            // Choose a primary variant for the outDir run.
+            // Choose a primary variant for the exportDir run.
             // Needed for Sidecar and/or Markdown, or for the first selected HTML.
             let primaryVariant: HTMLVariant = selectedVariantsInOrder.first ?? .textOnly
 
-            // Run once into outDir so Sidecar (if enabled) lands in the target folder.
+            // Run once into exportDir so Sidecar (if enabled) lands in the target folder.
             let first = try await WhatsAppExportService.export(
                 chatURL: chatURL,
-                outDir: outDir,
+                outDir: exportDir,
                 meNameOverride: meTrim,
                 participantNameOverrides: participantNameOverrides,
                 enablePreviews: primaryVariant.enablePreviews,
@@ -934,7 +1089,7 @@ struct ContentView: View {
 
             var htmlByVariant: [HTMLVariant: URL] = [:]
 
-            // Handle HTML created by the outDir run
+            // Handle HTML created by the exportDir run
             if selectedVariantsInOrder.contains(primaryVariant) {
                 let dest = htmlDestURL(baseHTMLName: baseHTMLName, variant: primaryVariant)
                 if allowOverwrite, fm.fileExists(atPath: dest.path) { try? fm.removeItem(at: dest) }
@@ -947,7 +1102,7 @@ struct ContentView: View {
                 }
             }
 
-            // Handle Markdown created by the outDir run
+            // Handle Markdown created by the exportDir run
             var finalMD: URL? = nil
             if wantsMD {
                 finalMD = first.md
@@ -1001,7 +1156,7 @@ struct ContentView: View {
             if wantsDeleteOriginals {
                 await offerSidecarDeletionIfPossible(
                     chatURL: chatURL,
-                    outDir: outDir,
+                    outDir: exportDir,
                     baseHTMLName: baseHTMLName
                 )
             }
@@ -1095,6 +1250,35 @@ private struct WASection<Content: View>: View {
                 .foregroundStyle(.secondary)
             content()
         }
+    }
+}
+
+private struct HelpButton: View {
+    let text: String
+    @State private var isPresented = false
+
+    var body: some View {
+        Button {
+            isPresented.toggle()
+        } label: {
+            Image(systemName: "questionmark.circle.fill")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .symbolRenderingMode(.hierarchical)
+                .imageScale(.medium)
+                .padding(2)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .popover(isPresented: $isPresented, arrowEdge: .bottom) {
+            Text(text)
+                .font(.system(size: 12))
+                .multilineTextAlignment(.leading)
+                .frame(maxWidth: 360, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(12)
+        }
+        .accessibilityLabel("Hilfe")
     }
 }
 
