@@ -11,7 +11,16 @@ import SwiftUI
 struct whatsapp_export_toolsApp: App {
     var body: some Scene {
         WindowGroup("WhatsApp Export Tools") {
-            ContentView()
+            Group {
+                if AIGlowSnapshotRunner.isEnabled {
+                    ContentView.GlowSnapshotView(isRunning: false)
+                } else {
+                    ContentView()
+                }
+            }
+            .onAppear {
+                AIGlowSnapshotRunner.runIfNeeded()
+            }
         }
         .defaultSize(width: 980, height: 780)
     }

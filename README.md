@@ -1,31 +1,50 @@
 # WhatsApp Export Tools
 
-![whatsapp-export-tools – GUI](docs/screenshot-ui.png)
+![WhatsApp Export Tools – UI (Light)](docs/screenshot-ui-lightmode.png)
+![WhatsApp Export Tools – UI (Dark)](docs/screenshoot-ui-darkmode.png)
 
-Convert exported WhatsApp chat logs (`_chat.txt`) into **readable HTML** (WhatsApp-like bubble view) and **Markdown**.
-
-This repository contains:
-- a **macOS GUI app (SwiftUI)** for interactive export
-- a **Python converter (CLI)** for lightweight / iOS a-Shell workflows
+macOS SwiftUI app for turning exported WhatsApp chat logs (`_chat.txt`) into **readable HTML archives** (WhatsApp-like bubble view) and **Markdown** that open in standard browsers.
 
 ---
 
-## What this does
+## Overview
 
-- Parses common WhatsApp TXT export formats, including:
-  - `[DD.MM.YY, HH:MM(:SS)] Name: Text`
-  - `DD.MM.YYYY, HH:MM(:SS) - Name: Text`
-  - `YYYY-MM-DD HH:MM:SS Name: Text`
-- Preserves multi-line messages (lines without a new timestamp are appended to the previous message).
-- Produces:
-  - **HTML** with day separators, message bubbles, timestamps, optional link previews, and optional inline image attachments
-  - **Markdown** grouped by day with timestamps and attachment references
+- Parses common WhatsApp TXT export formats (DE/EN variants).
+- Preserves multi-line messages and system notices.
+- Produces HTML archives and Markdown summaries for long-term reading.
 
----
+## Features
 
-## macOS App (SwiftUI)
+- WhatsApp-style HTML layout with day separators, timestamps, and link previews.
+- Attachment handling with optional embedding, thumbnails, or sidecar references.
+- Sidecar export for faster loading and smaller HTML files.
+- macOS GUI with export presets and best-effort participant detection.
 
-### Build
+## Output formats
+
+HTML variants (suffixes are part of the filename):
+- `-max` — single HTML file with all media embedded (best offline portability).
+- `-mid` — HTML with embedded thumbnails, large media kept external.
+- `-min` — text-only HTML (smallest, email-friendly).
+- `-sdc` — sidecar HTML that references media files in a folder for fast loading.
+
+Markdown:
+- One `.md` file grouped by day with timestamps and attachment references.
+
+## UI: Apple Intelligence-style AI Glow
+
+The macOS UI focuses not only on data conversion, but also on a high-quality **Apple Intelligence-style glow** (Dark + Light) that closely matches the Apple-like AI glow appearance on macOS. Screenshots below show the current default (Siri Pill palette).
+
+![AI Glow (Dark)](docs/ai-glow-dark.png)
+![AI Glow (Light)](docs/ai-glow-light.png)
+
+## Status (legacy Python)
+
+A legacy Python script remains in the repo for reference/backward compatibility, but it is **not actively developed**. The actively maintained implementation is the macOS SwiftUI app.
+
+- Legacy script: `whatsapp_export_to_md_html.py`
+
+## Build & Run (macOS)
 
 1. Open the Xcode project.
 2. Select the `whatsapp-export-tools` scheme.
@@ -34,64 +53,15 @@ This repository contains:
 ### Use
 
 1. **Chat-Export auswählen**: select the exported WhatsApp TXT file (typically `_chat.txt`).
-2. **Zielordner auswählen**: select the folder where the exports should be written.
-3. **Ich**: select your own participant name (or choose **Benutzerdefiniert…**).
-4. Optional: toggle **Online-Linkvorschauen deaktivieren**.
+2. **Zielordner auswählen**: choose where the exports should be written.
+3. **Chat-Partner**: select the counterparty (auto-detected when possible).
+4. Choose the desired output variants (HTML + Markdown + Sidecar).
 5. Click **Exportieren**.
-
-### Output
-
-The app writes two files into the chosen target folder:
-- `… .html`
-- `… .md`
-
-The filenames include a participant summary, the message period, and a timestamp.
-
-### Attachments
-
-If the WhatsApp export folder contains image attachments referenced as `<Anhang: ...>`:
-- **HTML** embeds supported image types inline (base64 `data:` URLs).
-- **Markdown** links to the filename (keep attachments next to the `.md` file when moving it).
-
----
-
-## Python (CLI)
-
-The Python script is intended for lightweight usage (including iOS a-Shell). It focuses on Markdown output.
-
-### Files
-
-- `whatsapp_export_to_md.py` — converter script
-
-### Usage (a-Shell / iOS)
-
-1) Put the exported chat file next to the script (example: `_chat.txt`).
-
-2) Run:
-
-    python3 -u whatsapp_export_to_md.py _chat.txt --me "YOUR_NAME"
-
-This produces a timestamped Markdown report grouped by date.
-
----
-
-## Icon tooling (macOS)
-
-For macOS app icons, an icon helper script is included:
-- `make_icons.sh` (uses `sips` + `iconutil`)
-
-It converts a 1024×1024 PNG source icon into an `.iconset` and `.icns`.
-
----
 
 ## Notes
 
 - Keep the WhatsApp export TXT and its attachment files in the same folder during export.
 - Some URLs (notably Google services) may show consent/interstitial pages; link preview handling is best-effort.
-
-## Source
-
-Dieses Repository enthält den vollständigen Source Code der macOS-App **whatsapp-export-tools** (SwiftUI).
 
 ## License
 

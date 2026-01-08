@@ -29,7 +29,7 @@ import QuickLookThumbnailing
 import UniformTypeIdentifiers
 #endif
 
-// MARK: - Models (Python: @dataclass Message / Preview)
+// MARK: - Models
 
 public struct WAMessage: Sendable {
     public var ts: Date
@@ -253,36 +253,33 @@ public enum WhatsAppExportService {
         return matchesAnyRegex(lowText, patterns: systemTextRegexes)
     }
 
-    // Python:
-    // _pat_iso = r"^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})\s+([^:]+?):\s*(.*)$"
+    // ISO-style timestamp + author + text.
     private static let patISO = try! NSRegularExpression(
         pattern: #"^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})\s+([^:]+?):\s*(.*)$"#,
         options: []
     )
 
-    // Python:
-    // _pat_de = r"^(\d{1,2}\.\d{1,2}\.\d{2,4}),\s+(\d{1,2}:\d{2})(?::(\d{2}))?\s+-\s+([^:]+?):\s*(.*)$"
+    // German-style export timestamp + author + text.
     private static let patDE = try! NSRegularExpression(
         pattern: #"^(\d{1,2}\.\d{1,2}\.\d{2,4}),\s+(\d{1,2}:\d{2})(?::(\d{2}))?\s+-\s+([^:]+?):\s*(.*)$"#,
         options: []
     )
 
-    // Python:
-    // _pat_bracket = r"^\[(\d{1,2}\.\d{1,2}\.\d{2,4}),\s+(\d{1,2}:\d{2})(?::(\d{2}))?\]\s+([^:]+?):\s*(.*)$"
+    // Bracketed timestamp format (often used in exports).
     private static let patBracket = try! NSRegularExpression(
         pattern: #"^\[(\d{1,2}\.\d{1,2}\.\d{2,4}),\s+(\d{1,2}:\d{2})(?::(\d{2}))?\]\s+([^:]+?):\s*(.*)$"#,
         options: []
     )
 
     // URLs
-    // Python: _url_re = r"(https?://[^\s<>\]]+)"
+    // URL pattern for link extraction.
     private static let urlRe = try! NSRegularExpression(
         pattern: #"(https?://[^\s<>\]]+)"#,
         options: [.caseInsensitive]
     )
 
     // Attachments
-    // Python: _attach_re = r"<\s*Anhang:\s*([^>]+?)\s*>"
+    // Attachment markers like "<Anhang: filename>".
     private static let attachRe = try! NSRegularExpression(
         pattern: #"<\s*Anhang:\s*([^>]+?)\s*>"#,
         options: [.caseInsensitive]
@@ -302,7 +299,7 @@ public enum WhatsAppExportService {
         options: [.caseInsensitive, .dotMatchesLineSeparators]
     )
 
-    // Weekday mapping (Python WEEKDAY_DE: Monday=0 ... Sunday=6)
+    // Weekday mapping (Monday=0 ... Sunday=6).
     private static let weekdayDE: [Int: String] = [
         0: "Montag",
         1: "Dienstag",
@@ -774,7 +771,7 @@ public enum WhatsAppExportService {
     // Helpers: normalize / url
     // ---------------------------
 
-    // Python _norm_space
+    // Normalize whitespace and strip direction marks.
     private static func _normSpace(_ s: String) -> String {
         var x = s.replacingOccurrences(of: "\u{00A0}", with: " ").trimmingCharacters(in: .whitespacesAndNewlines)
         // direction marks
@@ -907,7 +904,7 @@ public enum WhatsAppExportService {
             .replacingOccurrences(of: "\u{202C}", with: "")
     }
 
-    // Python extract_urls
+    // Extract distinct URLs from a text blob.
     private static func extractURLs(_ text: String) -> [String] {
         let ns = text as NSString
         let matches = urlRe.matches(in: text, options: [], range: NSRange(location: 0, length: ns.length))
@@ -988,7 +985,7 @@ public enum WhatsAppExportService {
         return shorten(hostPlusPath)
     }
 
-    // Python is_youtube_url
+    // Extract YouTube video ID from a URL (if present).
     private static func youtubeVideoID(from urlString: String) -> String? {
         guard let u = URL(string: urlString), let host = u.host?.lowercased() else { return nil }
         let path = u.path
@@ -1011,7 +1008,7 @@ public enum WhatsAppExportService {
         return nil
     }
 
-    // Python safe_filename_stem
+    // Produce a filesystem-safe ASCII stem (used for stable attachment names).
     private static func safeFilenameStem(_ stem: String) -> String {
         let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-")
         var out = ""
@@ -1060,7 +1057,7 @@ public enum WhatsAppExportService {
     // Parsing WhatsApp exports
     // ---------------------------
 
-    // Python parse_dt_de
+    // Parse "dd.MM.yyyy, HH:mm(:ss)" timestamps used in WhatsApp exports.
     private static func parseDT_DE(date: String, hm: String, sec: String?) -> Date? {
         let parts = date.split(separator: ".")
         guard parts.count == 3 else { return nil }
@@ -1096,7 +1093,7 @@ public enum WhatsAppExportService {
         return g
     }
 
-    // Python parse_messages
+    // Parse WhatsApp export lines into message records.
     private static func parseMessages(_ chatURL: URL) throws -> [WAMessage] {
         let s: String
         do {
@@ -1276,7 +1273,7 @@ public enum WhatsAppExportService {
         return nil
     }
 
-    // Python choose_me_name (ohne interaktive stdin-Logik in GUI-Service)
+    // Pick a default local participant name (GUI can override this later).
     private static func chooseMeName(messages: [WAMessage]) -> String {
         if let guessed = inferMeName(messages: messages) {
             return guessed
@@ -1937,8 +1934,7 @@ private static func stageThumbnailForExport(
                 deg += 1
             }
 
-            // Return literal characters. htmlEscape() will then match Python's html.escape(...)
-            // (apostrophe -> &#x27;, quote -> &quot;).
+            // Return literal characters; htmlEscape() handles escaping consistently.
             let secStr = String(format: "%.1f", sec)
             return "\(deg)°\(min)'\(secStr)\"\(hemi)"
         }
@@ -2205,7 +2201,7 @@ private static func stageThumbnailForExport(
 
         let (data, resp) = try await URLSession.shared.data(for: req)
 
-        // Match urllib.request behavior: non-2xx => throw (HTTPError in Python).
+        // Treat non-2xx responses as errors to keep preview behavior predictable.
         if let http = resp as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
             throw URLError(.badServerResponse)
         }
@@ -2215,13 +2211,13 @@ private static func stageThumbnailForExport(
     }
 
     private static func resolveURL(base: String, maybe: String) -> String {
-        // Python: urllib.parse.urljoin
+        // Resolve relative URLs against the base page.
         guard let b = URL(string: base) else { return maybe }
         return URL(string: maybe, relativeTo: b)?.absoluteURL.absoluteString ?? maybe
     }
 
     private static func parseMeta(_ htmlBytes: Data) -> [String: String] {
-        // Python: decode up to 800_000 chars
+        // Limit HTML parsing to a bounded prefix for performance/stability.
         let limited = htmlBytes.prefix(800_000)
         let s = String(data: limited, encoding: .utf8) ?? String(decoding: limited, as: UTF8.self)
 
@@ -2284,7 +2280,7 @@ private static func stageThumbnailForExport(
 
         // Google Maps: avoid consent/interstitial pages and keep output stable.
         // For coordinate links like .../maps/search/?api=1&query=52.508450,13.372972
-        // synthesize the title Google typically returns (Python then HTML-escapes it).
+        // Synthesize the title Google typically returns (title is HTML-escaped later).
         if let u = URL(string: url),
            isGoogleMapsCoordinateURL(u),
            let (lat, lon) = googleMapsLatLon(u) {
@@ -2383,7 +2379,7 @@ private static func stageThumbnailForExport(
     }
 
     private static func htmlEscapeKeepNewlines(_ s: String) -> String {
-        // Python: "<br>".join(html.escape(s).splitlines())
+        // Convert newlines to <br> after escaping.
         let esc = htmlEscape(s)
         return esc.components(separatedBy: .newlines).joined(separator: "<br>")
     }
@@ -2506,7 +2502,7 @@ private static func stageThumbnailForExport(
             return acc + (isSystemMessage(authorRaw: authorNorm, text: textWoAttach) ? 0 : 1)
         }
 
-        // CSS exactly from Python
+        // CSS is intentionally kept stable to preserve HTML rendering.
         let css = #"""
         :root{
           --bg:#e5ddd5;
@@ -2671,9 +2667,8 @@ private static func stageThumbnailForExport(
         .fileline{margin-top:10px;font-size:15px;color:#2b2b2b;opacity:.85;word-break:break-all;}
         """#
 
-        // Python emits the <style> block with a newline after <style> and 4-space indentation.
-        // To keep the CSS source readable in Swift while matching Python byte-for-byte, we add
-        // a 4-space prefix to every CSS line at output time.
+        // Keep the <style> block formatted with a newline after <style> and 4-space indentation.
+        // This keeps output deterministic while preserving readable source formatting.
         let cssIndented = "    " + css.replacingOccurrences(of: "\n", with: "\n    ")
 
         var parts: [String] = []
