@@ -130,19 +130,19 @@ public enum WhatsAppExportService {
     // Constants / Regex
     // ---------------------------
 
-    private static let systemAuthor = "System"
+    nonisolated private static let systemAuthor = "System"
 
-    private static let attachmentRelBaseDir: URL? = nil
+    nonisolated private static let attachmentRelBaseDir: URL? = nil
 
     // Shared system markers (used for participant filtering, title building, and me-name selection)
-    private static let systemMarkers: Set<String> = [
+    nonisolated private static let systemMarkers: Set<String> = [
         "system",
         "whatsapp",
         "messages to this chat are now secured",
         "nachrichten und anrufe sind ende-zu-ende-verschlüsselt",
     ]
 
-    private static func isSystemAuthor(_ name: String) -> Bool {
+    nonisolated private static func isSystemAuthor(_ name: String) -> Bool {
         let low = _normSpace(name).lowercased()
         if low.isEmpty { return true }
         if low == systemAuthor.lowercased() { return true }
@@ -254,19 +254,19 @@ public enum WhatsAppExportService {
     }
 
     // ISO-style timestamp + author + text.
-    private static let patISO = try! NSRegularExpression(
+    nonisolated private static let patISO = try! NSRegularExpression(
         pattern: #"^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})\s+([^:]+?):\s*(.*)$"#,
         options: []
     )
 
     // German-style export timestamp + author + text.
-    private static let patDE = try! NSRegularExpression(
+    nonisolated private static let patDE = try! NSRegularExpression(
         pattern: #"^(\d{1,2}\.\d{1,2}\.\d{2,4}),\s+(\d{1,2}:\d{2})(?::(\d{2}))?\s+-\s+([^:]+?):\s*(.*)$"#,
         options: []
     )
 
     // Bracketed timestamp format (often used in exports).
-    private static let patBracket = try! NSRegularExpression(
+    nonisolated private static let patBracket = try! NSRegularExpression(
         pattern: #"^\[(\d{1,2}\.\d{1,2}\.\d{2,4}),\s+(\d{1,2}:\d{2})(?::(\d{2}))?\]\s+([^:]+?):\s*(.*)$"#,
         options: []
     )
@@ -311,7 +311,7 @@ public enum WhatsAppExportService {
     ]
 
     // Date formatters (stable)
-    private static let isoDTFormatter: DateFormatter = {
+    nonisolated private static let isoDTFormatter: DateFormatter = {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
         f.timeZone = TimeZone.current
@@ -319,7 +319,7 @@ public enum WhatsAppExportService {
         return f
     }()
 
-    private static let exportDTFormatter: DateFormatter = {
+    nonisolated private static let exportDTFormatter: DateFormatter = {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
         f.timeZone = TimeZone.current
@@ -328,7 +328,7 @@ public enum WhatsAppExportService {
     }()
 
     // File-name friendly stamps (Finder style): dots in dates, no seconds, no colon.
-    private static let fileStampFormatter: DateFormatter = {
+    nonisolated private static let fileStampFormatter: DateFormatter = {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
         f.timeZone = TimeZone.current
@@ -337,7 +337,7 @@ public enum WhatsAppExportService {
         return f
     }()
 
-    private static let fileDateOnlyFormatter: DateFormatter = {
+    nonisolated private static let fileDateOnlyFormatter: DateFormatter = {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
         f.timeZone = TimeZone.current
@@ -594,6 +594,72 @@ public enum WhatsAppExportService {
 
         return (outHTML, outMD)
     }
+
+    /// Computes the base output filename (without extension) for the given chat export.
+    nonisolated public static func computeOutputBaseName(
+        chatURL: URL,
+        meNameOverride: String?,
+        participantNameOverrides: [String: String] = [:]
+    ) throws -> String {
+        let chatPath = chatURL.standardizedFileURL
+
+        var msgs = try parseMessages(chatPath)
+
+        let participantLookup = buildParticipantOverrideLookup(participantNameOverrides)
+        for i in msgs.indices {
+            let a = msgs[i].author
+            if isSystemAuthor(a) { continue }
+            msgs[i].author = applyParticipantOverride(a, lookup: participantLookup)
+        }
+
+        let authors = msgs.map { $0.author }.filter { !_normSpace($0).isEmpty }
+        let meName = {
+            let oRaw = _normSpace(meNameOverride ?? "")
+            if !oRaw.isEmpty {
+                return applyParticipantOverride(oRaw, lookup: participantLookup)
+            }
+            return chooseMeName(messages: msgs)
+        }()
+
+        let chatFileAttrs = (try? FileManager.default.attributesOfItem(atPath: chatPath.path)) ?? [:]
+        let chatCreatedAt = (chatFileAttrs[.creationDate] as? Date)
+            ?? (chatFileAttrs[.modificationDate] as? Date)
+            ?? Date()
+
+        let uniqAuthors = Array(Set(authors.map { _normSpace($0) }))
+            .filter { !$0.isEmpty && !isSystemAuthor($0) }
+            .sorted()
+
+        let meNorm = _normSpace(meName).lowercased()
+        let partners = uniqAuthors.filter { _normSpace($0).lowercased() != meNorm }
+
+        let convoPart: String = {
+            if partners.isEmpty {
+                return "\(meName) ↔ Unbekannt"
+            }
+            if partners.count == 1 {
+                return "\(meName) ↔ \(partners[0])"
+            }
+            if partners.count <= 3 {
+                return "\(meName) ↔ \(partners.joined(separator: ", "))"
+            }
+            return "\(meName) ↔ \(partners.prefix(3).joined(separator: ", ")) +\(partners.count - 3) weitere"
+        }()
+
+        let periodPart: String = {
+            guard let minD = msgs.min(by: { $0.ts < $1.ts })?.ts,
+                  let maxD = msgs.max(by: { $0.ts < $1.ts })?.ts else {
+                return "Keine Nachrichten"
+            }
+            let start = fileDateOnlyFormatter.string(from: minD)
+            let end = fileDateOnlyFormatter.string(from: maxD)
+            return "\(start) bis \(end)"
+        }()
+
+        let createdStamp = fileStampFormatter.string(from: chatCreatedAt)
+        let baseRaw = "WhatsApp Chat · \(convoPart) · \(periodPart) · Chat.txt erstellt \(createdStamp)"
+        return safeFinderFilename(baseRaw)
+    }
     
     /// Multi-Export: erzeugt alle HTML-Varianten (-max/-mid/-min) + eine MD-Datei.
     public static func exportMulti(
@@ -772,7 +838,7 @@ public enum WhatsAppExportService {
     // ---------------------------
 
     // Normalize whitespace and strip direction marks.
-    private static func _normSpace(_ s: String) -> String {
+    nonisolated private static func _normSpace(_ s: String) -> String {
         var x = s.replacingOccurrences(of: "\u{00A0}", with: " ").trimmingCharacters(in: .whitespacesAndNewlines)
         // direction marks
         x = x
@@ -792,7 +858,7 @@ public enum WhatsAppExportService {
 
     /// Heuristic check whether a string looks like a phone-number participant label.
     /// WhatsApp exports often use formats like "+49 171 1234567", "+491711234567", "0171 1234567".
-    private static func isPhoneCandidate(_ s: String) -> Bool {
+    nonisolated private static func isPhoneCandidate(_ s: String) -> Bool {
         let x = _normSpace(s)
         if x.isEmpty { return false }
 
@@ -815,7 +881,7 @@ public enum WhatsAppExportService {
     /// - removes spaces and punctuation
     /// - keeps leading '+' if present
     /// - converts leading "00" to '+'
-    private static func normalizePhoneKey(_ s: String) -> String {
+    nonisolated private static func normalizePhoneKey(_ s: String) -> String {
         let x = _normSpace(s)
         if x.isEmpty { return "" }
 
@@ -842,7 +908,7 @@ public enum WhatsAppExportService {
 
     /// Normalizes participant identifiers so phone numbers are represented consistently.
     /// If the string is not a phone candidate, it is returned unchanged (normalized whitespace only).
-    private static func normalizedParticipantIdentifier(_ s: String) -> String {
+    nonisolated private static func normalizedParticipantIdentifier(_ s: String) -> String {
         let x = _normSpace(s)
         if !isPhoneCandidate(x) { return x }
         let k = normalizePhoneKey(x)
@@ -851,7 +917,7 @@ public enum WhatsAppExportService {
 
     /// Builds a lookup map that supports both raw keys and normalized phone keys.
     /// Values are trimmed and empty values are ignored.
-    private static func buildParticipantOverrideLookup(_ overrides: [String: String]) -> [String: String] {
+    nonisolated private static func buildParticipantOverrideLookup(_ overrides: [String: String]) -> [String: String] {
         var map: [String: String] = [:]
         map.reserveCapacity(overrides.count * 2)
 
@@ -879,7 +945,7 @@ public enum WhatsAppExportService {
     /// - If an override exists (raw or normalized phone key), return the override name.
     /// - Otherwise, if it is phone-like, return the normalized phone representation.
     /// - Otherwise, return the original author (normalized whitespace only).
-    private static func applyParticipantOverride(_ author: String, lookup: [String: String]) -> String {
+    nonisolated private static func applyParticipantOverride(_ author: String, lookup: [String: String]) -> String {
         let a = _normSpace(author)
         if a.isEmpty { return author }
 
@@ -894,7 +960,7 @@ public enum WhatsAppExportService {
         return a
     }
 
-    private static func stripBOMAndBidi(_ s: String) -> String {
+    nonisolated private static func stripBOMAndBidi(_ s: String) -> String {
         return s
             .replacingOccurrences(of: "\u{FEFF}", with: "")
             .replacingOccurrences(of: "\u{200E}", with: "")
@@ -1009,7 +1075,7 @@ public enum WhatsAppExportService {
     }
 
     // Produce a filesystem-safe ASCII stem (used for stable attachment names).
-    private static func safeFilenameStem(_ stem: String) -> String {
+    nonisolated private static func safeFilenameStem(_ stem: String) -> String {
         let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-")
         var out = ""
         for ch in stem.unicodeScalars {
@@ -1021,7 +1087,7 @@ public enum WhatsAppExportService {
     
     // Produces a human-readable, Finder-friendly filename (keeps spaces and Unicode),
     // while removing characters that are problematic in paths.
-    private static func safeFinderFilename(_ s: String, maxLen: Int = 200) -> String {
+    nonisolated private static func safeFinderFilename(_ s: String, maxLen: Int = 200) -> String {
         // Disallowed on macOS: "/" and ":".
         var x = s
             .replacingOccurrences(of: "/", with: " ")
@@ -1058,7 +1124,7 @@ public enum WhatsAppExportService {
     // ---------------------------
 
     // Parse "dd.MM.yyyy, HH:mm(:ss)" timestamps used in WhatsApp exports.
-    private static func parseDT_DE(date: String, hm: String, sec: String?) -> Date? {
+    nonisolated private static func parseDT_DE(date: String, hm: String, sec: String?) -> Date? {
         let parts = date.split(separator: ".")
         guard parts.count == 3 else { return nil }
         let day = Int(parts[0]) ?? 0
@@ -1082,7 +1148,7 @@ public enum WhatsAppExportService {
         return Calendar(identifier: .gregorian).date(from: dc)
     }
 
-    private static func match(_ re: NSRegularExpression, _ line: String) -> [String]? {
+    nonisolated private static func match(_ re: NSRegularExpression, _ line: String) -> [String]? {
         let ns = line as NSString
         guard let m = re.firstMatch(in: line, options: [], range: NSRange(location: 0, length: ns.length)) else { return nil }
         var g: [String] = []
@@ -1094,7 +1160,7 @@ public enum WhatsAppExportService {
     }
 
     // Parse WhatsApp export lines into message records.
-    private static func parseMessages(_ chatURL: URL) throws -> [WAMessage] {
+    nonisolated private static func parseMessages(_ chatURL: URL) throws -> [WAMessage] {
         let s: String
         do {
             s = try String(contentsOf: chatURL, encoding: .utf8)
@@ -1179,14 +1245,14 @@ public enum WhatsAppExportService {
     // "Ich"-Perspektive selection (non-interactive)
     // ---------------------------
 
-    private static let meDeletedMarkers: [String] = [
+    nonisolated private static let meDeletedMarkers: [String] = [
         "du hast diese nachricht gelöscht",
         "du hast eine nachricht gelöscht",
         "you deleted this message",
         "you deleted a message",
     ]
 
-    private static let meGroupActionMarkers: [String] = [
+    nonisolated private static let meGroupActionMarkers: [String] = [
         "du hast die gruppe erstellt",
         "du hast diese gruppe erstellt",
         "du hast den gruppenbetreff geändert",
@@ -1206,22 +1272,22 @@ public enum WhatsAppExportService {
         "you left the group",
     ]
 
-    private static let otherDeletedMarkers: [String] = [
+    nonisolated private static let otherDeletedMarkers: [String] = [
         "diese nachricht wurde gelöscht",
         "this message was deleted",
     ]
 
-    private static func normalizedSystemText(_ text: String) -> String {
+    nonisolated private static func normalizedSystemText(_ text: String) -> String {
         let stripped = stripBOMAndBidi(text)
         return _normSpace(stripped).lowercased()
     }
 
-    private static func containsAny(_ haystack: String, _ needles: [String]) -> Bool {
+    nonisolated private static func containsAny(_ haystack: String, _ needles: [String]) -> Bool {
         for n in needles where haystack.contains(n) { return true }
         return false
     }
 
-    private static func inferMeName(messages: [WAMessage]) -> String? {
+    nonisolated private static func inferMeName(messages: [WAMessage]) -> String? {
         var candidates: Set<String> = []
         var deletedByMe: [String: Int] = [:]
         var groupActionsByMe: [String: Int] = [:]
@@ -1274,7 +1340,7 @@ public enum WhatsAppExportService {
     }
 
     // Pick a default local participant name (GUI can override this later).
-    private static func chooseMeName(messages: [WAMessage]) -> String {
+    nonisolated private static func chooseMeName(messages: [WAMessage]) -> String {
         if let guessed = inferMeName(messages: messages) {
             return guessed
         }

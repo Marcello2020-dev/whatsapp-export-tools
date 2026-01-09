@@ -33,6 +33,58 @@ struct ContentView: View {
         let primaryHTML: URL?
     }
 
+    private struct OutputPreflight: Sendable {
+        let baseName: String
+        let existing: [URL]
+    }
+
+    private struct ExportProgressLogger: Sendable {
+        let append: @Sendable (String) -> Void
+        let startUptime: TimeInterval
+
+        func log(_ message: String) {
+            append(message)
+        }
+
+        func elapsedString() -> String {
+            let elapsed = max(0, ProcessInfo.processInfo.systemUptime - startUptime)
+            let mins = Int(elapsed) / 60
+            let secs = Int(elapsed) % 60
+            if mins > 0 { return "\(mins)m \(secs)s" }
+            return "\(secs)s"
+        }
+    }
+
+    private struct ProgressPulse: Sendable {
+        let message: String
+        let interval: TimeInterval
+        let log: @Sendable (String) -> Void
+        private var task: Task<Void, Never>?
+
+        init(message: String, interval: TimeInterval, log: @Sendable @escaping (String) -> Void) {
+            self.message = message
+            self.interval = interval
+            self.log = log
+            self.task = nil
+        }
+
+        mutating func start() {
+            guard interval > 0 else { return }
+            task = Task.detached { [message, interval, log] in
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                    if Task.isCancelled { break }
+                    log(message)
+                }
+            }
+        }
+
+        mutating func stop() {
+            task?.cancel()
+            task = nil
+        }
+    }
+
     private static let customChatPartnerTag = "__CUSTOM_CHAT_PARTNER__"
     private static let labelWidth: CGFloat = 110
     private static let designMaxWidth: CGFloat = 1440
@@ -63,6 +115,17 @@ struct ContentView: View {
                 return "Mittel: Nur Thumbnails einbetten"
             case .textOnly:
                 return "Minimal: Nur Text (keine Linkvorschauen, keine Thumbnails)"
+            }
+        }
+
+        var logLabel: String {
+            switch self {
+            case .embedAll:
+                return "Max"
+            case .thumbnailsOnly:
+                return "Kompakt"
+            case .textOnly:
+                return "E-Mail"
             }
         }
         
@@ -1077,6 +1140,22 @@ struct ContentView: View {
         print("[ExportTiming] \(label) +\(deltaMs)ms")
     }
 
+    nonisolated private static func htmlVariantSuffix(for variant: HTMLVariant) -> String {
+        switch variant {
+        case .embedAll: return "-max"
+        case .thumbnailsOnly: return "-mid"
+        case .textOnly: return "-min"
+        }
+    }
+
+    nonisolated private static func htmlVariantLogLabel(for variant: HTMLVariant) -> String {
+        switch variant {
+        case .embedAll: return "Max"
+        case .thumbnailsOnly: return "Kompakt"
+        case .textOnly: return "E-Mail"
+        }
+    }
+
     // MARK: - Export
 
     @MainActor
@@ -1174,20 +1253,57 @@ struct ContentView: View {
         await Task.yield()
         logExportTiming("T3 pre-processing begin", startUptime: startUptime)
 
-        appendLog("=== Export ===")
+        let append: @Sendable (String) -> Void = { [appendLog] message in
+            appendLog(message)
+        }
+        let logger = ExportProgressLogger(append: append, startUptime: startUptime)
+        logger.log("=== Export gestartet ===")
         logExportTiming("T4 first log line", startUptime: startUptime)
-        appendLog("Chat: \(context.chatURL.path)")
-        appendLog("Ziel: \(context.exportDir.path)")
-        appendLog("HTML: \(context.htmlLabel)")
-        appendLog("Markdown: \(context.wantsMD ? "AN" : "AUS")")
-        appendLog("Sidecar: \(context.wantsSidecar ? "AN" : "AUS")")
-        appendLog("Originale löschen: \(context.wantsDeleteOriginals ? "AN" : "AUS")")
-        appendLog("Exportiert von: \(context.exporter)")
-        appendLog("Chat-Partner: \(context.chatPartner)")
+
+        let variantSummary = context.selectedVariantsInOrder.map { $0.logLabel }
+        let variantsLine = variantSummary.isEmpty ? "AUS" : variantSummary.joined(separator: ", ")
+        logger.log("Ausgaben: HTML \(variantsLine) · Markdown \(context.wantsMD ? "AN" : "AUS") · Sidecar \(context.wantsSidecar ? "AN" : "AUS")")
+        logger.log("Originale löschen: \(context.wantsDeleteOriginals ? "AN" : "AUS")")
+        logger.log("Zielordner: \(context.exportDir.lastPathComponent)")
+        logger.log("Chat-Partner: \(context.chatPartner) · Exportiert von: \(context.exporter)")
 
         do {
+            logger.log("Prüfe vorhandene Ausgaben…")
+            var preflightPulse = ProgressPulse(
+                message: "Prüfung läuft…",
+                interval: 6,
+                log: append
+            )
+            preflightPulse.start()
+            defer { preflightPulse.stop() }
+
+            let preflight = try await Task.detached(priority: .userInitiated) {
+                try Self.performOutputPreflight(context: context)
+            }.value
+
+            if preflight.existing.isEmpty {
+                logger.log("Keine vorhandenen Ausgaben gefunden.")
+            } else if context.allowOverwrite {
+                logger.log("Vorhandene Ausgaben werden ersetzt: \(preflight.existing.count) Datei(en).")
+            } else {
+                throw WAExportError.outputAlreadyExists(urls: preflight.existing)
+            }
+
+            logger.log("Verarbeite Chat…")
+            var exportPulse = ProgressPulse(
+                message: "Export läuft…",
+                interval: 8,
+                log: append
+            )
+            exportPulse.start()
+            defer { exportPulse.stop() }
+
             let workResult = try await Task.detached(priority: .userInitiated) {
-                try await Self.performExportWork(context: context)
+                try await Self.performExportWork(
+                    context: context,
+                    baseName: preflight.baseName,
+                    log: append
+                )
             }.value
 
             lastResult = ExportResult(
@@ -1196,17 +1312,6 @@ struct ContentView: View {
                 md: workResult.md
             )
 
-            if workResult.htmls.isEmpty {
-                appendLog("OK: HTML: AUS")
-            } else {
-                for u in workResult.htmls { appendLog("OK: wrote \(u.lastPathComponent)") }
-            }
-            if let md = workResult.md {
-                appendLog("OK: wrote \(md.lastPathComponent)")
-            } else {
-                appendLog("OK: Markdown: AUS")
-            }
-
             if context.wantsDeleteOriginals {
                 await offerSidecarDeletionIfPossible(
                     chatURL: context.chatURL,
@@ -1214,21 +1319,65 @@ struct ContentView: View {
                     baseHTMLName: workResult.baseHTMLName
                 )
             }
+
+            let producedFiles = (workResult.htmls + (workResult.md.map { [$0] } ?? []))
+                .map { $0.lastPathComponent }
+                .joined(separator: ", ")
+            logger.log("Export abgeschlossen in \(logger.elapsedString()).")
+            if !producedFiles.isEmpty {
+                logger.log("Erzeugte Dateien: \(producedFiles)")
+            }
+            logger.log("Zielordner: \(workResult.exportDir.lastPathComponent)")
         } catch {
             if let waErr = error as? WAExportError {
                 switch waErr {
                 case .outputAlreadyExists(let urls):
                     replaceExistingNames = urls.map { $0.lastPathComponent }
                     showReplaceAlert = true
-                    appendLog("WARN: Output exists → Nachfrage anzeigen.")
+                    let count = urls.count
+                    logger.log("Vorhandene Ausgaben gefunden: \(count) Datei(en). Warte auf Bestätigung zum Ersetzen…")
                     return
                 }
             }
-            appendLog("ERROR: \(error)")
+            logger.log("ERROR: \(error)")
         }
     }
 
-    private static func performExportWork(context: ExportContext) async throws -> ExportWorkResult {
+    nonisolated private static func performOutputPreflight(context: ExportContext) throws -> OutputPreflight {
+        let fm = FileManager.default
+        let baseName = try WhatsAppExportService.computeOutputBaseName(
+            chatURL: context.chatURL,
+            meNameOverride: context.exporter,
+            participantNameOverrides: context.participantNameOverrides
+        )
+
+        var existing: [URL] = []
+        let exportDir = context.exportDir
+        let baseHTML = exportDir.appendingPathComponent("\(baseName).html")
+        if fm.fileExists(atPath: baseHTML.path) { existing.append(baseHTML) }
+
+        let baseMD = exportDir.appendingPathComponent("\(baseName).md")
+        if fm.fileExists(atPath: baseMD.path) { existing.append(baseMD) }
+
+        if context.wantsSidecar {
+            let sidecarFolder = exportDir.appendingPathComponent(baseName, isDirectory: true)
+            if fm.fileExists(atPath: sidecarFolder.path) { existing.append(sidecarFolder) }
+        }
+
+        for variant in context.selectedVariantsInOrder {
+            let suffix = Self.htmlVariantSuffix(for: variant)
+            let variantURL = exportDir.appendingPathComponent("\(baseName)\(suffix).html")
+            if fm.fileExists(atPath: variantURL.path) { existing.append(variantURL) }
+        }
+
+        return OutputPreflight(baseName: baseName, existing: existing)
+    }
+
+    nonisolated private static func performExportWork(
+        context: ExportContext,
+        baseName: String,
+        log: @Sendable (String) -> Void
+    ) async throws -> ExportWorkResult {
         let fm = FileManager.default
         let exportDir = context.exportDir
 
@@ -1241,60 +1390,26 @@ struct ContentView: View {
             return tmp
         }
 
-        func htmlDestURL(baseHTMLName: String, variant: HTMLVariant) -> URL {
-            let ext = (baseHTMLName as NSString).pathExtension
-            let stem = (baseHTMLName as NSString).deletingPathExtension
-            let name: String
-            if ext.isEmpty {
-                name = stem + variant.fileSuffix
-            } else {
-                name = stem + variant.fileSuffix + "." + ext
-            }
+        func htmlDestURL(baseName: String, variant: HTMLVariant) -> URL {
+            let name = baseName + Self.htmlVariantSuffix(for: variant) + ".html"
             return exportDir.appendingPathComponent(name)
         }
 
-        // Probe once to learn the base filenames produced by the service (no sidecar).
-        let probeDir = try makeTempDir()
-        defer { try? fm.removeItem(at: probeDir) }
-
-        let probe = try await WhatsAppExportService.export(
-            chatURL: context.chatURL,
-            outDir: probeDir,
-            meNameOverride: context.exporter,
-            participantNameOverrides: context.participantNameOverrides,
-            enablePreviews: true,
-            embedAttachments: true,
-            embedAttachmentThumbnailsOnly: false,
-            exportSortedAttachments: false,
-            allowOverwrite: true
-        )
-
-        let baseHTMLName = probe.html.lastPathComponent
-        let baseMDName = probe.md.lastPathComponent
+        let baseHTMLName = "\(baseName).html"
 
         let plannedHTMLs: [URL] = context.selectedVariantsInOrder.map {
-            htmlDestURL(baseHTMLName: baseHTMLName, variant: $0)
+            htmlDestURL(baseName: baseName, variant: $0)
         }
-        let plannedMD: URL? = context.wantsMD ? exportDir.appendingPathComponent(baseMDName) : nil
 
-        if !context.allowOverwrite {
-            var existing: [URL] = []
-            existing.append(contentsOf: plannedHTMLs.filter { fm.fileExists(atPath: $0.path) })
-            if let md = plannedMD, fm.fileExists(atPath: md.path) {
-                existing.append(md)
-            }
-            if !existing.isEmpty {
-                throw WAExportError.outputAlreadyExists(urls: existing)
-            }
-        } else {
+        if context.allowOverwrite {
             for u in plannedHTMLs where fm.fileExists(atPath: u.path) { try? fm.removeItem(at: u) }
-            if let md = plannedMD, fm.fileExists(atPath: md.path) { try? fm.removeItem(at: md) }
         }
 
         // Choose a primary variant for the exportDir run.
         // Needed for Sidecar and/or Markdown, or for the first selected HTML.
         let primaryVariant: HTMLVariant = context.selectedVariantsInOrder.first ?? .textOnly
 
+        log("Generiere \(Self.htmlVariantLogLabel(for: primaryVariant))…")
         // Run once into exportDir so Sidecar (if enabled) lands in the target folder.
         let first = try await WhatsAppExportService.export(
             chatURL: context.chatURL,
@@ -1312,10 +1427,11 @@ struct ContentView: View {
 
         // Handle HTML created by the exportDir run
         if context.selectedVariantsInOrder.contains(primaryVariant) {
-            let dest = htmlDestURL(baseHTMLName: baseHTMLName, variant: primaryVariant)
+            let dest = htmlDestURL(baseName: baseName, variant: primaryVariant)
             if context.allowOverwrite, fm.fileExists(atPath: dest.path) { try? fm.removeItem(at: dest) }
             try fm.moveItem(at: first.html, to: dest)
             htmlByVariant[primaryVariant] = dest
+            log("Fertig: \(Self.htmlVariantLogLabel(for: primaryVariant)) (\(dest.lastPathComponent))")
         } else {
             // HTML not requested -> delete the generated base HTML
             if fm.fileExists(atPath: first.html.path) {
@@ -1327,8 +1443,13 @@ struct ContentView: View {
         var finalMD: URL? = nil
         if context.wantsMD {
             finalMD = first.md
+            log("Fertig: Markdown (\(first.md.lastPathComponent))")
         } else if fm.fileExists(atPath: first.md.path) {
             try? fm.removeItem(at: first.md)
+        }
+        if context.wantsSidecar {
+            let sidecarHTML = "\(baseName)-sdc.html"
+            log("Fertig: Sidecar (\(sidecarHTML))")
         }
 
         // Export remaining selected HTML variants into temp folders (no sidecar duplicates)
@@ -1336,6 +1457,7 @@ struct ContentView: View {
             let tmp = try makeTempDir()
             defer { try? fm.removeItem(at: tmp) }
 
+            log("Generiere \(Self.htmlVariantLogLabel(for: v))…")
             let r = try await WhatsAppExportService.export(
                 chatURL: context.chatURL,
                 outDir: tmp,
@@ -1348,10 +1470,11 @@ struct ContentView: View {
                 allowOverwrite: true
             )
 
-            let dest = htmlDestURL(baseHTMLName: baseHTMLName, variant: v)
+            let dest = htmlDestURL(baseName: baseName, variant: v)
             if context.allowOverwrite, fm.fileExists(atPath: dest.path) { try? fm.removeItem(at: dest) }
             try fm.moveItem(at: r.html, to: dest)
             htmlByVariant[v] = dest
+            log("Fertig: \(Self.htmlVariantLogLabel(for: v)) (\(dest.lastPathComponent))")
         }
 
         // Stable order for result/logging
