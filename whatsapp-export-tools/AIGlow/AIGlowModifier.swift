@@ -5,7 +5,9 @@ struct AIGlowModifier: ViewModifier {
     let active: Bool
     let boost: Bool
     let cornerRadius: CGFloat
+    let speedScale: Double
     let style: AIGlowStyle
+    let debugTag: String?
 
     func body(content: Content) -> some View {
         content.background {
@@ -15,8 +17,10 @@ struct AIGlowModifier: ViewModifier {
                         active: active,
                         boost: boost,
                         cornerRadius: cornerRadius,
+                        speedScale: speedScale,
                         style: style,
-                        targetSize: proxy.size
+                        targetSize: proxy.size,
+                        debugTag: debugTag
                     )
                     .position(x: proxy.size.width / 2, y: proxy.size.height / 2)
                 }
@@ -31,14 +35,18 @@ extension View {
         active: Bool,
         cornerRadius: CGFloat,
         boost: Bool = false,
-        style: AIGlowStyle = .appleIntelligenceDefault
+        speedScale: Double = 1.0,
+        style: AIGlowStyle = .appleIntelligenceDefault,
+        debugTag: String? = nil
     ) -> some View {
         modifier(
             AIGlowModifier(
                 active: active,
                 boost: boost,
                 cornerRadius: cornerRadius,
-                style: style
+                speedScale: speedScale,
+                style: style,
+                debugTag: debugTag
             )
         )
     }

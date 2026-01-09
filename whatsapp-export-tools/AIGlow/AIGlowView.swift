@@ -5,29 +5,46 @@ struct AIGlowOverlay: View {
     let active: Bool
     let boost: Bool
     let cornerRadius: CGFloat
+    let speedScale: Double
     let style: AIGlowStyle
     let targetSize: CGSize
+    let debugTag: String?
 
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var phase: Double = 0
+    @ObservedObject private var ticker = AIGlowTicker.shared
+    @State private var phaseStartTime: TimeInterval = 0
     @State private var boostProgress: Double = 0
+    @State private var lastDebugPrintTime: TimeInterval = 0
 
     var body: some View {
         glowBody
             .onAppear {
-                updateAnimation()
+                resetPhaseStart(active: active)
                 updateBoost()
             }
-            .onChange(of: reduceMotion) { updateAnimation() }
+            .onChange(of: reduceMotion) {
+                resetPhaseStart(active: active)
+            }
             .onChange(of: active) {
-                updateAnimation()
+                resetPhaseStart(active: active)
                 updateBoost()
             }
             .onChange(of: boost) {
-                updateAnimation()
+                resetPhaseStart(active: active)
                 updateBoost()
             }
+#if DEBUG
+            .onChange(of: ticker.now) {
+                guard active, let debugTag else { return }
+                let now = ticker.now
+                if now - lastDebugPrintTime >= 1.0 {
+                    lastDebugPrintTime = now
+                    let phase = String(format: "%.1f", currentPhase)
+                    print("[AIGlowPhase:\(debugTag)] \(phase)°")
+                }
+            }
+#endif
     }
 
     private var glowBody: some View {
@@ -35,6 +52,7 @@ struct AIGlowOverlay: View {
         let saturation = isLight ? style.saturationLight : style.saturationDark
         let contrast = isLight ? style.contrastLight : style.contrastDark
         let baseSize = targetSize
+        let phase = currentPhase
         let ringGradient = AngularGradient(
             gradient: Gradient(colors: style.ringColors),
             center: .center,
@@ -155,22 +173,6 @@ struct AIGlowOverlay: View {
         .allowsHitTesting(false)
     }
 
-    private func updateAnimation() {
-        guard active else {
-            phase = 0
-            return
-        }
-        let duration = AIGlowAnimation.rotationDuration(style: style, boost: boost, reduceMotion: reduceMotion)
-        guard duration > 0 else {
-            phase = 0
-            return
-        }
-        phase = 0
-        withAnimation(.linear(duration: duration).repeatForever(autoreverses: false)) {
-            phase = 360
-        }
-    }
-
     private func updateBoost() {
         guard active else {
             boostProgress = 0
@@ -184,6 +186,30 @@ struct AIGlowOverlay: View {
             withAnimation(AIGlowAnimation.boostOutAnimation) {
                 boostProgress = 0
             }
+        }
+    }
+
+    private var currentPhase: Double {
+        guard active else { return 0 }
+        let duration = effectiveRotationDuration
+        guard duration > 0 else { return 0 }
+        let start = phaseStartTime == 0 ? ticker.now : phaseStartTime
+        let elapsed = ticker.now - start
+        let angle = (elapsed / duration) * 360
+        return angle.truncatingRemainder(dividingBy: 360)
+    }
+
+    private var effectiveRotationDuration: Double {
+        let base = AIGlowAnimation.rotationDuration(style: style, boost: boost, reduceMotion: reduceMotion)
+        let scale = max(speedScale, 0.05)
+        return base / scale
+    }
+
+    private func resetPhaseStart(active: Bool) {
+        if active {
+            phaseStartTime = ticker.now
+        } else {
+            phaseStartTime = 0
         }
     }
 

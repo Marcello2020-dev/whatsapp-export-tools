@@ -119,11 +119,11 @@ extension ContentView {
                             .padding(8)
                     }
                     .frame(height: 200)
-                }
-                .waCard()
-                .aiGlow(active: true, cornerRadius: 14, boost: isRunning)
+            }
+            .waCard()
+            .aiGlow(active: true, cornerRadius: 14, boost: isRunning, speedScale: ContentView.logGlowSpeedScale)
 
-                Spacer()
+            Spacer()
             }
             .padding(24)
             .frame(width: 900, height: 620, alignment: .topLeading)
