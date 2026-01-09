@@ -57,12 +57,45 @@ public enum WAExportError: Error, LocalizedError {
     }
 }
 
+struct SidecarValidationError: Error, LocalizedError, Sendable {
+    let duplicateFolders: [String]
+
+    var errorDescription: String? {
+        "Sidecar enthält doppelte Ordner: \(duplicateFolders.joined(separator: ", "))"
+    }
+}
+
+struct TemporaryExportFolderCleanupError: Error, LocalizedError, Sendable {
+    let failedFolders: [String]
+
+    var errorDescription: String? {
+        "Konnte temporäre Export-Ordner nicht entfernen: \(failedFolders.joined(separator: ", "))"
+    }
+}
+
+struct OutputCollisionError: Error, LocalizedError, Sendable {
+    let url: URL
+
+    var errorDescription: String? {
+        "Ziel existiert bereits (keine Suffixe erlaubt): \(url.lastPathComponent)"
+    }
+}
+
+struct StagingDirectoryCreationError: Error, LocalizedError, Sendable {
+    let url: URL
+    let underlying: Error
+
+    var errorDescription: String? {
+        "Konnte temporären Export-Ordner nicht anlegen: \(url.lastPathComponent)"
+    }
+}
+
 public enum HTMLVariant: String, CaseIterable, Hashable, Sendable {
     case embedAll        // größte Datei
     case thumbnailsOnly  // mittel
     case textOnly        // kleinste Datei
 
-    public var filenameSuffix: String {
+    nonisolated public var filenameSuffix: String {
         switch self {
         case .embedAll: return "-max"
         case .thumbnailsOnly: return "-mid"
@@ -71,21 +104,21 @@ public enum HTMLVariant: String, CaseIterable, Hashable, Sendable {
     }
 
     // Vorgabe: Previews nur bei textOnly aus.
-    public var enablePreviews: Bool {
+    nonisolated public var enablePreviews: Bool {
         switch self {
         case .textOnly: return false
         case .embedAll, .thumbnailsOnly: return true
         }
     }
 
-    public var embedAttachments: Bool {
+    nonisolated public var embedAttachments: Bool {
         switch self {
         case .textOnly: return false
         case .embedAll, .thumbnailsOnly: return true
         }
     }
 
-    public var embedAttachmentThumbnailsOnly: Bool {
+    nonisolated public var embedAttachmentThumbnailsOnly: Bool {
         switch self {
         case .embedAll: return false
         case .thumbnailsOnly: return true
@@ -149,7 +182,7 @@ public enum WhatsAppExportService {
         return systemMarkers.contains(low)
     }
 
-    private static let systemTextRegexes: [NSRegularExpression] = [
+    nonisolated private static let systemTextRegexes: [NSRegularExpression] = [
         // Deleted messages
         try! NSRegularExpression(pattern: #"^du hast (diese|eine) nachricht gelöscht\.?$"#),
         try! NSRegularExpression(pattern: #"^diese nachricht wurde gelöscht\.?$"#),
@@ -207,7 +240,14 @@ public enum WhatsAppExportService {
         try! NSRegularExpression(pattern: #"^you left\.?$"#),
     ]
 
-    private static func matchesAnyRegex(_ text: String, patterns: [NSRegularExpression]) -> Bool {
+    struct PreparedExport: Sendable {
+        let messages: [WAMessage]
+        let meName: String
+        let baseName: String
+        let chatURL: URL
+    }
+
+    nonisolated private static func matchesAnyRegex(_ text: String, patterns: [NSRegularExpression]) -> Bool {
         let ns = text as NSString
         let range = NSRange(location: 0, length: ns.length)
         for re in patterns {
@@ -218,7 +258,7 @@ public enum WhatsAppExportService {
         return false
     }
 
-    private static func isSystemMessage(authorRaw: String, text: String) -> Bool {
+    nonisolated private static func isSystemMessage(authorRaw: String, text: String) -> Bool {
         // Prefer author-based detection.
         if isSystemAuthor(authorRaw) { return true }
 
@@ -273,34 +313,34 @@ public enum WhatsAppExportService {
 
     // URLs
     // URL pattern for link extraction.
-    private static let urlRe = try! NSRegularExpression(
+    nonisolated private static let urlRe = try! NSRegularExpression(
         pattern: #"(https?://[^\s<>\]]+)"#,
         options: [.caseInsensitive]
     )
 
     // Attachments
     // Attachment markers like "<Anhang: filename>".
-    private static let attachRe = try! NSRegularExpression(
+    nonisolated private static let attachRe = try! NSRegularExpression(
         pattern: #"<\s*Anhang:\s*([^>]+?)\s*>"#,
         options: [.caseInsensitive]
     )
 
     // Link preview meta parsing (1:1 Regex-Ansatz)
-    private static let metaTagRe = try! NSRegularExpression(
+    nonisolated private static let metaTagRe = try! NSRegularExpression(
         pattern: #"<meta\s+[^>]*?>"#,
         options: [.caseInsensitive]
     )
-    private static let metaAttrRe = try! NSRegularExpression(
+    nonisolated private static let metaAttrRe = try! NSRegularExpression(
         pattern: #"(\w+)\s*=\s*(".*?"|'.*?'|[^\s>]+)"#,
         options: []
     )
-    private static let titleTagRe = try! NSRegularExpression(
+    nonisolated private static let titleTagRe = try! NSRegularExpression(
         pattern: #"<title>(.*?)</title>"#,
         options: [.caseInsensitive, .dotMatchesLineSeparators]
     )
 
     // Weekday mapping (Monday=0 ... Sunday=6).
-    private static let weekdayDE: [Int: String] = [
+    nonisolated private static let weekdayDE: [Int: String] = [
         0: "Montag",
         1: "Dienstag",
         2: "Mittwoch",
@@ -352,16 +392,25 @@ public enum WhatsAppExportService {
         func set(_ url: String, _ val: WAPreview) { dict[url] = val }
     }
 
-    private static let previewCache = PreviewCache()
+    nonisolated private static let previewCache = PreviewCache()
 
     // Cache for staged attachments (source path -> (relHref, stagedURL)) to avoid duplicate copies.
-    private static let stagedAttachmentLock = NSLock()
-    private static var stagedAttachmentMap: [String: (relHref: String, stagedURL: URL)] = [:]
+    nonisolated(unsafe) private static let stagedAttachmentLock = NSLock()
+    nonisolated(unsafe) private static var stagedAttachmentMap: [String: (relHref: String, stagedURL: URL)] = [:]
     
-    private static func resetStagedAttachmentCache() {
+    nonisolated private static func resetStagedAttachmentCache() {
         stagedAttachmentLock.lock()
         stagedAttachmentMap.removeAll(keepingCapacity: true)
         stagedAttachmentLock.unlock()
+    }
+
+    nonisolated(unsafe) private static let attachmentIndexLock = NSLock()
+    nonisolated(unsafe) private static var attachmentIndexCache: [String: [String: URL]] = [:]
+
+    nonisolated static func resetAttachmentIndexCache() {
+        attachmentIndexLock.lock()
+        attachmentIndexCache.removeAll(keepingCapacity: true)
+        attachmentIndexLock.unlock()
     }
 
     // ---------------------------
@@ -433,7 +482,7 @@ public enum WhatsAppExportService {
 
     /// 1:1-Export: parses chat, decides me-name, renders HTML+MD, writes files.
     /// Returns URLs of written HTML/MD.
-    public static func export(
+    nonisolated public static func export(
         chatURL: URL,
         outDir: URL,
         meNameOverride: String?,
@@ -447,6 +496,7 @@ public enum WhatsAppExportService {
 
         // Wichtig: staged-Map zurücksetzen (sonst können alte relHref-Ziele „kleben bleiben“)
         resetStagedAttachmentCache()
+        resetAttachmentIndexCache()
 
         let chatPath = chatURL.standardizedFileURL
         let outPath = outDir.standardizedFileURL
@@ -518,32 +568,55 @@ public enum WhatsAppExportService {
         let baseRaw = "WhatsApp Chat · \(convoPart) · \(periodPart) · Chat.txt erstellt \(createdStamp)"
         let base = safeFinderFilename(baseRaw)
 
+        let fm = FileManager.default
+        try fm.createDirectory(at: outPath, withIntermediateDirectories: true)
+        try cleanupTemporaryExportFolders(in: outPath)
+
         let outHTML = outPath.appendingPathComponent("\(base).html")
         let outMD = outPath.appendingPathComponent("\(base).md")
+        let sidecarHTML = outPath.appendingPathComponent("\(base)-sdc.html")
         let sortedFolderURL = outPath.appendingPathComponent(base, isDirectory: true)
 
-        // If outputs already exist, ask the GUI to confirm replacement.
-        let fm = FileManager.default
-        var existing: [URL] = []
-        if fm.fileExists(atPath: outHTML.path) { existing.append(outHTML) }
-        if fm.fileExists(atPath: outMD.path) { existing.append(outMD) }
-        if exportSortedAttachments && fm.fileExists(atPath: sortedFolderURL.path) { existing.append(sortedFolderURL) }
+        let existingNames: Set<String> = (try? fm.contentsOfDirectory(
+            at: outPath,
+            includingPropertiesForKeys: nil,
+            options: []
+        ))?.map(\.lastPathComponent).reduce(into: Set<String>()) { $0.insert($1) } ?? []
 
-        if !existing.isEmpty {
-            if allowOverwrite {
-                // Remove old outputs so the subsequent atomic writes cannot collide.
-                for u in existing {
-                    try? fm.removeItem(at: u)
-                }
-            } else {
-                throw WAExportError.outputAlreadyExists(urls: existing)
+        var existing: [URL] = []
+        if existingNames.contains(outHTML.lastPathComponent) { existing.append(outHTML) }
+        if existingNames.contains(outMD.lastPathComponent) { existing.append(outMD) }
+        if existingNames.contains(sidecarHTML.lastPathComponent) { existing.append(sidecarHTML) }
+        if existingNames.contains(sortedFolderURL.lastPathComponent) { existing.append(sortedFolderURL) }
+        for variant in HTMLVariant.allCases {
+            let name = "\(base)\(variant.filenameSuffix).html"
+            if existingNames.contains(name) {
+                existing.append(outPath.appendingPathComponent(name))
             }
         }
+
+        if !existing.isEmpty, !allowOverwrite {
+            throw WAExportError.outputAlreadyExists(urls: existing)
+        }
+
+        let stagingDir = try createStagingDirectory(in: outPath)
+        var didRemoveStaging = false
+        defer {
+            if !didRemoveStaging {
+                try? fm.removeItem(at: stagingDir)
+            }
+            try? cleanupTemporaryExportFolders(in: outPath)
+        }
+
+        let stagedHTML = stagingDir.appendingPathComponent("\(base).html")
+        let stagedMD = stagingDir.appendingPathComponent("\(base).md")
+        let stagedSidecarHTML = stagingDir.appendingPathComponent("\(base)-sdc.html")
+        let stagedSidecarDir = stagingDir.appendingPathComponent(base, isDirectory: true)
 
         try await renderHTML(
             msgs: msgs,
             chatURL: chatPath,
-            outHTML: outHTML,
+            outHTML: stagedHTML,
             meName: meName,
             enablePreviews: enablePreviews,
             embedAttachments: embedAttachments,
@@ -553,44 +626,101 @@ public enum WhatsAppExportService {
         try renderMD(
             msgs: msgs,
             chatURL: chatPath,
-            outMD: outMD,
+            outMD: stagedMD,
             meName: meName,
             enablePreviews: enablePreviews,
             embedAttachments: embedAttachments,
             embedAttachmentThumbnailsOnly: embedAttachmentThumbnailsOnly
         )
 
+        var didSidecar = false
         if exportSortedAttachments {
             let sidecarOriginalDir = try exportSortedAttachmentsFolder(
                 chatURL: chatPath,
                 messages: msgs,
-                outDir: outPath,
-                folderName: base,
-                allowOverwrite: allowOverwrite
+                outDir: stagingDir,
+                folderName: base
             )
             let sidecarBaseDir = sidecarOriginalDir.deletingLastPathComponent()
 
             // Sidecar HTML: renders like -max but references media in the sidecar folder via relative links.
             let sidecarChatURL = sidecarOriginalDir.appendingPathComponent(chatPath.lastPathComponent)
             // Write sidecar HTML next to the other outputs (root of outDir) and name it consistently.
-            let sidecarHTML = outPath.appendingPathComponent("\(base)-sdc.html")
 
             try await renderHTML(
                 msgs: msgs,
                 chatURL: sidecarChatURL,
-                outHTML: sidecarHTML,
+                outHTML: stagedSidecarHTML,
                 meName: meName,
                 enablePreviews: true,
                 // Sidecar must stay small: do NOT embed media as data-URLs; reference files in the copied export folder.
                 embedAttachments: false,
                 embedAttachmentThumbnailsOnly: false,
-                attachmentRelBaseDir: outPath,
+                attachmentRelBaseDir: stagingDir,
                 disableThumbStaging: false,
                 externalAttachments: true,
                 externalPreviews: true,
                 externalAssetsDir: sidecarBaseDir
             )
+
+            try validateSidecarLayout(sidecarBaseDir: sidecarBaseDir)
+            normalizeOriginalCopyTimestamps(
+                sourceDir: chatPath.deletingLastPathComponent(),
+                destDir: sidecarOriginalDir,
+                skippingPathPrefixes: [
+                    outPath.standardizedFileURL.path,
+                    sidecarBaseDir.standardizedFileURL.path
+                ]
+            )
+            let mismatches = sampleTimestampMismatches(
+                sourceDir: chatPath.deletingLastPathComponent(),
+                destDir: sidecarOriginalDir,
+                maxFiles: 3,
+                maxDirs: 3,
+                skippingPathPrefixes: [
+                    outPath.standardizedFileURL.path,
+                    sidecarBaseDir.standardizedFileURL.path
+                ]
+            )
+            if !mismatches.isEmpty {
+                print("WARN: Zeitstempelabweichung bei \(mismatches.count) Element(en).")
+            }
+            didSidecar = true
         }
+
+        if allowOverwrite {
+            let deleteTargets = [outHTML, outMD, sidecarHTML, sortedFolderURL]
+                + HTMLVariant.allCases.map { outPath.appendingPathComponent("\(base)\($0.filenameSuffix).html") }
+            for u in deleteTargets where fm.fileExists(atPath: u.path) {
+                try fm.removeItem(at: u)
+            }
+        }
+
+        var moveItems: [(src: URL, dst: URL)] = [
+            (stagedHTML, outHTML),
+            (stagedMD, outMD)
+        ]
+        if didSidecar {
+            moveItems.append((stagedSidecarHTML, sidecarHTML))
+            moveItems.append((stagedSidecarDir, sortedFolderURL))
+        }
+
+        var moved: [URL] = []
+        do {
+            for (src, dst) in moveItems {
+                if !allowOverwrite, fm.fileExists(atPath: dst.path) {
+                    throw OutputCollisionError(url: dst)
+                }
+                try fm.moveItem(at: src, to: dst)
+                moved.append(dst)
+            }
+        } catch {
+            for u in moved { try? fm.removeItem(at: u) }
+            throw error
+        }
+
+        try? fm.removeItem(at: stagingDir)
+        didRemoveStaging = true
 
         return (outHTML, outMD)
     }
@@ -660,9 +790,160 @@ public enum WhatsAppExportService {
         let baseRaw = "WhatsApp Chat · \(convoPart) · \(periodPart) · Chat.txt erstellt \(createdStamp)"
         return safeFinderFilename(baseRaw)
     }
+
+    nonisolated static func prepareExport(
+        chatURL: URL,
+        meNameOverride: String?,
+        participantNameOverrides: [String: String] = [:]
+    ) throws -> PreparedExport {
+        let chatPath = chatURL.standardizedFileURL
+
+        var msgs = try parseMessages(chatPath)
+
+        let participantLookup = buildParticipantOverrideLookup(participantNameOverrides)
+        for i in msgs.indices {
+            let a = msgs[i].author
+            if isSystemAuthor(a) { continue }
+            msgs[i].author = applyParticipantOverride(a, lookup: participantLookup)
+        }
+
+        let authors = msgs.map { $0.author }.filter { !_normSpace($0).isEmpty }
+        let meName = {
+            let oRaw = _normSpace(meNameOverride ?? "")
+            if !oRaw.isEmpty {
+                return applyParticipantOverride(oRaw, lookup: participantLookup)
+            }
+            return chooseMeName(messages: msgs)
+        }()
+
+        let chatFileAttrs = (try? FileManager.default.attributesOfItem(atPath: chatPath.path)) ?? [:]
+        let chatCreatedAt = (chatFileAttrs[.creationDate] as? Date)
+            ?? (chatFileAttrs[.modificationDate] as? Date)
+            ?? Date()
+
+        let uniqAuthors = Array(Set(authors.map { _normSpace($0) }))
+            .filter { !$0.isEmpty && !isSystemAuthor($0) }
+            .sorted()
+
+        let meNorm = _normSpace(meName).lowercased()
+        let partners = uniqAuthors.filter { _normSpace($0).lowercased() != meNorm }
+
+        let convoPart: String = {
+            if partners.isEmpty {
+                return "\(meName) ↔ Unbekannt"
+            }
+            if partners.count == 1 {
+                return "\(meName) ↔ \(partners[0])"
+            }
+            if partners.count <= 3 {
+                return "\(meName) ↔ \(partners.joined(separator: ", "))"
+            }
+            return "\(meName) ↔ \(partners.prefix(3).joined(separator: ", ")) +\(partners.count - 3) weitere"
+        }()
+
+        let periodPart: String = {
+            guard let minD = msgs.min(by: { $0.ts < $1.ts })?.ts,
+                  let maxD = msgs.max(by: { $0.ts < $1.ts })?.ts else {
+                return "Keine Nachrichten"
+            }
+            let start = fileDateOnlyFormatter.string(from: minD)
+            let end = fileDateOnlyFormatter.string(from: maxD)
+            return "\(start) bis \(end)"
+        }()
+
+        let createdStamp = fileStampFormatter.string(from: chatCreatedAt)
+        let baseRaw = "WhatsApp Chat · \(convoPart) · \(periodPart) · Chat.txt erstellt \(createdStamp)"
+        let base = safeFinderFilename(baseRaw)
+
+        return PreparedExport(messages: msgs, meName: meName, baseName: base, chatURL: chatPath)
+    }
+
+    nonisolated static func renderHTMLPrepared(
+        prepared: PreparedExport,
+        outDir: URL,
+        fileSuffix: String,
+        enablePreviews: Bool,
+        embedAttachments: Bool,
+        embedAttachmentThumbnailsOnly: Bool
+    ) async throws -> URL {
+        resetStagedAttachmentCache()
+
+        let outPath = outDir.standardizedFileURL
+        let outHTML = outPath.appendingPathComponent("\(prepared.baseName)\(fileSuffix).html")
+
+        try await renderHTML(
+            msgs: prepared.messages,
+            chatURL: prepared.chatURL,
+            outHTML: outHTML,
+            meName: prepared.meName,
+            enablePreviews: enablePreviews,
+            embedAttachments: embedAttachments,
+            embedAttachmentThumbnailsOnly: embedAttachmentThumbnailsOnly
+        )
+
+        return outHTML
+    }
+
+    nonisolated static func renderMarkdown(
+        prepared: PreparedExport,
+        outDir: URL
+    ) throws -> URL {
+        resetStagedAttachmentCache()
+
+        let outPath = outDir.standardizedFileURL
+        let outMD = outPath.appendingPathComponent("\(prepared.baseName).md")
+
+        try renderMD(
+            msgs: prepared.messages,
+            chatURL: prepared.chatURL,
+            outMD: outMD,
+            meName: prepared.meName,
+            enablePreviews: true,
+            embedAttachments: false,
+            embedAttachmentThumbnailsOnly: false
+        )
+
+        return outMD
+    }
+
+    nonisolated static func renderSidecar(
+        prepared: PreparedExport,
+        outDir: URL
+    ) async throws -> URL {
+        resetStagedAttachmentCache()
+
+        let outPath = outDir.standardizedFileURL
+        let sidecarOriginalDir = try exportSortedAttachmentsFolder(
+            chatURL: prepared.chatURL,
+            messages: prepared.messages,
+            outDir: outPath,
+            folderName: prepared.baseName
+        )
+        let sidecarBaseDir = sidecarOriginalDir.deletingLastPathComponent()
+
+        let sidecarChatURL = sidecarOriginalDir.appendingPathComponent(prepared.chatURL.lastPathComponent)
+        let sidecarHTML = outPath.appendingPathComponent("\(prepared.baseName)-sdc.html")
+
+        try await renderHTML(
+            msgs: prepared.messages,
+            chatURL: sidecarChatURL,
+            outHTML: sidecarHTML,
+            meName: prepared.meName,
+            enablePreviews: true,
+            embedAttachments: false,
+            embedAttachmentThumbnailsOnly: false,
+            attachmentRelBaseDir: outPath,
+            disableThumbStaging: false,
+            externalAttachments: true,
+            externalPreviews: true,
+            externalAssetsDir: sidecarBaseDir
+        )
+
+        return sidecarHTML
+    }
     
     /// Multi-Export: erzeugt alle HTML-Varianten (-max/-mid/-min) + eine MD-Datei.
-    public static func exportMulti(
+    nonisolated public static func exportMulti(
         chatURL: URL,
         outDir: URL,
         meNameOverride: String?,
@@ -674,6 +955,7 @@ public enum WhatsAppExportService {
 
         // Wichtig: staged-Map zurücksetzen (sonst können alte relHref-Ziele „kleben bleiben“)
         resetStagedAttachmentCache()
+        resetAttachmentIndexCache()
 
         let chatPath = chatURL.standardizedFileURL
         let outPath = outDir.standardizedFileURL
@@ -740,6 +1022,10 @@ public enum WhatsAppExportService {
         let baseRaw = "WhatsApp Chat · \(convoPart) · \(periodPart) · Chat.txt erstellt \(createdStamp)"
         let base = safeFinderFilename(baseRaw)
 
+        let fm = FileManager.default
+        try fm.createDirectory(at: outPath, withIntermediateDirectories: true)
+        try cleanupTemporaryExportFolders(in: outPath)
+
         // Output URLs
         var htmlByVariant: [HTMLVariant: URL] = [:]
         htmlByVariant.reserveCapacity(variants.count)
@@ -751,31 +1037,51 @@ public enum WhatsAppExportService {
 
         // Empfehlung: Markdown immer „portable“ mit attachments/ Links
         let outMD = outPath.appendingPathComponent("\(base).md")
-
-        // Sorted attachments folder (optional)
+        let sidecarHTML = outPath.appendingPathComponent("\(base)-sdc.html")
         let sortedFolderURL = outPath.appendingPathComponent(base, isDirectory: true)
 
-        // Existence check (wie in export(...), aber für alle Varianten)
-        let fm = FileManager.default
+        let existingNames: Set<String> = (try? fm.contentsOfDirectory(
+            at: outPath,
+            includingPropertiesForKeys: nil,
+            options: []
+        ))?.map(\.lastPathComponent).reduce(into: Set<String>()) { $0.insert($1) } ?? []
+
         var existing: [URL] = []
-
-        for (_, u) in htmlByVariant {
-            if fm.fileExists(atPath: u.path) { existing.append(u) }
-        }
-        if fm.fileExists(atPath: outMD.path) { existing.append(outMD) }
-        if exportSortedAttachments && fm.fileExists(atPath: sortedFolderURL.path) { existing.append(sortedFolderURL) }
-
-        if !existing.isEmpty {
-            if allowOverwrite {
-                for u in existing { try? fm.removeItem(at: u) }
-            } else {
-                throw WAExportError.outputAlreadyExists(urls: existing)
+        for v in HTMLVariant.allCases {
+            let name = "\(base)\(v.filenameSuffix).html"
+            if existingNames.contains(name) {
+                existing.append(outPath.appendingPathComponent(name))
             }
         }
+        if existingNames.contains(outMD.lastPathComponent) { existing.append(outMD) }
+        if existingNames.contains(sidecarHTML.lastPathComponent) { existing.append(sidecarHTML) }
+        if existingNames.contains(sortedFolderURL.lastPathComponent) { existing.append(sortedFolderURL) }
+
+        if !existing.isEmpty, !allowOverwrite {
+            throw WAExportError.outputAlreadyExists(urls: existing)
+        }
+
+        let stagingDir = try createStagingDirectory(in: outPath)
+        var didRemoveStaging = false
+        defer {
+            if !didRemoveStaging {
+                try? fm.removeItem(at: stagingDir)
+            }
+            try? cleanupTemporaryExportFolders(in: outPath)
+        }
+
+        var stagedHTMLByVariant: [HTMLVariant: URL] = [:]
+        stagedHTMLByVariant.reserveCapacity(variants.count)
+        for v in variants {
+            stagedHTMLByVariant[v] = stagingDir.appendingPathComponent("\(base)\(v.filenameSuffix).html")
+        }
+        let stagedMD = stagingDir.appendingPathComponent("\(base).md")
+        let stagedSidecarHTML = stagingDir.appendingPathComponent("\(base)-sdc.html")
+        let stagedSidecarDir = stagingDir.appendingPathComponent(base, isDirectory: true)
 
         // Render all HTML variants
         for v in variants {
-            guard let outHTML = htmlByVariant[v] else { continue }
+            guard let outHTML = stagedHTMLByVariant[v] else { continue }
             try await renderHTML(
                 msgs: msgs,
                 chatURL: chatPath,
@@ -791,44 +1097,104 @@ public enum WhatsAppExportService {
         try renderMD(
             msgs: msgs,
             chatURL: chatPath,
-            outMD: outMD,
+            outMD: stagedMD,
             meName: meName,
             enablePreviews: true,
             embedAttachments: false,
             embedAttachmentThumbnailsOnly: false
         )
 
+        var didSidecar = false
         if exportSortedAttachments {
             let sidecarOriginalDir = try exportSortedAttachmentsFolder(
                 chatURL: chatPath,
                 messages: msgs,
-                outDir: outPath,
-                folderName: base,
-                allowOverwrite: allowOverwrite
+                outDir: stagingDir,
+                folderName: base
             )
             let sidecarBaseDir = sidecarOriginalDir.deletingLastPathComponent()
 
             // Sidecar HTML: renders like -max but references media in the sidecar folder via relative links.
             let sidecarChatURL = sidecarOriginalDir.appendingPathComponent(chatPath.lastPathComponent)
             // Write sidecar HTML next to the other outputs (root of outDir) and name it consistently.
-            let sidecarHTML = outPath.appendingPathComponent("\(base)-sdc.html")
 
             try await renderHTML(
                 msgs: msgs,
                 chatURL: sidecarChatURL,
-                outHTML: sidecarHTML,
+                outHTML: stagedSidecarHTML,
                 meName: meName,
                 enablePreviews: true,
                 // Sidecar must stay small: do NOT embed media as data-URLs; reference files in the copied export folder.
                 embedAttachments: false,
                 embedAttachmentThumbnailsOnly: false,
-                attachmentRelBaseDir: outPath,
+                attachmentRelBaseDir: stagingDir,
                 disableThumbStaging: false,
                 externalAttachments: true,
                 externalPreviews: true,
                 externalAssetsDir: sidecarBaseDir
             )
+
+            try validateSidecarLayout(sidecarBaseDir: sidecarBaseDir)
+            normalizeOriginalCopyTimestamps(
+                sourceDir: chatPath.deletingLastPathComponent(),
+                destDir: sidecarOriginalDir,
+                skippingPathPrefixes: [
+                    outPath.standardizedFileURL.path,
+                    sidecarBaseDir.standardizedFileURL.path
+                ]
+            )
+            let mismatches = sampleTimestampMismatches(
+                sourceDir: chatPath.deletingLastPathComponent(),
+                destDir: sidecarOriginalDir,
+                maxFiles: 3,
+                maxDirs: 3,
+                skippingPathPrefixes: [
+                    outPath.standardizedFileURL.path,
+                    sidecarBaseDir.standardizedFileURL.path
+                ]
+            )
+            if !mismatches.isEmpty {
+                print("WARN: Zeitstempelabweichung bei \(mismatches.count) Element(en).")
+            }
+            didSidecar = true
         }
+
+        if allowOverwrite {
+            let deleteTargets = [outMD, sidecarHTML, sortedFolderURL]
+                + HTMLVariant.allCases.map { outPath.appendingPathComponent("\(base)\($0.filenameSuffix).html") }
+            for u in deleteTargets where fm.fileExists(atPath: u.path) {
+                try fm.removeItem(at: u)
+            }
+        }
+
+        var moveItems: [(src: URL, dst: URL)] = []
+        for v in variants {
+            if let src = stagedHTMLByVariant[v], let dst = htmlByVariant[v] {
+                moveItems.append((src, dst))
+            }
+        }
+        moveItems.append((stagedMD, outMD))
+        if didSidecar {
+            moveItems.append((stagedSidecarHTML, sidecarHTML))
+            moveItems.append((stagedSidecarDir, sortedFolderURL))
+        }
+
+        var moved: [URL] = []
+        do {
+            for (src, dst) in moveItems {
+                if !allowOverwrite, fm.fileExists(atPath: dst.path) {
+                    throw OutputCollisionError(url: dst)
+                }
+                try fm.moveItem(at: src, to: dst)
+                moved.append(dst)
+            }
+        } catch {
+            for u in moved { try? fm.removeItem(at: u) }
+            throw error
+        }
+
+        try? fm.removeItem(at: stagingDir)
+        didRemoveStaging = true
 
         return ExportMultiResult(htmlByVariant: htmlByVariant, md: outMD)
     }
@@ -971,7 +1337,7 @@ public enum WhatsAppExportService {
     }
 
     // Extract distinct URLs from a text blob.
-    private static func extractURLs(_ text: String) -> [String] {
+    nonisolated private static func extractURLs(_ text: String) -> [String] {
         let ns = text as NSString
         let matches = urlRe.matches(in: text, options: [], range: NSRange(location: 0, length: ns.length))
         var urls: [String] = []
@@ -993,7 +1359,7 @@ public enum WhatsAppExportService {
 
     // True if the message text consists only of one or more URLs (plus whitespace/newlines).
     // Used to avoid duplicating gigantic raw URLs in the bubble text when we already show previews/link lines.
-    private static func isURLOnlyText(_ text: String) -> Bool {
+    nonisolated private static func isURLOnlyText(_ text: String) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty { return false }
 
@@ -1012,7 +1378,7 @@ public enum WhatsAppExportService {
 
     // Produces a compact, human-friendly display string for a URL.
     // The href remains the original URL; this only affects what is shown in the UI/PDF.
-    private static func displayURL(_ urlString: String, maxLen: Int = 90) -> String {
+    nonisolated private static func displayURL(_ urlString: String, maxLen: Int = 90) -> String {
         func shorten(_ s: String) -> String {
             if s.count <= maxLen { return s }
             return String(s.prefix(max(0, maxLen - 1))) + "…"
@@ -1052,7 +1418,7 @@ public enum WhatsAppExportService {
     }
 
     // Extract YouTube video ID from a URL (if present).
-    private static func youtubeVideoID(from urlString: String) -> String? {
+    nonisolated private static func youtubeVideoID(from urlString: String) -> String? {
         guard let u = URL(string: urlString), let host = u.host?.lowercased() else { return nil }
         let path = u.path
 
@@ -1113,7 +1479,7 @@ public enum WhatsAppExportService {
         return x
     }
 
-    private static func isoDateOnly(_ d: Date) -> String {
+    nonisolated private static func isoDateOnly(_ d: Date) -> String {
         let cal = Calendar(identifier: .gregorian)
         let c = cal.dateComponents([.year, .month, .day], from: d)
         return String(format: "%04d-%02d-%02d", c.year ?? 0, c.month ?? 0, c.day ?? 0)
@@ -1363,7 +1729,7 @@ public enum WhatsAppExportService {
     // Attachment handling
     // ---------------------------
 
-    private static func findAttachments(_ text: String) -> [String] {
+    nonisolated private static func findAttachments(_ text: String) -> [String] {
         let ns = text as NSString
         let matches = attachRe.matches(in: text, options: [], range: NSRange(location: 0, length: ns.length))
         return matches.map { ns.substring(with: $0.range(at: 1)).trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -1380,7 +1746,7 @@ public enum WhatsAppExportService {
         case documents
     }
 
-    private static func bucketForExtension(_ ext: String) -> SortedAttachmentBucket {
+    nonisolated private static func bucketForExtension(_ ext: String) -> SortedAttachmentBucket {
         let e = ext.lowercased()
         switch e {
         case "jpg", "jpeg", "png", "gif", "heic", "heif", "webp", "tiff", "tif", "bmp":
@@ -1394,7 +1760,42 @@ public enum WhatsAppExportService {
         }
     }
 
-    private static func resolveAttachmentURL(fileName: String, sourceDir: URL) -> URL? {
+    nonisolated private static func attachmentIndex(for sourceDir: URL) -> [String: URL] {
+        let fm = FileManager.default
+        let base = sourceDir.standardizedFileURL
+        let key = base.path
+
+        attachmentIndexLock.lock()
+        if let cached = attachmentIndexCache[key] {
+            attachmentIndexLock.unlock()
+            return cached
+        }
+        attachmentIndexLock.unlock()
+
+        var index: [String: URL] = [:]
+        if let en = fm.enumerator(
+            at: base,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) {
+            for case let u as URL in en {
+                let rv = try? u.resourceValues(forKeys: [.isRegularFileKey])
+                if rv?.isRegularFile != true { continue }
+                let name = u.lastPathComponent
+                if index[name] == nil {
+                    index[name] = u
+                }
+            }
+        }
+
+        attachmentIndexLock.lock()
+        attachmentIndexCache[key] = index
+        attachmentIndexLock.unlock()
+
+        return index
+    }
+
+    nonisolated private static func resolveAttachmentURL(fileName: String, sourceDir: URL) -> URL? {
         let fm = FileManager.default
 
         // 1) Most common: attachment is next to the chat.txt
@@ -1405,32 +1806,27 @@ public enum WhatsAppExportService {
         let media = sourceDir.appendingPathComponent("Media", isDirectory: true).appendingPathComponent(fileName)
         if fm.fileExists(atPath: media.path) { return media }
 
-        // 3) Last resort: search recursively for a matching lastPathComponent (can be slower)
-        if let en = fm.enumerator(
-            at: sourceDir,
-            includingPropertiesForKeys: [.isRegularFileKey],
-            options: [.skipsHiddenFiles, .skipsPackageDescendants]
-        ) {
-            for case let u as URL in en {
-                if u.lastPathComponent == fileName {
-                    return u
-                }
-            }
+        // 3) Last resort: resolve via cached index (avoids per-attachment recursion).
+        let index = attachmentIndex(for: sourceDir)
+        if let hit = index[fileName], fm.fileExists(atPath: hit.path) {
+            return hit
         }
 
         return nil
     }
 
-    private static func exportSortedAttachmentsFolder(
+    nonisolated private static func exportSortedAttachmentsFolder(
         chatURL: URL,
         messages: [WAMessage],
         outDir: URL,
-        folderName: String,
-        allowOverwrite: Bool
+        folderName: String
     ) throws -> URL {
         let fm = FileManager.default
 
         let baseFolderURL = outDir.appendingPathComponent(folderName, isDirectory: true)
+        if fm.fileExists(atPath: baseFolderURL.path) {
+            throw OutputCollisionError(url: baseFolderURL)
+        }
         try fm.createDirectory(at: baseFolderURL, withIntermediateDirectories: true)
 
         // Additionally copy the original WhatsApp export folder (the folder that contains chat.txt)
@@ -1439,33 +1835,35 @@ public enum WhatsAppExportService {
         let sourceDir = chatURL.deletingLastPathComponent().standardizedFileURL
         let originalFolderName = sourceDir.lastPathComponent
         let originalCopyDir = baseFolderURL.appendingPathComponent(originalFolderName, isDirectory: true)
+        if fm.fileExists(atPath: originalCopyDir.path) {
+            throw OutputCollisionError(url: originalCopyDir)
+        }
         try fm.createDirectory(at: originalCopyDir, withIntermediateDirectories: true)
 
         // Copy recursively, but avoid recursion if the chosen output directory is inside the source directory.
         // (e.g. user selects the same folder or a subfolder as output)
         let outDirPath = outDir.standardizedFileURL.path
         let baseFolderPath = baseFolderURL.standardizedFileURL.path
+        var skipPrefixes = [outDirPath, baseFolderPath]
+        if outDir.lastPathComponent.hasPrefix(".wa_export_tmp_") {
+            let parent = outDir.deletingLastPathComponent().standardizedFileURL.path
+            skipPrefixes.append(parent)
+        }
         try copyDirectoryPreservingStructure(
             from: sourceDir,
             to: originalCopyDir,
-            skippingPathPrefixes: [outDirPath, baseFolderPath]
+            skippingPathPrefixes: skipPrefixes
         )
         
         try copySiblingZipIfPresent(
             sourceDir: sourceDir,
-            destParentDir: baseFolderURL,
-            allowOverwrite: allowOverwrite
+            destParentDir: baseFolderURL
         )
 
         let imagesDir = baseFolderURL.appendingPathComponent(SortedAttachmentBucket.images.rawValue, isDirectory: true)
         let videosDir = baseFolderURL.appendingPathComponent(SortedAttachmentBucket.videos.rawValue, isDirectory: true)
         let audiosDir = baseFolderURL.appendingPathComponent(SortedAttachmentBucket.audios.rawValue, isDirectory: true)
         let docsDir = baseFolderURL.appendingPathComponent(SortedAttachmentBucket.documents.rawValue, isDirectory: true)
-
-        try fm.createDirectory(at: imagesDir, withIntermediateDirectories: true)
-        try fm.createDirectory(at: videosDir, withIntermediateDirectories: true)
-        try fm.createDirectory(at: audiosDir, withIntermediateDirectories: true)
-        try fm.createDirectory(at: docsDir, withIntermediateDirectories: true)
 
         // Build: filename -> earliest timestamp
         var earliestDateByFile: [String: Date] = [:]
@@ -1484,8 +1882,11 @@ public enum WhatsAppExportService {
             }
         }
 
-        // Always create the folder structure so the user sees it even if nothing could be copied.
+        // If there are no attachments, keep the bucket folders absent.
         if earliestDateByFile.isEmpty { return originalCopyDir }
+
+        var ensuredBuckets = Set<SortedAttachmentBucket>()
+        var bucketsWithContent = Set<SortedAttachmentBucket>()
 
         let df = DateFormatter()
         df.locale = Locale(identifier: "en_US_POSIX")
@@ -1510,26 +1911,42 @@ public enum WhatsAppExportService {
                 }
             }()
 
+            if ensuredBuckets.insert(bucket).inserted {
+                try fm.createDirectory(at: dstFolder, withIntermediateDirectories: true)
+            }
+
             let prefix = df.string(from: ts)
             let dstName = "\(prefix) \(fn)"
-            var dst = dstFolder.appendingPathComponent(dstName)
-            dst = uniqueDestinationURL(dst)
+            let dst = dstFolder.appendingPathComponent(dstName)
+            if fm.fileExists(atPath: dst.path) {
+                throw OutputCollisionError(url: dst)
+            }
 
-            // Copy (no overwrite expected because folder is removed when allowOverwrite=true)
-            if !fm.fileExists(atPath: dst.path) {
-                do {
-                    try fm.copyItem(at: src, to: dst)
-                    syncFileSystemTimestamps(from: src, to: dst)
-                } catch {
-                    // keep export resilient
-                }
+            do {
+                try fm.copyItem(at: src, to: dst)
+                syncFileSystemTimestamps(from: src, to: dst)
+                bucketsWithContent.insert(bucket)
+            } catch {
+                // keep export resilient
+            }
+        }
+
+        let bucketDirs: [SortedAttachmentBucket: URL] = [
+            .images: imagesDir,
+            .videos: videosDir,
+            .audios: audiosDir,
+            .documents: docsDir
+        ]
+        for bucket in ensuredBuckets where !bucketsWithContent.contains(bucket) {
+            if let dir = bucketDirs[bucket], isDirectoryEmpty(dir) {
+                try? fm.removeItem(at: dir)
             }
         }
 
         return originalCopyDir
     }
 
-    private static func stripAttachmentMarkers(_ text: String) -> String {
+    nonisolated private static func stripAttachmentMarkers(_ text: String) -> String {
         let range = NSRange(location: 0, length: (text as NSString).length)
         let stripped = attachRe.stringByReplacingMatches(in: text, options: [], range: range, withTemplate: "")
         return stripped.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1537,7 +1954,7 @@ public enum WhatsAppExportService {
     
     /// For text-only exports, keep chat bubbles non-empty when the original message only contained attachments.
     /// Returns a human-readable placeholder containing the original filenames (as referenced in the WhatsApp export).
-    private static func attachmentPlaceholderText(forAttachments fns: [String]) -> String {
+    nonisolated private static func attachmentPlaceholderText(forAttachments fns: [String]) -> String {
         guard !fns.isEmpty else { return "" }
 
         func kindLabel(for fn: String) -> String {
@@ -1560,7 +1977,7 @@ public enum WhatsAppExportService {
         return lines.joined(separator: "\n")
     }
 
-    private static func guessMime(fromName name: String) -> String {
+    nonisolated private static func guessMime(fromName name: String) -> String {
         let n = name.lowercased()
         if n.hasSuffix(".jpg") || n.hasSuffix(".jpeg") { return "image/jpeg" }
         if n.hasSuffix(".png") { return "image/png" }
@@ -1594,7 +2011,7 @@ public enum WhatsAppExportService {
         return "application/octet-stream"
     }
 
-    private static func fileToDataURL(_ url: URL) -> String? {
+    nonisolated private static func fileToDataURL(_ url: URL) -> String? {
         let fm = FileManager.default
         guard fm.fileExists(atPath: url.path) else { return nil }
         guard let data = try? Data(contentsOf: url) else { return nil }
@@ -1603,11 +2020,11 @@ public enum WhatsAppExportService {
         return "data:\(mime);base64,\(b64)"
     }
 
-    private static func ensureDirectory(_ url: URL) throws {
+    nonisolated private static func ensureDirectory(_ url: URL) throws {
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
     }
 
-    private static func urlPathEscapeComponent(_ s: String) -> String {
+    nonisolated private static func urlPathEscapeComponent(_ s: String) -> String {
         // Encode a single path component for safe use in href/src.
         // Keep it conservative to work well across Safari/Chrome/Edge.
         var allowed = CharacterSet.urlPathAllowed
@@ -1615,33 +2032,13 @@ public enum WhatsAppExportService {
         return s.addingPercentEncoding(withAllowedCharacters: allowed) ?? s
     }
 
-    private static func uniqueDestinationURL(_ dest: URL) -> URL {
-        // If a file already exists, create a non-colliding name like "name (2).ext".
-        let fm = FileManager.default
-        if !fm.fileExists(atPath: dest.path) { return dest }
-
-        let ext = dest.pathExtension
-        let base = dest.deletingPathExtension().lastPathComponent
-        let dir = dest.deletingLastPathComponent()
-
-        var i = 2
-        while true {
-            let candidateName = ext.isEmpty ? "\(base) (\(i))" : "\(base) (\(i)).\(ext)"
-            let candidate = dir.appendingPathComponent(candidateName)
-            if !fm.fileExists(atPath: candidate.path) {
-                return candidate
-            }
-            i += 1
-        }
-    }
-
-    private static func escapeRelPath(_ rel: String) -> String {
+    nonisolated private static func escapeRelPath(_ rel: String) -> String {
         // Escape each component individually so slashes stay as separators.
         let parts = rel.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
         return parts.map { urlPathEscapeComponent($0) }.joined(separator: "/")
     }
 
-    private static func relativeHref(for file: URL, relativeTo baseDir: URL?) -> String {
+    nonisolated private static func relativeHref(for file: URL, relativeTo baseDir: URL?) -> String {
         let src = file.standardizedFileURL
         guard let basePath = baseDir?.standardizedFileURL.path, !basePath.isEmpty else {
             return src.absoluteURL.absoluteString
@@ -1656,7 +2053,7 @@ public enum WhatsAppExportService {
         return src.absoluteURL.absoluteString
     }
 
-    private static func decodeDataURL(_ s: String) -> (data: Data, mime: String)? {
+    nonisolated private static func decodeDataURL(_ s: String) -> (data: Data, mime: String)? {
         guard s.hasPrefix("data:") else { return nil }
         guard let comma = s.firstIndex(of: ",") else { return nil }
 
@@ -1671,7 +2068,7 @@ public enum WhatsAppExportService {
         return (data: data, mime: mime)
     }
 
-    private static func fileExtension(forMime mime: String) -> String {
+    nonisolated private static func fileExtension(forMime mime: String) -> String {
         let m = mime.lowercased()
         if m.contains("png") { return "png" }
         if m.contains("jpeg") || m.contains("jpg") { return "jpg" }
@@ -1681,7 +2078,7 @@ public enum WhatsAppExportService {
         return "bin"
     }
 
-    private static func fnv1a64Hex(_ data: Data) -> String {
+    nonisolated private static func fnv1a64Hex(_ data: Data) -> String {
         var hash: UInt64 = 0xcbf29ce484222325
         for b in data {
             hash ^= UInt64(b)
@@ -1690,7 +2087,7 @@ public enum WhatsAppExportService {
         return String(format: "%016llx", hash)
     }
 
-    private static func stagePreviewImageDataURL(
+    nonisolated private static func stagePreviewImageDataURL(
         _ dataURL: String,
         previewsDir: URL,
         relativeTo baseDir: URL?
@@ -1720,7 +2117,7 @@ public enum WhatsAppExportService {
     ///   relative path (URL-escaped per path component) so the exported HTML can reference media inside
     ///   a sidecar folder without creating a sibling `attachments/` folder.
     /// - Otherwise, the returned href is a `file://` URL string to the original file.
-    private static func stageAttachmentForExport(
+    nonisolated private static func stageAttachmentForExport(
         source: URL,
         attachmentsDir _: URL,
         relativeTo baseDir: URL? = nil
@@ -1753,7 +2150,7 @@ public enum WhatsAppExportService {
     // ---------------------------
 
 #if canImport(QuickLookThumbnailing)
-private static func thumbnailPNGDataURL(for fileURL: URL, maxPixel: CGFloat = 900) async -> String? {
+nonisolated private static func thumbnailPNGDataURL(for fileURL: URL, maxPixel: CGFloat = 900) async -> String? {
     let size = CGSize(width: maxPixel, height: maxPixel)
     #if canImport(AppKit)
         let scale = NSScreen.main?.backingScaleFactor ?? 2.0
@@ -1808,7 +2205,7 @@ private static func thumbnailPNGDataURL(for fileURL: URL, maxPixel: CGFloat = 90
 #endif
 
 #if canImport(QuickLookThumbnailing)
-private static func thumbnailJPEGData(for fileURL: URL, maxPixel: CGFloat = 900, quality: CGFloat = 0.72) async -> Data? {
+nonisolated private static func thumbnailJPEGData(for fileURL: URL, maxPixel: CGFloat = 900, quality: CGFloat = 0.72) async -> Data? {
     let size = CGSize(width: maxPixel, height: maxPixel)
     #if canImport(AppKit)
         let scale = NSScreen.main?.backingScaleFactor ?? 2.0
@@ -1858,7 +2255,7 @@ private static func thumbnailJPEGData(for fileURL: URL, maxPixel: CGFloat = 900,
 }
 #endif
 
-private static func stageThumbnailForExport(
+nonisolated private static func stageThumbnailForExport(
     source: URL,
     thumbsDir: URL,
     relativeTo baseDir: URL?
@@ -1868,8 +2265,6 @@ private static func stageThumbnailForExport(
     guard fm.fileExists(atPath: src.path) else { return nil }
 
     do {
-        try ensureDirectory(thumbsDir)
-
         // Prefer a .jpg thumbnail to keep size down.
         // IMPORTANT: Use a deterministic destination name so repeated runs reuse the same file
         // instead of creating endless "(2)", "(3)", ... duplicates.
@@ -1883,6 +2278,7 @@ private static func stageThumbnailForExport(
 
         #if canImport(QuickLookThumbnailing)
         if let jpg = await thumbnailJPEGData(for: src, maxPixel: 900, quality: 0.72) {
+            try ensureDirectory(thumbsDir)
             try jpg.write(to: dest, options: .atomic)
             return relativeHref(for: dest, relativeTo: baseDir)
         }
@@ -1895,7 +2291,7 @@ private static func stageThumbnailForExport(
     }
 }
 
-    private static func attachmentPreviewDataURL(_ url: URL) async -> String? {
+    nonisolated private static func attachmentPreviewDataURL(_ url: URL) async -> String? {
         let ext = url.pathExtension.lowercased()
 
         // True images: embed as-is.
@@ -1915,7 +2311,7 @@ private static func stageThumbnailForExport(
         return nil
     }
 
-    private static func attachmentThumbnailDataURL(_ url: URL) async -> String? {
+    nonisolated private static func attachmentThumbnailDataURL(_ url: URL) async -> String? {
         // Goal: always produce a lightweight thumbnail image (PNG) when possible.
         // - Images: prefer QuickLook thumbnail so we do not embed the full photo bytes.
         // - PDF/DOCX/Video: QuickLook thumbnail.
@@ -1937,7 +2333,7 @@ private static func stageThumbnailForExport(
         return nil
     }
 
-    private static func attachmentEmoji(forExtension ext: String) -> String {
+    nonisolated private static func attachmentEmoji(forExtension ext: String) -> String {
         let e = ext.lowercased()
         if ["mp4","mov","m4v"].contains(e) { return "🎬" }
         if ["mp3","m4a","aac","wav","ogg","opus","flac","caf","aiff","aif","amr"].contains(e) { return "🎧" }
@@ -1949,14 +2345,14 @@ private static func stageThumbnailForExport(
     // Link previews: Google Maps helpers
     // ---------------------------
 
-    private static func isGoogleMapsCoordinateURL(_ u: URL) -> Bool {
+    nonisolated private static func isGoogleMapsCoordinateURL(_ u: URL) -> Bool {
         guard let host = u.host?.lowercased() else { return false }
         if !host.contains("google.") { return false }
         if !u.path.lowercased().contains("/maps") { return false }
         return googleMapsLatLon(u) != nil
     }
 
-    private static func googleMapsLatLon(_ u: URL) -> (Double, Double)? {
+    nonisolated private static func googleMapsLatLon(_ u: URL) -> (Double, Double)? {
         guard let comps = URLComponents(url: u, resolvingAgainstBaseURL: false) else { return nil }
         let items = comps.queryItems ?? []
 
@@ -1980,7 +2376,7 @@ private static func stageThumbnailForExport(
         return (latN, lonN)
     }
 
-    private static func googleMapsCoordinateTitle(lat: Double, lon: Double) -> String {
+    nonisolated private static func googleMapsCoordinateTitle(lat: Double, lon: Double) -> String {
         func dmsEntity(_ v: Double, pos: String, neg: String) -> String {
             let hemi = (v >= 0) ? pos : neg
             let a = abs(v)
@@ -2225,7 +2621,7 @@ private static func stageThumbnailForExport(
     }
 
     /// Attempts to build a rich preview using macOS LinkPresentation (often yields a real preview image).
-    private static func buildPreviewViaLinkPresentation(_ urlString: String) async -> WAPreview? {
+    nonisolated private static func buildPreviewViaLinkPresentation(_ urlString: String) async -> WAPreview? {
         guard let u = URL(string: urlString) else { return nil }
         do {
             let meta = try await fetchLPMetadata(u)
@@ -2258,7 +2654,7 @@ private static func stageThumbnailForExport(
     // Link previews (online)
     // ---------------------------
 
-    private static func httpGet(_ url: String, timeout: TimeInterval = 15) async throws -> (Data, String) {
+    nonisolated private static func httpGet(_ url: String, timeout: TimeInterval = 15) async throws -> (Data, String) {
         guard let u = URL(string: url) else { throw URLError(.badURL) }
         var req = URLRequest(url: u, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: timeout)
         req.httpMethod = "GET"
@@ -2276,13 +2672,13 @@ private static func stageThumbnailForExport(
         return (data, ct)
     }
 
-    private static func resolveURL(base: String, maybe: String) -> String {
+    nonisolated private static func resolveURL(base: String, maybe: String) -> String {
         // Resolve relative URLs against the base page.
         guard let b = URL(string: base) else { return maybe }
         return URL(string: maybe, relativeTo: b)?.absoluteURL.absoluteString ?? maybe
     }
 
-    private static func parseMeta(_ htmlBytes: Data) -> [String: String] {
+    nonisolated private static func parseMeta(_ htmlBytes: Data) -> [String: String] {
         // Limit HTML parsing to a bounded prefix for performance/stability.
         let limited = htmlBytes.prefix(800_000)
         let s = String(data: limited, encoding: .utf8) ?? String(decoding: limited, as: UTF8.self)
@@ -2322,7 +2718,7 @@ private static func stageThumbnailForExport(
         return out
     }
 
-    private static func downloadImageAsDataURL(_ imgURL: String, timeout: TimeInterval = 15, maxBytes: Int = 2_500_000) async -> String? {
+    nonisolated private static func downloadImageAsDataURL(_ imgURL: String, timeout: TimeInterval = 15, maxBytes: Int = 2_500_000) async -> String? {
         do {
             let (data, ct) = try await httpGet(imgURL, timeout: timeout)
             if data.count > maxBytes { return nil }
@@ -2341,7 +2737,7 @@ private static func stageThumbnailForExport(
         }
     }
 
-    private static func buildPreview(_ url: String) async -> WAPreview? {
+    nonisolated private static func buildPreview(_ url: String) async -> WAPreview? {
         if let cached = await previewCache.get(url) { return cached }
 
         // Google Maps: avoid consent/interstitial pages and keep output stable.
@@ -2405,25 +2801,25 @@ private static func stageThumbnailForExport(
     // Rendering helpers
     // ---------------------------
 
-    private static func weekdayIndexMonday0(_ date: Date) -> Int {
+    nonisolated private static func weekdayIndexMonday0(_ date: Date) -> Int {
         let cal = Calendar(identifier: .gregorian)
         let w = cal.component(.weekday, from: date) // Sunday=1 ... Saturday=7
         return (w + 5) % 7 // Monday=0 ... Sunday=6
     }
 
-    private static func fmtDateFull(_ date: Date) -> String {
+    nonisolated private static func fmtDateFull(_ date: Date) -> String {
         let cal = Calendar(identifier: .gregorian)
         let c = cal.dateComponents([.year, .month, .day], from: date)
         return String(format: "%02d.%02d.%04d", c.day ?? 0, c.month ?? 0, c.year ?? 0)
     }
 
-    private static func fmtTime(_ date: Date) -> String {
+    nonisolated private static func fmtTime(_ date: Date) -> String {
         let cal = Calendar(identifier: .gregorian)
         let c = cal.dateComponents([.hour, .minute, .second], from: date)
         return String(format: "%02d:%02d:%02d", c.hour ?? 0, c.minute ?? 0, c.second ?? 0)
     }
 
-    private static func htmlEscape(_ s: String) -> String {
+    nonisolated private static func htmlEscape(_ s: String) -> String {
         var x = s
         x = x.replacingOccurrences(of: "&", with: "&amp;")
         x = x.replacingOccurrences(of: "<", with: "&lt;")
@@ -2433,7 +2829,7 @@ private static func stageThumbnailForExport(
         return x
     }
 
-    private static func htmlUnescape(_ s: String) -> String {
+    nonisolated private static func htmlUnescape(_ s: String) -> String {
         // Minimal unescape used for <title> fallback
         var x = s
         x = x.replacingOccurrences(of: "&lt;", with: "<")
@@ -2444,7 +2840,7 @@ private static func stageThumbnailForExport(
         return x
     }
 
-    private static func htmlEscapeKeepNewlines(_ s: String) -> String {
+    nonisolated private static func htmlEscapeKeepNewlines(_ s: String) -> String {
         // Convert newlines to <br> after escaping.
         let esc = htmlEscape(s)
         return esc.components(separatedBy: .newlines).joined(separator: "<br>")
@@ -2452,7 +2848,7 @@ private static func stageThumbnailForExport(
 
     // Escapes text as HTML and (optionally) turns http(s) URLs into clickable <a> links.
     // Keeps original newlines by converting them to <br> (same behavior as htmlEscapeKeepNewlines).
-    private static func htmlEscapeAndLinkifyKeepNewlines(_ s: String, linkify: Bool) -> String {
+    nonisolated private static func htmlEscapeAndLinkifyKeepNewlines(_ s: String, linkify: Bool) -> String {
         if !linkify {
             return htmlEscapeKeepNewlines(s)
         }
@@ -2528,7 +2924,7 @@ private static func stageThumbnailForExport(
     // Render HTML (1:1 layout + CSS)
     // ---------------------------
 
-    private static func renderHTML(
+    nonisolated private static func renderHTML(
         msgs: [WAMessage],
         chatURL: URL,
         outHTML: URL,
@@ -3326,7 +3722,7 @@ private static func stageThumbnailForExport(
     // Render Markdown (1:1)
     // ---------------------------
 
-    private static func renderMD(
+    nonisolated private static func renderMD(
         msgs: [WAMessage],
         chatURL: URL,
         outMD: URL,
@@ -3468,7 +3864,8 @@ private static func stageThumbnailForExport(
     }
     /// Best-effort: make dest carry the same filesystem timestamps as source.
     /// We intentionally do not throw if the filesystem refuses to set attributes.
-    private static func syncFileSystemTimestamps(from source: URL, to dest: URL) {
+    nonisolated(unsafe) private static var didLogTimestampWarning = false
+    nonisolated private static func syncFileSystemTimestamps(from source: URL, to dest: URL) {
         let fm = FileManager.default
         guard let attrs = try? fm.attributesOfItem(atPath: source.path) else { return }
 
@@ -3477,11 +3874,292 @@ private static func stageThumbnailForExport(
         if let m = attrs[.modificationDate] as? Date { newAttrs[.modificationDate] = m }
 
         if !newAttrs.isEmpty {
-            try? fm.setAttributes(newAttrs, ofItemAtPath: dest.path)
+            do {
+                try fm.setAttributes(newAttrs, ofItemAtPath: dest.path)
+            } catch {
+                if let m = newAttrs[.modificationDate] {
+                    try? fm.setAttributes([.modificationDate: m], ofItemAtPath: dest.path)
+                }
+                if !didLogTimestampWarning {
+                    didLogTimestampWarning = true
+                    print("WARN: Could not fully preserve file timestamps for copied originals.")
+                }
+            }
         }
     }
 
-    private static func copyDirectoryPreservingStructure(
+    nonisolated private static func isDirectoryEmpty(_ url: URL) -> Bool {
+        let fm = FileManager.default
+        guard let contents = try? fm.contentsOfDirectory(
+            at: url,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else {
+            return true
+        }
+        return contents.isEmpty
+    }
+
+    nonisolated static func cleanupTemporaryExportFolders(in dir: URL) throws {
+        let fm = FileManager.default
+        let base = dir.standardizedFileURL
+        guard let contents = try? fm.contentsOfDirectory(
+            at: base,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: []
+        ) else {
+            return
+        }
+
+        var failed: [String] = []
+        for u in contents where u.lastPathComponent.hasPrefix(".wa_export_tmp_") {
+            do {
+                try fm.removeItem(at: u)
+            } catch {
+                failed.append(u.lastPathComponent)
+            }
+        }
+
+        if !failed.isEmpty {
+            throw TemporaryExportFolderCleanupError(failedFolders: failed.sorted())
+        }
+    }
+
+    nonisolated static func createStagingDirectory(in dir: URL) throws -> URL {
+        let fm = FileManager.default
+        let base = dir.standardizedFileURL
+
+        for _ in 0..<5 {
+            let candidate = base.appendingPathComponent(".wa_export_tmp_\(UUID().uuidString)", isDirectory: true)
+            if fm.fileExists(atPath: candidate.path) { continue }
+            do {
+                try fm.createDirectory(at: candidate, withIntermediateDirectories: false)
+                return candidate
+            } catch {
+                throw StagingDirectoryCreationError(url: candidate, underlying: error)
+            }
+        }
+
+        let fallback = base.appendingPathComponent(".wa_export_tmp_\(UUID().uuidString)", isDirectory: true)
+        throw StagingDirectoryCreationError(url: fallback, underlying: CocoaError(.fileWriteFileExists))
+    }
+
+    nonisolated private static func duplicateBaseNameIfNeeded(_ name: String) -> String? {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let lastSpace = trimmed.lastIndex(of: " ") else { return nil }
+        let suffix = trimmed[trimmed.index(after: lastSpace)...]
+        guard let num = Int(suffix), num >= 2 else { return nil }
+        let base = String(trimmed[..<lastSpace])
+        return base.isEmpty ? nil : base
+    }
+
+    nonisolated static func validateSidecarLayout(sidecarBaseDir: URL) throws {
+        let fm = FileManager.default
+        let base = sidecarBaseDir.standardizedFileURL
+        guard let contents = try? fm.contentsOfDirectory(
+            at: base,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return
+        }
+
+        try cleanupTemporaryExportFolders(in: base)
+
+        var dirURLs: [String: URL] = [:]
+        for u in contents {
+            let rv = try? u.resourceValues(forKeys: [.isDirectoryKey])
+            if rv?.isDirectory == true {
+                dirURLs[u.lastPathComponent] = u
+            }
+        }
+
+        let knownBuckets = ["images", "videos", "audios", "documents", "_thumbs", "_previews"]
+        for name in knownBuckets {
+            if let url = dirURLs[name], isDirectoryEmpty(url) {
+                try? fm.removeItem(at: url)
+                dirURLs.removeValue(forKey: name)
+            }
+        }
+
+        let dirNames = Set(dirURLs.keys)
+        var duplicates: [String] = []
+        for name in dirNames {
+            guard let baseName = duplicateBaseNameIfNeeded(name) else { continue }
+            guard dirNames.contains(baseName) else { continue }
+            duplicates.append(name)
+        }
+
+        if !duplicates.isEmpty {
+            throw SidecarValidationError(duplicateFolders: duplicates.sorted())
+        }
+    }
+
+    nonisolated private static func datesMatch(_ a: Date?, _ b: Date?, tolerance: TimeInterval = 1.0) -> Bool {
+        guard let a, let b else { return false }
+        return abs(a.timeIntervalSinceReferenceDate - b.timeIntervalSinceReferenceDate) <= tolerance
+    }
+
+    nonisolated private static func timestampsMatch(_ src: [FileAttributeKey: Any]?, _ dst: [FileAttributeKey: Any]?) -> Bool {
+        guard let src, let dst else { return false }
+        let srcC = src[.creationDate] as? Date
+        let dstC = dst[.creationDate] as? Date
+        let srcM = src[.modificationDate] as? Date
+        let dstM = dst[.modificationDate] as? Date
+        return datesMatch(srcC, dstC) && datesMatch(srcM, dstM)
+    }
+
+    nonisolated static func normalizeOriginalCopyTimestamps(
+        sourceDir: URL,
+        destDir: URL,
+        skippingPathPrefixes: [String]
+    ) {
+        let fm = FileManager.default
+        let srcRoot = sourceDir.standardizedFileURL
+        let dstRoot = destDir.standardizedFileURL
+        guard fm.fileExists(atPath: srcRoot.path), fm.fileExists(atPath: dstRoot.path) else { return }
+
+        var dirPairs: [(src: URL, dst: URL)] = [(srcRoot, dstRoot)]
+        var filePairs: [(src: URL, dst: URL)] = []
+
+        guard let en = fm.enumerator(
+            at: srcRoot,
+            includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else {
+            return
+        }
+
+        let srcBasePath = srcRoot.path
+        let dstBasePath = dstRoot.path
+        let skipPrefixes = skippingPathPrefixes.map {
+            $0.hasSuffix("/") ? String($0.dropLast()) : $0
+        }
+
+        func shouldSkip(_ url: URL) -> Bool {
+            let p = url.standardizedFileURL.path
+            for pref in skipPrefixes {
+                if !pref.isEmpty, p.hasPrefix(pref) { return true }
+            }
+            if p.hasPrefix(dstBasePath) { return true }
+            return false
+        }
+
+        for case let u as URL in en {
+            if shouldSkip(u) {
+                if (try? u.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
+                    en.skipDescendants()
+                }
+                continue
+            }
+
+            let fullPath = u.standardizedFileURL.path
+            guard fullPath.hasPrefix(srcBasePath) else { continue }
+
+            var relPath = String(fullPath.dropFirst(srcBasePath.count))
+            if relPath.hasPrefix("/") { relPath.removeFirst() }
+            if relPath.isEmpty { continue }
+
+            let dst = dstRoot.appendingPathComponent(relPath)
+            guard fm.fileExists(atPath: dst.path) else { continue }
+
+            let rv = try? u.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey])
+            if rv?.isDirectory == true {
+                dirPairs.append((src: u, dst: dst))
+            } else if rv?.isRegularFile == true {
+                filePairs.append((src: u, dst: dst))
+            }
+        }
+
+        for pair in filePairs {
+            syncFileSystemTimestamps(from: pair.src, to: pair.dst)
+        }
+
+        let sorted = dirPairs.sorted {
+            $0.dst.standardizedFileURL.path.count > $1.dst.standardizedFileURL.path.count
+        }
+        for pair in sorted {
+            syncFileSystemTimestamps(from: pair.src, to: pair.dst)
+        }
+    }
+
+    nonisolated static func sampleTimestampMismatches(
+        sourceDir: URL,
+        destDir: URL,
+        maxFiles: Int,
+        maxDirs: Int,
+        skippingPathPrefixes: [String] = []
+    ) -> [String] {
+        let fm = FileManager.default
+        let srcRoot = sourceDir.standardizedFileURL
+        let dstRoot = destDir.standardizedFileURL
+        guard fm.fileExists(atPath: srcRoot.path), fm.fileExists(atPath: dstRoot.path) else { return [] }
+
+        guard let en = fm.enumerator(
+            at: srcRoot,
+            includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else {
+            return []
+        }
+
+        let srcBasePath = srcRoot.path
+        let dstBasePath = dstRoot.path
+        let skipPrefixes = skippingPathPrefixes.map {
+            $0.hasSuffix("/") ? String($0.dropLast()) : $0
+        }
+
+        func shouldSkip(_ url: URL) -> Bool {
+            let p = url.standardizedFileURL.path
+            for pref in skipPrefixes {
+                if !pref.isEmpty, p.hasPrefix(pref) { return true }
+            }
+            if p.hasPrefix(dstBasePath) { return true }
+            return false
+        }
+
+        var mismatches: [String] = []
+        var fileCount = 0
+        var dirCount = 0
+
+        for case let u as URL in en {
+            if shouldSkip(u) {
+                if (try? u.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
+                    en.skipDescendants()
+                }
+                continue
+            }
+
+            let rv = try? u.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey])
+            if rv?.isDirectory == true, dirCount >= maxDirs { continue }
+            if rv?.isRegularFile == true, fileCount >= maxFiles { continue }
+
+            let fullPath = u.standardizedFileURL.path
+            guard fullPath.hasPrefix(srcBasePath) else { continue }
+
+            var relPath = String(fullPath.dropFirst(srcBasePath.count))
+            if relPath.hasPrefix("/") { relPath.removeFirst() }
+            if relPath.isEmpty { continue }
+
+            let dst = dstRoot.appendingPathComponent(relPath)
+            guard fm.fileExists(atPath: dst.path) else { continue }
+
+            let srcAttrs = try? fm.attributesOfItem(atPath: u.path)
+            let dstAttrs = try? fm.attributesOfItem(atPath: dst.path)
+            if !timestampsMatch(srcAttrs, dstAttrs) {
+                mismatches.append(relPath)
+            }
+
+            if rv?.isDirectory == true { dirCount += 1 }
+            if rv?.isRegularFile == true { fileCount += 1 }
+
+            if fileCount >= maxFiles && dirCount >= maxDirs { break }
+        }
+
+        return mismatches
+    }
+
+    nonisolated private static func copyDirectoryPreservingStructure(
         from sourceDir: URL,
         to destDir: URL,
         skippingPathPrefixes: [String]
@@ -3495,6 +4173,7 @@ private static func stageThumbnailForExport(
         // Otherwise, creating/copying files will update the directory modification date again.
         var dirPairs: [(src: URL, dst: URL)] = []
         dirPairs.append((src: sourceDir, dst: destDir))
+        var filePairs: [(src: URL, dst: URL)] = []
 
         // Enumerate everything under the source directory.
         guard let en = fm.enumerator(
@@ -3547,14 +4226,21 @@ private static func stageThumbnailForExport(
                 try fm.createDirectory(at: dst, withIntermediateDirectories: true)
                 dirPairs.append((src: u, dst: dst))
             } else if rv?.isRegularFile == true {
-                if !fm.fileExists(atPath: dst.path) {
-                    try fm.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
-                    try fm.copyItem(at: u, to: dst)
-
-                    // Ensure copied files carry original creation/modification timestamps.
-                    syncFileSystemTimestamps(from: u, to: dst)
+                if fm.fileExists(atPath: dst.path) {
+                    throw OutputCollisionError(url: dst)
                 }
+                try fm.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try fm.copyItem(at: u, to: dst)
+
+                // Ensure copied files carry original creation/modification timestamps.
+                syncFileSystemTimestamps(from: u, to: dst)
+                filePairs.append((src: u, dst: dst))
             }
+        }
+
+        // Re-apply file timestamps at the end to avoid any later touches.
+        for pair in filePairs {
+            syncFileSystemTimestamps(from: pair.src, to: pair.dst)
         }
 
         // Apply directory timestamps bottom-up (deepest paths first), root last.
@@ -3569,10 +4255,9 @@ private static func stageThumbnailForExport(
     /// Copies a sibling .zip next to the WhatsApp export folder into the sorted export folder.
     /// WhatsApp exports are often shared as "<ExportFolder>.zip" alongside the extracted folder.
     /// Best-effort: if no reasonable zip is found, this is a no-op.
-    private static func copySiblingZipIfPresent(
+    nonisolated private static func copySiblingZipIfPresent(
         sourceDir: URL,
-        destParentDir: URL,
-        allowOverwrite: Bool
+        destParentDir: URL
     ) throws {
         let fm = FileManager.default
 
@@ -3582,11 +4267,7 @@ private static func stageThumbnailForExport(
 
         let dest = destParentDir.appendingPathComponent(zipURL.lastPathComponent)
         if fm.fileExists(atPath: dest.path) {
-            if allowOverwrite {
-                try? fm.removeItem(at: dest)
-            } else {
-                return
-            }
+            throw OutputCollisionError(url: dest)
         }
 
         do {
@@ -3639,6 +4320,11 @@ private static func stageThumbnailForExport(
 
         if sizeA.uint64Value != sizeB.uint64Value { return false }
         if sizeA.uint64Value == 0 { return true }
+        if let mA = attrsA[.modificationDate] as? Date,
+           let mB = attrsB[.modificationDate] as? Date,
+           datesMatch(mA, mB) {
+            return true
+        }
 
         do {
             let fhA = try FileHandle(forReadingFrom: a)
