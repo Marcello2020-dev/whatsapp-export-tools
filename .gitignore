@@ -1,18 +1,28 @@
 # macOS
 .DS_Store
 
+# Local scratch / temp
+.tmp/
+
+# Local-only workspace (never commit)
+_local/
+
 # Xcode
 **/xcuserdata/
 **/DerivedData/
 *.xcuserstate
 *.xcscmblueprint
 *.xccheckout
+*.xcarchive
+*.xcresult
+*.dSYM
 
 # Swift Package Manager
 .build/
 build/
 Packages/
 Package.resolved
+.swiftpm/
 
 # Carthage
 Carthage/Build/
@@ -31,6 +41,35 @@ venv/
 output/
 
 # Codex local scratch files
+# (legacy naming)
 codex-files/
+Codex Files/
 Codex References/
 Codex Reports/
+
+# Fixtures
+# Prefer keeping any private / local-only fixture data under `_local/fixtures/...`.
+# `_local/` is already ignored above, so this is mostly documentation + legacy safety.
+
+# Legacy location (keep ignored for safety if it still exists)
+/Fixtures/Private/
+
+# --- Specs (local-only; do not commit) ---
+docs/specs/
+
+# Spec working artifacts / snapshots (local-only)
+docs/specs_r*.zip
+docs/specs_tree_dirs_and_md*.txt
+
+# Local runbooks (never commit)
+docs/runbooks/
+runbooks/
+
+# Editors (optional)
+.vscode/
+.idea/
+
+# Coverage / profiling (optional)
+*.profraw
+*.profdata
+*.lcov

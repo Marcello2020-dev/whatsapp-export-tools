@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXFileReference section */
+		1F2599682F142F7800FAD362 /* .gitignore */ = {isa = PBXFileReference; lastKnownFileType = text; path = .gitignore; sourceTree = "<group>"; };
 		1F7A859A2F0A86540053EE07 /* WhatsApp Export Tools.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "WhatsApp Export Tools.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -47,6 +48,7 @@
 			children = (
 				1F7A859C2F0A86540053EE07 /* whatsapp-export-tools */,
 				1F7A859B2F0A86540053EE07 /* Products */,
+				1F2599682F142F7800FAD362 /* .gitignore */,
 			);
 			sourceTree = "<group>";
 		};

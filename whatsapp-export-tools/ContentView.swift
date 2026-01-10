@@ -1189,12 +1189,115 @@ struct ContentView: View {
         return String(format: "%d:%02d", minutes, secs)
     }
 
+    nonisolated private static func formatSeconds(_ seconds: TimeInterval) -> String {
+        String(format: "%.2fs", seconds)
+    }
+
     nonisolated private static func formatClockTime(_ date: Date) -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "de_DE")
         formatter.timeZone = TimeZone.current
         formatter.dateFormat = "HH:mm:ss"
         return formatter.string(from: date)
+    }
+
+    @MainActor
+    private func writePerfReport(
+        context: ExportContext,
+        baseName: String,
+        runStartWall: Date,
+        totalDuration: TimeInterval
+    ) {
+        #if DEBUG
+        let fm = FileManager.default
+        let sourcePath = URL(fileURLWithPath: #filePath)
+        let repoRoot = sourcePath.deletingLastPathComponent().deletingLastPathComponent()
+        let reportsDir = repoRoot.appendingPathComponent("Codex Reports", isDirectory: true)
+        guard fm.fileExists(atPath: reportsDir.path) else { return }
+
+        let snapshot = WhatsAppExportService.perfSnapshot()
+        let tsFormatter = DateFormatter()
+        tsFormatter.locale = Locale(identifier: "en_US_POSIX")
+        tsFormatter.timeZone = TimeZone.current
+        tsFormatter.dateFormat = "yyyy-MM-dd_HHmm"
+
+        let reportName = "perf_compact_\(tsFormatter.string(from: Date())).md"
+        let reportURL = reportsDir.appendingPathComponent(reportName)
+
+        let onOff = { (value: Bool) in value ? "AN" : "AUS" }
+        let artifactOrder = ["Sidecar", "Max", "Kompakt", "E-Mail", "Markdown"]
+
+        var lines: [String] = []
+        lines.append("# Perf Compact Report")
+        lines.append("")
+        lines.append("## Baseline (given)")
+        lines.append("- Sidecar: 0:42")
+        lines.append("- Max: 0:21")
+        lines.append("- Kompakt: 1:37")
+        lines.append("- E-Mail: 0:02")
+        lines.append("- Markdown: 0:01")
+        lines.append("- Total: 2:42")
+        lines.append("")
+        lines.append("## Run")
+        lines.append("- Start: \(Self.formatClockTime(runStartWall))")
+        lines.append("- Exportname: \(baseName)")
+        lines.append("- Zielordner: \(context.exportDir.path)")
+        lines.append("- Optionen: Max=\(onOff(context.selectedVariantsInOrder.contains(.embedAll))) " +
+                     "Kompakt=\(onOff(context.selectedVariantsInOrder.contains(.thumbnailsOnly))) " +
+                     "E-Mail=\(onOff(context.selectedVariantsInOrder.contains(.textOnly))) " +
+                     "Markdown=\(onOff(context.wantsMD)) " +
+                     "Sidecar=\(onOff(context.wantsSidecar)) " +
+                     "Originale löschen=\(onOff(context.wantsDeleteOriginals))")
+        lines.append("- Total: \(Self.formatDuration(totalDuration))")
+        lines.append("")
+        lines.append("## Artifact-Durations")
+        for key in artifactOrder {
+            if let duration = snapshot.artifactDurationByLabel[key] {
+                lines.append("- \(key): \(Self.formatDuration(duration))")
+            } else {
+                lines.append("- \(key): n/a")
+            }
+        }
+        lines.append("")
+        lines.append("## Attachment Index")
+        lines.append("- Builds: \(snapshot.attachmentIndexBuildCount)")
+        lines.append("- Files: \(snapshot.attachmentIndexBuildFiles)")
+        lines.append("- Time: \(Self.formatSeconds(snapshot.attachmentIndexBuildTime))")
+        lines.append("")
+        lines.append("## Thumbnails")
+        lines.append("- JPEG: hits=\(snapshot.thumbJPEGCacheHits) misses=\(snapshot.thumbJPEGMisses) time=\(Self.formatSeconds(snapshot.thumbJPEGTime))")
+        lines.append("- PNG: hits=\(snapshot.thumbPNGCacheHits) misses=\(snapshot.thumbPNGMisses) time=\(Self.formatSeconds(snapshot.thumbPNGTime))")
+        lines.append("- Inline (Compact): hits=\(snapshot.inlineThumbCacheHits) misses=\(snapshot.inlineThumbMisses) time=\(Self.formatSeconds(snapshot.inlineThumbTime))")
+        lines.append("")
+        lines.append("## HTML Render/Write")
+        if snapshot.htmlRenderTimeByLabel.isEmpty {
+            lines.append("- Render: n/a")
+        } else {
+            for key in snapshot.htmlRenderTimeByLabel.keys.sorted() {
+                let render = snapshot.htmlRenderTimeByLabel[key] ?? 0
+                let write = snapshot.htmlWriteTimeByLabel[key] ?? 0
+                let bytes = snapshot.htmlWriteBytesByLabel[key] ?? 0
+                lines.append("- \(key): render=\(Self.formatSeconds(render)) write=\(Self.formatSeconds(write)) bytes=\(bytes)")
+            }
+        }
+        lines.append("")
+        lines.append("## Publish (Move)")
+        if snapshot.publishTimeByLabel.isEmpty {
+            lines.append("- Publish: n/a")
+        } else {
+            for key in snapshot.publishTimeByLabel.keys.sorted() {
+                let moveTime = snapshot.publishTimeByLabel[key] ?? 0
+                lines.append("- \(key): \(Self.formatSeconds(moveTime))")
+            }
+        }
+        lines.append("")
+        lines.append("## Validation Notes")
+        lines.append("- Output hygiene (no \" 2\" files, no tmp dirs): nicht automatisiert geprüft.")
+        lines.append("- Timestamps: nicht automatisiert geprüft (stichprobenartig manuell prüfen).")
+
+        let reportText = lines.joined(separator: "\n") + "\n"
+        try? reportText.write(to: reportURL, atomically: true, encoding: .utf8)
+        #endif
     }
 
     nonisolated private static func debugMeasure<T>(_ label: String, _ work: () throws -> T) rethrows -> T {
@@ -1273,6 +1376,8 @@ struct ContentView: View {
             pendingPreparedExport = nil
         }
         WhatsAppExportService.resetAttachmentIndexCache()
+        WhatsAppExportService.resetThumbnailCaches()
+        WhatsAppExportService.resetPerfMetrics()
         let t0 = ProcessInfo.processInfo.systemUptime
         logExportTiming("T0 tap", startUptime: t0)
         isRunning = true
@@ -1462,6 +1567,12 @@ struct ContentView: View {
 
             let totalDuration = ProcessInfo.processInfo.systemUptime - runStartUptime
             logger.log("Abgeschlossen: \(Self.formatDuration(totalDuration))")
+            writePerfReport(
+                context: context,
+                baseName: baseName,
+                runStartWall: runStartWall,
+                totalDuration: totalDuration
+            )
         } catch {
             if let deletionError = error as? OutputDeletionError {
                 logger.log("ERROR: \(deletionError.errorDescription ?? "Konnte vorhandene Ausgaben nicht löschen.")")
@@ -1574,6 +1685,68 @@ struct ContentView: View {
             log("Fertig: \(artifactLabel(artifact)) (\(Self.formatDuration(duration)))")
         }
 
+        var publishCounts: [String: Int] = [:]
+
+        func recordPublishAttempt(_ url: URL, artifact: Artifact) -> Bool {
+            let key = url.standardizedFileURL.path
+            let count = publishCounts[key, default: 0]
+            if count > 0 {
+                log("BUG: Zweite Veröffentlichung blockiert: \(artifactLabel(artifact)) (\(url.lastPathComponent))")
+                return false
+            }
+            publishCounts[key] = count + 1
+            return true
+        }
+
+        func finalizeSidecarTimestamps(sidecarBaseDir: URL, logMismatches: Bool) {
+            let sourceDir = prepared.chatURL.deletingLastPathComponent()
+            let finalSidecarOriginalDir = sidecarBaseDir.appendingPathComponent(sourceDir.lastPathComponent, isDirectory: true)
+            WhatsAppExportService.normalizeOriginalCopyTimestamps(
+                sourceDir: sourceDir,
+                destDir: finalSidecarOriginalDir,
+                skippingPathPrefixes: [
+                    context.outDir.standardizedFileURL.path,
+                    sidecarBaseDir.standardizedFileURL.path
+                ]
+            )
+            if logMismatches {
+                let mismatches = WhatsAppExportService.sampleTimestampMismatches(
+                    sourceDir: sourceDir,
+                    destDir: finalSidecarOriginalDir,
+                    maxFiles: 3,
+                    maxDirs: 2,
+                    skippingPathPrefixes: [
+                        context.outDir.standardizedFileURL.path,
+                        sidecarBaseDir.standardizedFileURL.path
+                    ]
+                )
+                if !mismatches.isEmpty {
+                    log("WARN: Zeitstempelabweichung bei \(mismatches.count) Element(en).")
+                }
+            }
+        }
+
+        func publishMove(from staged: URL, to final: URL, artifact: Artifact, recordLabel: String) throws {
+            guard recordPublishAttempt(final, artifact: artifact) else {
+                try? fm.removeItem(at: staged)
+                return
+            }
+
+            if fm.fileExists(atPath: final.path) {
+                if context.allowOverwrite {
+                    try fm.removeItem(at: final)
+                } else {
+                    throw OutputCollisionError(url: final)
+                }
+            }
+
+            let moveStart = ProcessInfo.processInfo.systemUptime
+            try fm.moveItem(at: staged, to: final)
+            let moveDuration = ProcessInfo.processInfo.systemUptime - moveStart
+            WhatsAppExportService.recordPublishDuration(label: recordLabel, duration: moveDuration)
+            movedOutputs.append(final)
+        }
+
         var steps: [Artifact] = []
         if context.wantsSidecar {
             steps.append(.sidecar)
@@ -1619,14 +1792,19 @@ struct ContentView: View {
 
                     let finalSidecarDir = Self.outputSidecarDir(baseName: baseName, in: exportDir)
                     let finalSidecarHTML = Self.outputSidecarHTML(baseName: baseName, in: exportDir)
-                    if !context.allowOverwrite {
-                        if fm.fileExists(atPath: finalSidecarDir.path) { throw OutputCollisionError(url: finalSidecarDir) }
-                        if fm.fileExists(atPath: finalSidecarHTML.path) { throw OutputCollisionError(url: finalSidecarHTML) }
-                    }
-                    try fm.moveItem(at: stagedSidecarBaseDir, to: finalSidecarDir)
-                    movedOutputs.append(finalSidecarDir)
-                    try fm.moveItem(at: stagedSidecarHTML, to: finalSidecarHTML)
-                    movedOutputs.append(finalSidecarHTML)
+                    try publishMove(
+                        from: stagedSidecarBaseDir,
+                        to: finalSidecarDir,
+                        artifact: .sidecar,
+                        recordLabel: artifactLabel(.sidecar)
+                    )
+                    try publishMove(
+                        from: stagedSidecarHTML,
+                        to: finalSidecarHTML,
+                        artifact: .sidecar,
+                        recordLabel: artifactLabel(.sidecar)
+                    )
+                    finalizeSidecarTimestamps(sidecarBaseDir: finalSidecarDir, logMismatches: false)
                     finalSidecarBaseDir = finalSidecarDir
                 case .html(let variant):
                     let stagedHTML = try await Self.debugMeasureAsync("generate \(artifactLabel(.html(variant)))") {
@@ -1636,15 +1814,17 @@ struct ContentView: View {
                             fileSuffix: Self.htmlVariantSuffix(for: variant),
                             enablePreviews: variant.enablePreviews,
                             embedAttachments: variant.embedAttachments,
-                            embedAttachmentThumbnailsOnly: variant.thumbnailsOnly
+                            embedAttachmentThumbnailsOnly: variant.thumbnailsOnly,
+                            perfLabel: artifactLabel(.html(variant))
                         )
                     }
                     let finalHTML = Self.outputHTMLURL(baseName: baseName, variant: variant, in: exportDir)
-                    if !context.allowOverwrite, fm.fileExists(atPath: finalHTML.path) {
-                        throw OutputCollisionError(url: finalHTML)
-                    }
-                    try fm.moveItem(at: stagedHTML, to: finalHTML)
-                    movedOutputs.append(finalHTML)
+                    try publishMove(
+                        from: stagedHTML,
+                        to: finalHTML,
+                        artifact: .html(variant),
+                        recordLabel: artifactLabel(.html(variant))
+                    )
                     htmlByVariant[variant] = finalHTML
                 case .markdown:
                     let stagedMD = try Self.debugMeasure("generate Markdown") {
@@ -1654,41 +1834,21 @@ struct ContentView: View {
                         )
                     }
                     let finalMDURL = Self.outputMarkdownURL(baseName: baseName, in: exportDir)
-                    if !context.allowOverwrite, fm.fileExists(atPath: finalMDURL.path) {
-                        throw OutputCollisionError(url: finalMDURL)
-                    }
-                    try fm.moveItem(at: stagedMD, to: finalMDURL)
-                    movedOutputs.append(finalMDURL)
+                    try publishMove(
+                        from: stagedMD,
+                        to: finalMDURL,
+                        artifact: .markdown,
+                        recordLabel: artifactLabel(.markdown)
+                    )
                     finalMD = finalMDURL
                 }
                 let elapsed = ProcessInfo.processInfo.systemUptime - stepStart
                 logDone(step, duration: elapsed)
+                WhatsAppExportService.recordArtifactDuration(label: artifactLabel(step), duration: elapsed)
             }
 
             if let finalSidecarBaseDir {
-                let sourceDir = prepared.chatURL.deletingLastPathComponent()
-                let finalSidecarOriginalDir = finalSidecarBaseDir.appendingPathComponent(sourceDir.lastPathComponent, isDirectory: true)
-                WhatsAppExportService.normalizeOriginalCopyTimestamps(
-                    sourceDir: sourceDir,
-                    destDir: finalSidecarOriginalDir,
-                    skippingPathPrefixes: [
-                        context.outDir.standardizedFileURL.path,
-                        finalSidecarBaseDir.standardizedFileURL.path
-                    ]
-                )
-                let mismatches = WhatsAppExportService.sampleTimestampMismatches(
-                    sourceDir: sourceDir,
-                    destDir: finalSidecarOriginalDir,
-                    maxFiles: 3,
-                    maxDirs: 2,
-                    skippingPathPrefixes: [
-                        context.outDir.standardizedFileURL.path,
-                        finalSidecarBaseDir.standardizedFileURL.path
-                    ]
-                )
-                if !mismatches.isEmpty {
-                    log("WARN: Zeitstempelabweichung bei \(mismatches.count) Element(en).")
-                }
+                finalizeSidecarTimestamps(sidecarBaseDir: finalSidecarBaseDir, logMismatches: true)
             }
         } catch {
             for u in movedOutputs.reversed() { try? fm.removeItem(at: u) }

@@ -125,6 +125,14 @@ public enum HTMLVariant: String, CaseIterable, Hashable, Sendable {
         case .textOnly: return false
         }
     }
+
+    nonisolated public var perfLabel: String {
+        switch self {
+        case .embedAll: return "Max"
+        case .thumbnailsOnly: return "Kompakt"
+        case .textOnly: return "E-Mail"
+        }
+    }
 }
 
 public struct ExportMultiResult: Sendable {
@@ -395,7 +403,7 @@ public enum WhatsAppExportService {
     nonisolated private static let previewCache = PreviewCache()
 
     // Cache for staged attachments (source path -> (relHref, stagedURL)) to avoid duplicate copies.
-    nonisolated(unsafe) private static let stagedAttachmentLock = NSLock()
+    nonisolated private static let stagedAttachmentLock = NSLock()
     nonisolated(unsafe) private static var stagedAttachmentMap: [String: (relHref: String, stagedURL: URL)] = [:]
     
     nonisolated private static func resetStagedAttachmentCache() {
@@ -404,13 +412,230 @@ public enum WhatsAppExportService {
         stagedAttachmentLock.unlock()
     }
 
-    nonisolated(unsafe) private static let attachmentIndexLock = NSLock()
+    nonisolated private static let attachmentIndexLock = NSLock()
     nonisolated(unsafe) private static var attachmentIndexCache: [String: [String: URL]] = [:]
 
     nonisolated static func resetAttachmentIndexCache() {
         attachmentIndexLock.lock()
         attachmentIndexCache.removeAll(keepingCapacity: true)
         attachmentIndexLock.unlock()
+    }
+
+    nonisolated private static let thumbnailJPEGCacheLock = NSLock()
+    nonisolated(unsafe) private static var thumbnailJPEGCache: [String: Data] = [:]
+    nonisolated private static let thumbnailPNGCacheLock = NSLock()
+    nonisolated(unsafe) private static var thumbnailPNGCache: [String: String] = [:]
+    nonisolated private static let inlineThumbCacheLock = NSLock()
+    nonisolated(unsafe) private static var inlineThumbCache: [String: String] = [:]
+
+    nonisolated private static func thumbnailJPEGCacheGet(_ key: String) -> Data? {
+        thumbnailJPEGCacheLock.lock()
+        defer { thumbnailJPEGCacheLock.unlock() }
+        return thumbnailJPEGCache[key]
+    }
+
+    nonisolated private static func thumbnailJPEGCacheSet(_ key: String, _ value: Data) {
+        thumbnailJPEGCacheLock.lock()
+        thumbnailJPEGCache[key] = value
+        thumbnailJPEGCacheLock.unlock()
+    }
+
+    nonisolated private static func thumbnailPNGCacheGet(_ key: String) -> String? {
+        thumbnailPNGCacheLock.lock()
+        defer { thumbnailPNGCacheLock.unlock() }
+        return thumbnailPNGCache[key]
+    }
+
+    nonisolated private static func thumbnailPNGCacheSet(_ key: String, _ value: String) {
+        thumbnailPNGCacheLock.lock()
+        thumbnailPNGCache[key] = value
+        thumbnailPNGCacheLock.unlock()
+    }
+
+    nonisolated private static func inlineThumbCacheGet(_ key: String) -> String? {
+        inlineThumbCacheLock.lock()
+        defer { inlineThumbCacheLock.unlock() }
+        return inlineThumbCache[key]
+    }
+
+    nonisolated private static func inlineThumbCacheSet(_ key: String, _ value: String) {
+        inlineThumbCacheLock.lock()
+        inlineThumbCache[key] = value
+        inlineThumbCacheLock.unlock()
+    }
+
+    nonisolated static func resetThumbnailCaches() {
+        thumbnailJPEGCacheLock.lock()
+        thumbnailJPEGCache.removeAll(keepingCapacity: true)
+        thumbnailJPEGCacheLock.unlock()
+
+        thumbnailPNGCacheLock.lock()
+        thumbnailPNGCache.removeAll(keepingCapacity: true)
+        thumbnailPNGCacheLock.unlock()
+
+        inlineThumbCacheLock.lock()
+        inlineThumbCache.removeAll(keepingCapacity: true)
+        inlineThumbCacheLock.unlock()
+    }
+
+    nonisolated private struct PerfStore {
+        var attachmentIndexBuildCount = 0
+        var attachmentIndexBuildFiles = 0
+        var attachmentIndexBuildTime: TimeInterval = 0
+
+        var thumbJPEGCacheHits = 0
+        var thumbJPEGMisses = 0
+        var thumbJPEGTime: TimeInterval = 0
+
+        var thumbPNGCacheHits = 0
+        var thumbPNGMisses = 0
+        var thumbPNGTime: TimeInterval = 0
+
+        var inlineThumbCacheHits = 0
+        var inlineThumbMisses = 0
+        var inlineThumbTime: TimeInterval = 0
+
+        var htmlRenderTimeByLabel: [String: TimeInterval] = [:]
+        var htmlWriteTimeByLabel: [String: TimeInterval] = [:]
+        var htmlWriteBytesByLabel: [String: Int] = [:]
+
+        var publishTimeByLabel: [String: TimeInterval] = [:]
+        var artifactDurationByLabel: [String: TimeInterval] = [:]
+    }
+
+    nonisolated struct PerfSnapshot: Sendable {
+        let attachmentIndexBuildCount: Int
+        let attachmentIndexBuildFiles: Int
+        let attachmentIndexBuildTime: TimeInterval
+
+        let thumbJPEGCacheHits: Int
+        let thumbJPEGMisses: Int
+        let thumbJPEGTime: TimeInterval
+
+        let thumbPNGCacheHits: Int
+        let thumbPNGMisses: Int
+        let thumbPNGTime: TimeInterval
+
+        let inlineThumbCacheHits: Int
+        let inlineThumbMisses: Int
+        let inlineThumbTime: TimeInterval
+
+        let htmlRenderTimeByLabel: [String: TimeInterval]
+        let htmlWriteTimeByLabel: [String: TimeInterval]
+        let htmlWriteBytesByLabel: [String: Int]
+
+        let publishTimeByLabel: [String: TimeInterval]
+        let artifactDurationByLabel: [String: TimeInterval]
+    }
+
+    nonisolated private static let perfLock = NSLock()
+    nonisolated(unsafe) private static var perfStore = PerfStore()
+
+    nonisolated private static func perfRecord(_ update: (inout PerfStore) -> Void) {
+        #if DEBUG
+        perfLock.lock()
+        update(&perfStore)
+        perfLock.unlock()
+        #else
+        _ = update
+        #endif
+    }
+
+    nonisolated static func resetPerfMetrics() {
+        perfLock.lock()
+        perfStore = PerfStore()
+        perfLock.unlock()
+    }
+
+    nonisolated static func perfSnapshot() -> PerfSnapshot {
+        perfLock.lock()
+        let store = perfStore
+        perfLock.unlock()
+        return PerfSnapshot(
+            attachmentIndexBuildCount: store.attachmentIndexBuildCount,
+            attachmentIndexBuildFiles: store.attachmentIndexBuildFiles,
+            attachmentIndexBuildTime: store.attachmentIndexBuildTime,
+            thumbJPEGCacheHits: store.thumbJPEGCacheHits,
+            thumbJPEGMisses: store.thumbJPEGMisses,
+            thumbJPEGTime: store.thumbJPEGTime,
+            thumbPNGCacheHits: store.thumbPNGCacheHits,
+            thumbPNGMisses: store.thumbPNGMisses,
+            thumbPNGTime: store.thumbPNGTime,
+            inlineThumbCacheHits: store.inlineThumbCacheHits,
+            inlineThumbMisses: store.inlineThumbMisses,
+            inlineThumbTime: store.inlineThumbTime,
+            htmlRenderTimeByLabel: store.htmlRenderTimeByLabel,
+            htmlWriteTimeByLabel: store.htmlWriteTimeByLabel,
+            htmlWriteBytesByLabel: store.htmlWriteBytesByLabel,
+            publishTimeByLabel: store.publishTimeByLabel,
+            artifactDurationByLabel: store.artifactDurationByLabel
+        )
+    }
+
+    nonisolated private static func recordAttachmentIndexBuild(duration: TimeInterval, fileCount: Int) {
+        perfRecord { store in
+            store.attachmentIndexBuildCount += 1
+            store.attachmentIndexBuildFiles += fileCount
+            store.attachmentIndexBuildTime += duration
+        }
+    }
+
+    nonisolated private static func recordThumbJPEG(duration: TimeInterval, cacheHit: Bool) {
+        perfRecord { store in
+            if cacheHit {
+                store.thumbJPEGCacheHits += 1
+            } else {
+                store.thumbJPEGMisses += 1
+                store.thumbJPEGTime += duration
+            }
+        }
+    }
+
+    nonisolated private static func recordThumbPNG(duration: TimeInterval, cacheHit: Bool) {
+        perfRecord { store in
+            if cacheHit {
+                store.thumbPNGCacheHits += 1
+            } else {
+                store.thumbPNGMisses += 1
+                store.thumbPNGTime += duration
+            }
+        }
+    }
+
+    nonisolated private static func recordInlineThumb(duration: TimeInterval, cacheHit: Bool) {
+        perfRecord { store in
+            if cacheHit {
+                store.inlineThumbCacheHits += 1
+            } else {
+                store.inlineThumbMisses += 1
+                store.inlineThumbTime += duration
+            }
+        }
+    }
+
+    nonisolated private static func recordHTMLRender(label: String, duration: TimeInterval) {
+        perfRecord { store in
+            store.htmlRenderTimeByLabel[label, default: 0] += duration
+        }
+    }
+
+    nonisolated private static func recordHTMLWrite(label: String, duration: TimeInterval, bytes: Int) {
+        perfRecord { store in
+            store.htmlWriteTimeByLabel[label, default: 0] += duration
+            store.htmlWriteBytesByLabel[label, default: 0] += bytes
+        }
+    }
+
+    nonisolated static func recordPublishDuration(label: String, duration: TimeInterval) {
+        perfRecord { store in
+            store.publishTimeByLabel[label, default: 0] += duration
+        }
+    }
+
+    nonisolated static func recordArtifactDuration(label: String, duration: TimeInterval) {
+        perfRecord { store in
+            store.artifactDurationByLabel[label, default: 0] += duration
+        }
     }
 
     // ---------------------------
@@ -497,6 +722,8 @@ public enum WhatsAppExportService {
         // Wichtig: staged-Map zurücksetzen (sonst können alte relHref-Ziele „kleben bleiben“)
         resetStagedAttachmentCache()
         resetAttachmentIndexCache()
+        resetThumbnailCaches()
+        resetPerfMetrics()
 
         let chatPath = chatURL.standardizedFileURL
         let outPath = outDir.standardizedFileURL
@@ -620,7 +847,8 @@ public enum WhatsAppExportService {
             meName: meName,
             enablePreviews: enablePreviews,
             embedAttachments: embedAttachments,
-            embedAttachmentThumbnailsOnly: embedAttachmentThumbnailsOnly
+            embedAttachmentThumbnailsOnly: embedAttachmentThumbnailsOnly,
+            perfLabel: "HTML"
         )
 
         try renderMD(
@@ -660,7 +888,8 @@ public enum WhatsAppExportService {
                 disableThumbStaging: false,
                 externalAttachments: true,
                 externalPreviews: true,
-                externalAssetsDir: sidecarBaseDir
+                externalAssetsDir: sidecarBaseDir,
+                perfLabel: "Sidecar"
             )
 
             try validateSidecarLayout(sidecarBaseDir: sidecarBaseDir)
@@ -864,7 +1093,8 @@ public enum WhatsAppExportService {
         fileSuffix: String,
         enablePreviews: Bool,
         embedAttachments: Bool,
-        embedAttachmentThumbnailsOnly: Bool
+        embedAttachmentThumbnailsOnly: Bool,
+        perfLabel: String? = nil
     ) async throws -> URL {
         resetStagedAttachmentCache()
 
@@ -878,7 +1108,8 @@ public enum WhatsAppExportService {
             meName: prepared.meName,
             enablePreviews: enablePreviews,
             embedAttachments: embedAttachments,
-            embedAttachmentThumbnailsOnly: embedAttachmentThumbnailsOnly
+            embedAttachmentThumbnailsOnly: embedAttachmentThumbnailsOnly,
+            perfLabel: perfLabel
         )
 
         return outHTML
@@ -936,7 +1167,8 @@ public enum WhatsAppExportService {
             disableThumbStaging: false,
             externalAttachments: true,
             externalPreviews: true,
-            externalAssetsDir: sidecarBaseDir
+            externalAssetsDir: sidecarBaseDir,
+            perfLabel: "Sidecar"
         )
 
         return sidecarHTML
@@ -956,6 +1188,8 @@ public enum WhatsAppExportService {
         // Wichtig: staged-Map zurücksetzen (sonst können alte relHref-Ziele „kleben bleiben“)
         resetStagedAttachmentCache()
         resetAttachmentIndexCache()
+        resetThumbnailCaches()
+        resetPerfMetrics()
 
         let chatPath = chatURL.standardizedFileURL
         let outPath = outDir.standardizedFileURL
@@ -1089,7 +1323,8 @@ public enum WhatsAppExportService {
                 meName: meName,
                 enablePreviews: v.enablePreviews,
                 embedAttachments: v.embedAttachments,
-                embedAttachmentThumbnailsOnly: v.embedAttachmentThumbnailsOnly
+                embedAttachmentThumbnailsOnly: v.embedAttachmentThumbnailsOnly,
+                perfLabel: v.perfLabel
             )
         }
 
@@ -1131,7 +1366,8 @@ public enum WhatsAppExportService {
                 disableThumbStaging: false,
                 externalAttachments: true,
                 externalPreviews: true,
-                externalAssetsDir: sidecarBaseDir
+                externalAssetsDir: sidecarBaseDir,
+                perfLabel: "Sidecar"
             )
 
             try validateSidecarLayout(sidecarBaseDir: sidecarBaseDir)
@@ -1772,7 +2008,9 @@ public enum WhatsAppExportService {
         }
         attachmentIndexLock.unlock()
 
+        let buildStart = ProcessInfo.processInfo.systemUptime
         var index: [String: URL] = [:]
+        var fileCount = 0
         if let en = fm.enumerator(
             at: base,
             includingPropertiesForKeys: [.isRegularFileKey],
@@ -1781,12 +2019,15 @@ public enum WhatsAppExportService {
             for case let u as URL in en {
                 let rv = try? u.resourceValues(forKeys: [.isRegularFileKey])
                 if rv?.isRegularFile != true { continue }
+                fileCount += 1
                 let name = u.lastPathComponent
                 if index[name] == nil {
                     index[name] = u
                 }
             }
         }
+        let buildDuration = ProcessInfo.processInfo.systemUptime - buildStart
+        recordAttachmentIndexBuild(duration: buildDuration, fileCount: fileCount)
 
         attachmentIndexLock.lock()
         attachmentIndexCache[key] = index
@@ -2151,6 +2392,14 @@ public enum WhatsAppExportService {
 
 #if canImport(QuickLookThumbnailing)
 nonisolated private static func thumbnailPNGDataURL(for fileURL: URL, maxPixel: CGFloat = 900) async -> String? {
+    let src = fileURL.standardizedFileURL
+    let key = "\(src.path)||\(maxPixel)"
+    if let cached = thumbnailPNGCacheGet(key) {
+        recordThumbPNG(duration: 0, cacheHit: true)
+        return cached
+    }
+
+    let start = ProcessInfo.processInfo.systemUptime
     let size = CGSize(width: maxPixel, height: maxPixel)
     #if canImport(AppKit)
         let scale = NSScreen.main?.backingScaleFactor ?? 2.0
@@ -2167,7 +2416,7 @@ nonisolated private static func thumbnailPNGDataURL(for fileURL: URL, maxPixel: 
         representationTypes: .thumbnail
     )
 
-    return await withCheckedContinuation { cont in
+    let dataURL: String? = await withCheckedContinuation { (cont: CheckedContinuation<String?, Never>) in
         QLThumbnailGenerator.shared.generateBestRepresentation(for: req) { rep, err in
             guard err == nil, let rep else {
                 cont.resume(returning: nil)
@@ -2201,11 +2450,28 @@ nonisolated private static func thumbnailPNGDataURL(for fileURL: URL, maxPixel: 
             #endif
         }
     }
+
+    let elapsed = ProcessInfo.processInfo.systemUptime - start
+    recordThumbPNG(duration: elapsed, cacheHit: false)
+
+    if let dataURL {
+        thumbnailPNGCacheSet(key, dataURL)
+    }
+
+    return dataURL
 }
 #endif
 
 #if canImport(QuickLookThumbnailing)
 nonisolated private static func thumbnailJPEGData(for fileURL: URL, maxPixel: CGFloat = 900, quality: CGFloat = 0.72) async -> Data? {
+    let src = fileURL.standardizedFileURL
+    let key = "\(src.path)||\(maxPixel)||\(quality)"
+    if let cached = thumbnailJPEGCacheGet(key) {
+        recordThumbJPEG(duration: 0, cacheHit: true)
+        return cached
+    }
+
+    let start = ProcessInfo.processInfo.systemUptime
     let size = CGSize(width: maxPixel, height: maxPixel)
     #if canImport(AppKit)
         let scale = NSScreen.main?.backingScaleFactor ?? 2.0
@@ -2222,7 +2488,7 @@ nonisolated private static func thumbnailJPEGData(for fileURL: URL, maxPixel: CG
         representationTypes: .thumbnail
     )
 
-    return await withCheckedContinuation { cont in
+    let data: Data? = await withCheckedContinuation { (cont: CheckedContinuation<Data?, Never>) in
         QLThumbnailGenerator.shared.generateBestRepresentation(for: req) { rep, err in
             guard err == nil, let rep else {
                 cont.resume(returning: nil)
@@ -2252,6 +2518,15 @@ nonisolated private static func thumbnailJPEGData(for fileURL: URL, maxPixel: CG
             #endif
         }
     }
+
+    let elapsed = ProcessInfo.processInfo.systemUptime - start
+    recordThumbJPEG(duration: elapsed, cacheHit: false)
+
+    if let data {
+        thumbnailJPEGCacheSet(key, data)
+    }
+
+    return data
 }
 #endif
 
@@ -2290,6 +2565,37 @@ nonisolated private static func stageThumbnailForExport(
         return nil
     }
 }
+
+    nonisolated private static func inlineThumbnailDataURL(_ url: URL) async -> String? {
+        let src = url.standardizedFileURL
+        let key = src.path
+        if let cached = inlineThumbCacheGet(key) {
+            recordInlineThumb(duration: 0, cacheHit: true)
+            return cached
+        }
+
+        let start = ProcessInfo.processInfo.systemUptime
+        var dataURL: String? = nil
+
+        #if canImport(QuickLookThumbnailing)
+        if let jpg = await thumbnailJPEGData(for: src, maxPixel: 900, quality: 0.72) {
+            dataURL = "data:image/jpeg;base64,\(jpg.base64EncodedString())"
+        }
+        #endif
+
+        if dataURL == nil {
+            dataURL = await attachmentThumbnailDataURL(src)
+        }
+
+        let elapsed = ProcessInfo.processInfo.systemUptime - start
+        recordInlineThumb(duration: elapsed, cacheHit: false)
+
+        if let dataURL {
+            inlineThumbCacheSet(key, dataURL)
+        }
+
+        return dataURL
+    }
 
     nonisolated private static func attachmentPreviewDataURL(_ url: URL) async -> String? {
         let ext = url.pathExtension.lowercased()
@@ -2936,8 +3242,11 @@ nonisolated private static func stageThumbnailForExport(
         disableThumbStaging: Bool = false,
         externalAttachments: Bool = false,
         externalPreviews: Bool = false,
-        externalAssetsDir: URL? = nil
+        externalAssetsDir: URL? = nil,
+        perfLabel: String? = nil
     ) async throws {
+
+        let renderStart = ProcessInfo.processInfo.systemUptime
 
         // participants -> title_names
         var authors: [String] = []
@@ -3378,21 +3687,7 @@ nonisolated private static func stageThumbnailForExport(
                     // - Embed ONLY a lightweight thumbnail as a data: URL.
                     // - Do NOT wrap thumbnails in <a href=...> and do NOT print any file link/text line.
 
-                    var thumbDataURL: String? = nil
-
-                    #if canImport(QuickLookThumbnailing)
-                    // Prefer JPEG thumbnails to keep the HTML smaller than PNG.
-                    if let jpg = await thumbnailJPEGData(for: p, maxPixel: 900, quality: 0.72) {
-                        thumbDataURL = "data:image/jpeg;base64,\(jpg.base64EncodedString())"
-                    }
-                    #endif
-
-                    if thumbDataURL == nil {
-                        // Fallback (still standalone): Quick Look PNG thumbnail (or nil if unavailable).
-                        thumbDataURL = await attachmentThumbnailDataURL(p)
-                    }
-
-                    if let thumbDataURL {
+                    if let thumbDataURL = await inlineThumbnailDataURL(p) {
                         let isImage = ["jpg","jpeg","png","gif","webp","heic","heif"].contains(ext)
                         mediaBlocks.append(
                             "<div class='media\(isImage ? " media-img" : "")'><img alt='' src='\(htmlEscape(thumbDataURL))'></div>"
@@ -3714,8 +4009,18 @@ nonisolated private static func stageThumbnailForExport(
         }
 
         parts.append("</div></body></html>")
+        let html = parts.joined()
+        let renderDuration = ProcessInfo.processInfo.systemUptime - renderStart
+        if let perfLabel {
+            recordHTMLRender(label: perfLabel, duration: renderDuration)
+        }
 
-        try parts.joined().write(to: outHTML, atomically: true, encoding: .utf8)
+        let writeStart = ProcessInfo.processInfo.systemUptime
+        try html.write(to: outHTML, atomically: true, encoding: .utf8)
+        let writeDuration = ProcessInfo.processInfo.systemUptime - writeStart
+        if let perfLabel {
+            recordHTMLWrite(label: perfLabel, duration: writeDuration, bytes: html.utf8.count)
+        }
     }
 
     // ---------------------------
