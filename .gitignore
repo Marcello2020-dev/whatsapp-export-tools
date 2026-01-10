@@ -34,3 +34,6 @@ output/
 codex-files/
 Codex References/
 Codex Reports/
+
+# Local private fixtures (never commit)
+/Fixtures/Private/
