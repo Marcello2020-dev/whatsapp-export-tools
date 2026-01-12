@@ -3,9 +3,8 @@ import SwiftUI
 /// Apply the Apple-Intelligence-style AI glow to any view.
 struct AIGlowModifier: ViewModifier {
     let active: Bool
-    let boost: Bool
+    let isRunning: Bool
     let cornerRadius: CGFloat
-    let speedScale: Double
     let style: AIGlowStyle
     let debugTag: String?
 
@@ -15,9 +14,8 @@ struct AIGlowModifier: ViewModifier {
                 if proxy.size.width > 0, proxy.size.height > 0 {
                     AIGlowOverlay(
                         active: active,
-                        boost: boost,
+                        isRunning: isRunning,
                         cornerRadius: cornerRadius,
-                        speedScale: speedScale,
                         style: style,
                         targetSize: proxy.size,
                         debugTag: debugTag
@@ -33,18 +31,16 @@ extension View {
     /// Adds the Apple-Intelligence-style glow behind the current view.
     func aiGlow(
         active: Bool,
+        isRunning: Bool,
         cornerRadius: CGFloat,
-        boost: Bool = false,
-        speedScale: Double = 1.0,
-        style: AIGlowStyle = .appleIntelligenceDefault,
+        style: AIGlowStyle = .default,
         debugTag: String? = nil
     ) -> some View {
         modifier(
             AIGlowModifier(
                 active: active,
-                boost: boost,
+                isRunning: isRunning,
                 cornerRadius: cornerRadius,
-                speedScale: speedScale,
                 style: style,
                 debugTag: debugTag
             )

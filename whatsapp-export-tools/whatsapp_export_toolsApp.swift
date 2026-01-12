@@ -13,7 +13,7 @@ struct whatsapp_export_toolsApp: App {
         WindowGroup("WhatsApp Export Tools") {
             Group {
                 if AIGlowSnapshotRunner.isEnabled {
-                    ContentView.GlowSnapshotView(isRunning: false)
+                    AIGlowSnapshotView(isRunning: false)
                 } else {
                     ContentView()
                 }

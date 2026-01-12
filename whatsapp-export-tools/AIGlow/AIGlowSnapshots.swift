@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 
 /// Generates AI-glow snapshot images when the environment flag is enabled.
+@MainActor
 struct AIGlowSnapshotRunner {
     static let isEnabled: Bool = ProcessInfo.processInfo.environment["AI_GLOW_SNAPSHOT"] == "1"
     private static var didRun = false
@@ -49,7 +50,7 @@ struct AIGlowSnapshotRunner {
 
     @available(macOS 13.0, *)
     private static func renderSnapshot(name: String, scheme: ColorScheme, isRunning: Bool, outputDir: URL) {
-        let view = ContentView.GlowSnapshotView(isRunning: isRunning)
+        let view = AIGlowSnapshotView(isRunning: isRunning)
             .environment(\.colorScheme, scheme)
         let renderer = ImageRenderer(content: view)
         renderer.scale = NSScreen.main?.backingScaleFactor ?? 2
@@ -66,68 +67,74 @@ struct AIGlowSnapshotRunner {
     }
 }
 
-extension ContentView {
-    struct GlowSnapshotView: View {
-        let isRunning: Bool
-        @State private var sampleName: String = "Lisa Nötzold"
-        @State private var samplePhoneName: String = "Lisa Nötzold"
+struct AIGlowSnapshotView: View {
+    let isRunning: Bool
+    @State private var sampleName: String = "Sample Contact"
+    @State private var samplePhoneName: String = "Sample Contact"
 
-        private var sampleLog: String {
-            [
-                "=== Export ===",
-                "Chat: /Users/Marcel/Documents/WhatsApp Chats/WhatsApp Chat - Lisa Nötzold/_chat.txt",
-                "Ziel: /Users/Marcel/Desktop/Test WhatsApp",
-                "HTML: -max, -mid, -min",
-                "Sidecar: AN",
-                "Exportiert von: Marcel",
-                "Chat-Partner: Lisa Nötzold"
-            ].joined(separator: "\n")
-        }
+    private var logGlowStyle: AIGlowStyle {
+        AIGlowStyle.default.withSpeedScale(0.7)
+    }
 
-        var body: some View {
-            VStack(alignment: .leading, spacing: 16) {
-                Text("AI Glow Snapshot")
-                    .font(.system(size: 14, weight: .semibold))
+    private var sampleLog: String {
+        [
+            "=== Export Preview ===",
+            "Chat: /path/to/chat.txt",
+            "Output: /path/to/output",
+            "HTML: max, mid, min",
+            "Sidecar: enabled",
+            "Exported by: Example User",
+            "Chat partner: Sample Contact"
+        ].joined(separator: "\n")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("AI Glow Snapshot")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 12) {
+                Text("Chat partner")
+                    .frame(width: 120, alignment: .leading)
+                TextField("", text: $sampleName)
+                    .textFieldStyle(.roundedBorder)
+                    .aiGlow(active: true, isRunning: isRunning, cornerRadius: 6)
+            }
+
+            HStack(spacing: 12) {
+                Text("+00 000 000000")
+                    .font(.system(.body, design: .monospaced))
+                    .frame(width: 120, alignment: .leading)
+                TextField("", text: $samplePhoneName)
+                    .textFieldStyle(.roundedBorder)
+                    .aiGlow(active: true, isRunning: isRunning, cornerRadius: 6)
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Log")
+                    .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.secondary)
 
-                HStack(spacing: 12) {
-                    Text("Chat-Partner")
-                        .frame(width: 120, alignment: .leading)
-                    TextField("", text: $sampleName)
-                        .textFieldStyle(.roundedBorder)
-                        .aiGlow(active: true, cornerRadius: 6, boost: isRunning)
-                }
-
-                HStack(spacing: 12) {
-                    Text("+49 179 5006315")
+                ScrollView([.vertical, .horizontal]) {
+                    Text(sampleLog)
                         .font(.system(.body, design: .monospaced))
-                        .frame(width: 120, alignment: .leading)
-                    TextField("", text: $samplePhoneName)
-                        .textFieldStyle(.roundedBorder)
-                        .aiGlow(active: true, cornerRadius: 6, boost: isRunning)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .padding(8)
                 }
-
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Log")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.secondary)
-
-                    ScrollView([.vertical, .horizontal]) {
-                        Text(sampleLog)
-                            .font(.system(.body, design: .monospaced))
-                            .fixedSize(horizontal: true, vertical: false)
-                            .padding(8)
-                    }
-                    .frame(height: 200)
+                .frame(height: 200)
             }
-            .waCard()
-            .aiGlow(active: true, cornerRadius: 14, boost: isRunning, speedScale: ContentView.logGlowSpeedScale)
+            .padding(12)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(Color.secondary.opacity(0.08))
+            )
+            .aiGlow(active: true, isRunning: isRunning, cornerRadius: 12, style: logGlowStyle)
 
             Spacer()
-            }
-            .padding(24)
-            .frame(width: 900, height: 620, alignment: .topLeading)
-            .background(WhatsAppBackground().ignoresSafeArea())
         }
+        .padding(24)
+        .frame(width: 900, height: 620, alignment: .topLeading)
+        .background(Color(nsColor: .windowBackgroundColor).ignoresSafeArea())
     }
 }

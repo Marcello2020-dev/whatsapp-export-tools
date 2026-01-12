@@ -3,9 +3,8 @@ import SwiftUI
 /// Core rendering view for the Apple-Intelligence-style AI glow.
 struct AIGlowOverlay: View {
     let active: Bool
-    let boost: Bool
+    let isRunning: Bool
     let cornerRadius: CGFloat
-    let speedScale: Double
     let style: AIGlowStyle
     let targetSize: CGSize
     let debugTag: String?
@@ -23,19 +22,19 @@ struct AIGlowOverlay: View {
                 resetPhaseStart(active: active)
                 updateBoost()
             }
-            .onChange(of: reduceMotion) {
+            .onChange(of: reduceMotion, perform: { _ in
                 resetPhaseStart(active: active)
-            }
-            .onChange(of: active) {
-                resetPhaseStart(active: active)
-                updateBoost()
-            }
-            .onChange(of: boost) {
+            })
+            .onChange(of: active, perform: { _ in
                 resetPhaseStart(active: active)
                 updateBoost()
-            }
+            })
+            .onChange(of: isRunning, perform: { _ in
+                resetPhaseStart(active: active)
+                updateBoost()
+            })
 #if DEBUG
-            .onChange(of: ticker.now) {
+            .onChange(of: ticker.now, perform: { _ in
                 guard active, let debugTag else { return }
                 let now = ticker.now
                 if now - lastDebugPrintTime >= 1.0 {
@@ -43,7 +42,7 @@ struct AIGlowOverlay: View {
                     let phase = String(format: "%.1f", currentPhase)
                     print("[AIGlowPhase:\(debugTag)] \(phase)°")
                 }
-            }
+            })
 #endif
     }
 
@@ -178,7 +177,7 @@ struct AIGlowOverlay: View {
             boostProgress = 0
             return
         }
-        if boost {
+        if isRunning {
             withAnimation(AIGlowAnimation.boostInAnimation) {
                 boostProgress = 1
             }
@@ -200,8 +199,8 @@ struct AIGlowOverlay: View {
     }
 
     private var effectiveRotationDuration: Double {
-        let base = AIGlowAnimation.rotationDuration(style: style, boost: boost, reduceMotion: reduceMotion)
-        let scale = max(speedScale, 0.05)
+        let base = AIGlowAnimation.rotationDuration(style: style, isRunning: isRunning, reduceMotion: reduceMotion)
+        let scale = max(style.speedScale, 0.05)
         return base / scale
     }
 

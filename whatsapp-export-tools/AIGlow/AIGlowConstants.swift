@@ -47,6 +47,7 @@ struct AIGlowStyle {
     let rotationDuration: Double
     let rotationDurationRunning: Double
     let rotationDurationReducedMotion: Double
+    var speedScale: Double
     let ringBlendModeDark: BlendMode
     let ringBlendModeLight: BlendMode
     let auraBlendModeDark: BlendMode
@@ -115,6 +116,7 @@ struct AIGlowStyle {
         rotationDuration: 11.5,
         rotationDurationRunning: 7,
         rotationDurationReducedMotion: 60,
+        speedScale: 1.0,
         ringBlendModeDark: .plusLighter,
         ringBlendModeLight: .overlay,
         auraBlendModeDark: .plusLighter,
@@ -137,4 +139,12 @@ struct AIGlowStyle {
         runningOuterAuraBlurScale: 0.90,
         outerPadding: 200
     )
+
+    static let `default` = appleIntelligenceDefault
+
+    func withSpeedScale(_ scale: Double) -> AIGlowStyle {
+        var copy = self
+        copy.speedScale = scale
+        return copy
+    }
 }

@@ -553,7 +553,7 @@ struct ContentView: View {
                             RoundedRectangle(cornerRadius: 6, style: .continuous)
                                 .stroke(.white.opacity(0.10), lineWidth: 1)
                         )
-                        .aiGlow(active: shouldShowAIGlow, cornerRadius: 6)
+                        .aiGlow(active: shouldShowAIGlow, isRunning: false, cornerRadius: 6)
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Chat-Partner")
@@ -626,7 +626,7 @@ struct ContentView: View {
 
                         TextField("Name (z. B. Max Mustermann)", text: overrideBinding)
                             .textFieldStyle(.roundedBorder)
-                            .aiGlow(active: shouldShowPhoneSuggestionGlow(for: num), cornerRadius: 6)
+                            .aiGlow(active: shouldShowPhoneSuggestionGlow(for: num), isRunning: false, cornerRadius: 6)
 
                         Spacer(minLength: 0)
                     }
@@ -686,12 +686,16 @@ struct ContentView: View {
         .waCard()
         .aiGlow(
             active: isRunning,
+            isRunning: isRunning,
             cornerRadius: 14,
-            boost: isRunning,
-            speedScale: Self.logGlowSpeedScale,
+            style: logGlowStyle,
             debugTag: "log"
         )
         .frame(maxWidth: .infinity, minHeight: logSectionHeight, maxHeight: logSectionHeight, alignment: .topLeading)
+    }
+
+    private var logGlowStyle: AIGlowStyle {
+        AIGlowStyle.default.withSpeedScale(Self.logGlowSpeedScale)
     }
 
     private var header: some View {
