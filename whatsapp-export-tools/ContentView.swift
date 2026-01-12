@@ -1361,12 +1361,49 @@ struct ContentView: View {
         dir.appendingPathComponent(baseName, isDirectory: true)
     }
 
-    nonisolated private static func allOutputURLs(baseName: String, orderedVariants: [HTMLVariant], in dir: URL) -> [URL] {
-        var urls = orderedVariants.map { outputHTMLURL(baseName: baseName, variant: $0, in: dir) }
-        urls.append(outputMarkdownURL(baseName: baseName, in: dir))
-        urls.append(outputSidecarHTML(baseName: baseName, in: dir))
-        urls.append(outputSidecarDir(baseName: baseName, in: dir))
+    nonisolated static func replaceDeleteTargets(
+        baseName: String,
+        variantSuffixes: [String],
+        wantsMarkdown: Bool,
+        wantsSidecar: Bool,
+        in dir: URL
+    ) -> [URL] {
+        var urls: [URL] = []
+        var seen: Set<String> = []
+
+        for suffix in variantSuffixes {
+            let name = "\(baseName)\(suffix).html"
+            if seen.insert(name).inserted {
+                urls.append(dir.appendingPathComponent(name))
+            }
+        }
+
+        if wantsMarkdown {
+            let mdURL = outputMarkdownURL(baseName: baseName, in: dir)
+            if seen.insert(mdURL.lastPathComponent).inserted {
+                urls.append(mdURL)
+            }
+        }
+
+        if wantsSidecar {
+            let sidecarHTML = outputSidecarHTML(baseName: baseName, in: dir)
+            if seen.insert(sidecarHTML.lastPathComponent).inserted {
+                urls.append(sidecarHTML)
+            }
+            let sidecarDir = outputSidecarDir(baseName: baseName, in: dir)
+            if seen.insert(sidecarDir.lastPathComponent).inserted {
+                urls.append(sidecarDir)
+            }
+        }
+
         return urls
+    }
+
+    nonisolated static func isSafeReplaceDeleteTarget(_ target: URL, exportDir: URL) -> Bool {
+        let root = exportDir.standardizedFileURL.path
+        let rootPrefix = root.hasSuffix("/") ? root : root + "/"
+        let targetPath = target.standardizedFileURL.path
+        return targetPath.hasPrefix(rootPrefix)
     }
 
     // MARK: - Export
@@ -1584,10 +1621,22 @@ struct ContentView: View {
             }
             if let waErr = error as? WAExportError {
                 switch waErr {
-                case .outputAlreadyExists(let urls):
-                    replaceExistingNames = urls.map { $0.lastPathComponent }
+                case .outputAlreadyExists:
+                    let exportDir = context.exportDir.standardizedFileURL
+                    let variantSuffixes = context.selectedVariantsInOrder.map { Self.htmlVariantSuffix(for: $0) }
+                    let replaceTargets = Self.replaceDeleteTargets(
+                        baseName: baseName,
+                        variantSuffixes: variantSuffixes,
+                        wantsMarkdown: context.wantsMD,
+                        wantsSidecar: context.wantsSidecar,
+                        in: exportDir
+                    )
+                    let fm = FileManager.default
+                    replaceExistingNames = replaceTargets
+                        .filter { fm.fileExists(atPath: $0.path) }
+                        .map { $0.lastPathComponent }
                     showReplaceAlert = true
-                    let count = urls.count
+                    let count = replaceExistingNames.count
                     logger.log("Vorhandene Ausgaben gefunden: \(count) Datei(en). Warte auf Bestätigung zum Ersetzen…")
                     return
                 }
@@ -1641,12 +1690,29 @@ struct ContentView: View {
         let baseHTMLName = "\(baseName).html"
 
         if context.allowOverwrite {
-            let deleteTargets = Self.allOutputURLs(baseName: baseName, orderedVariants: orderedVariants, in: exportDir)
-            for u in deleteTargets where fm.fileExists(atPath: u.path) {
+            let variantSuffixes = context.selectedVariantsInOrder.map { htmlVariantSuffix(for: $0) }
+            let deleteTargets = Self.replaceDeleteTargets(
+                baseName: baseName,
+                variantSuffixes: variantSuffixes,
+                wantsMarkdown: context.wantsMD,
+                wantsSidecar: context.wantsSidecar,
+                in: exportDir
+            )
+            for u in deleteTargets {
+                let target = u.standardizedFileURL
+                guard Self.isSafeReplaceDeleteTarget(target, exportDir: exportDir) else {
+                    let error = NSError(
+                        domain: "WETReplace",
+                        code: 1,
+                        userInfo: [NSLocalizedDescriptionKey: "Unsafe delete target"]
+                    )
+                    throw OutputDeletionError(url: target, underlying: error)
+                }
+                guard fm.fileExists(atPath: target.path) else { continue }
                 do {
-                    try fm.removeItem(at: u)
+                    try fm.removeItem(at: target)
                 } catch {
-                    throw OutputDeletionError(url: u, underlying: error)
+                    throw OutputDeletionError(url: target, underlying: error)
                 }
             }
         }
@@ -1730,7 +1796,13 @@ struct ContentView: View {
             }
         }
 
-        func publishMove(from staged: URL, to final: URL, artifact: Artifact, recordLabel: String) throws {
+        func publishMove(
+            from staged: URL,
+            to final: URL,
+            artifact: Artifact,
+            recordLabel: String,
+            movedOutputs: inout [URL]
+        ) throws {
             guard recordPublishAttempt(final, artifact: artifact) else {
                 try? fm.removeItem(at: staged)
                 return
@@ -1762,9 +1834,9 @@ struct ContentView: View {
             steps.append(.markdown)
         }
 
+        var movedOutputs: [URL] = []
         var htmlByVariant: [HTMLVariant: URL] = [:]
         var finalMD: URL? = nil
-        var movedOutputs: [URL] = []
         var finalSidecarBaseDir: URL? = nil
 
         do {
@@ -1800,13 +1872,15 @@ struct ContentView: View {
                         from: stagedSidecarBaseDir,
                         to: finalSidecarDir,
                         artifact: .sidecar,
-                        recordLabel: artifactLabel(.sidecar)
+                        recordLabel: artifactLabel(.sidecar),
+                        movedOutputs: &movedOutputs
                     )
                     try publishMove(
                         from: stagedSidecarHTML,
                         to: finalSidecarHTML,
                         artifact: .sidecar,
-                        recordLabel: artifactLabel(.sidecar)
+                        recordLabel: artifactLabel(.sidecar),
+                        movedOutputs: &movedOutputs
                     )
                     finalizeSidecarTimestamps(sidecarBaseDir: finalSidecarDir, logMismatches: false)
                     finalSidecarBaseDir = finalSidecarDir
@@ -1827,7 +1901,8 @@ struct ContentView: View {
                         from: stagedHTML,
                         to: finalHTML,
                         artifact: .html(variant),
-                        recordLabel: artifactLabel(.html(variant))
+                        recordLabel: artifactLabel(.html(variant)),
+                        movedOutputs: &movedOutputs
                     )
                     htmlByVariant[variant] = finalHTML
                 case .markdown:
@@ -1842,7 +1917,8 @@ struct ContentView: View {
                         from: stagedMD,
                         to: finalMDURL,
                         artifact: .markdown,
-                        recordLabel: artifactLabel(.markdown)
+                        recordLabel: artifactLabel(.markdown),
+                        movedOutputs: &movedOutputs
                     )
                     finalMD = finalMDURL
                 }
