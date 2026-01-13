@@ -30,6 +30,9 @@ struct AIGlowModifier: ViewModifier {
 
 public extension View {
     /// Adds the Apple-Intelligence-style glow behind the current view.
+    /// Host-driven disabled policy example:
+    /// `TextField(...).disabled(isDisabled).aiGlow(active: isSuggested && !isDisabled, isRunning: isRunning, cornerRadius: 8)`
+    /// If a disabled control must keep `active == true`, pass a host style variant with `components = []`.
     func aiGlow(
         active: Bool,
         isRunning: Bool,

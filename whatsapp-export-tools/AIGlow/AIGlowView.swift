@@ -14,13 +14,16 @@ struct AIGlowOverlay: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityReduceTransparency) private var accessibilityReduceTransparency
     @Environment(\.aiGlowReduceTransparencyOverride) private var reduceTransparencyOverride
-    @ObservedObject private var ticker = AIGlowTicker.shared
+    @State private var tickerNow: TimeInterval = ProcessInfo.processInfo.systemUptime
     @State private var phaseStartTime: TimeInterval = 0
     @State private var boostProgress: Double = 0
     @State private var lastDebugPrintTime: TimeInterval = 0
 
     var body: some View {
         let base = glowBody
+            .onReceive(tickerPublisher) { now in
+                tickerNow = now
+            }
             .onAppear {
                 resetPhaseStart(active: active)
                 updateBoost()
@@ -39,9 +42,9 @@ struct AIGlowOverlay: View {
 
 #if DEBUG
         return base
-            .onChangeCompat(of: ticker.now) {
+            .onChangeCompat(of: tickerNow) {
                 guard active, let debugTag else { return }
-                let now = ticker.now
+                let now = tickerNow
                 if now - lastDebugPrintTime >= 1.0 {
                     lastDebugPrintTime = now
                     let phase = String(format: "%.1f", currentPhase)
@@ -317,8 +320,8 @@ struct AIGlowOverlay: View {
         guard active else { return 0 }
         let duration = effectiveRotationDuration
         guard duration > 0 else { return 0 }
-        let start = phaseStartTime == 0 ? ticker.now : phaseStartTime
-        let elapsed = ticker.now - start
+        let start = phaseStartTime == 0 ? tickerNow : phaseStartTime
+        let elapsed = tickerNow - start
         let angle = (elapsed / duration) * 360
         return angle.truncatingRemainder(dividingBy: 360)
     }
@@ -331,10 +334,17 @@ struct AIGlowOverlay: View {
 
     private func resetPhaseStart(active: Bool) {
         if active {
-            phaseStartTime = ticker.now
+            phaseStartTime = tickerNow
         } else {
             phaseStartTime = 0
         }
+    }
+
+    private var tickerPublisher: AnyPublisher<TimeInterval, Never> {
+        if active {
+            return AIGlowTicker.shared.$now.eraseToAnyPublisher()
+        }
+        return Empty().eraseToAnyPublisher()
     }
 
     private func clamp(_ value: Double, min: Double, max: Double) -> Double {
