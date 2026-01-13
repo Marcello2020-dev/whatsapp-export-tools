@@ -15,6 +15,7 @@ struct AIGlowOverlay: View {
     @Environment(\.accessibilityReduceTransparency) private var accessibilityReduceTransparency
     @Environment(\.aiGlowReduceTransparencyOverride) private var reduceTransparencyOverride
     @State private var tickerNow: TimeInterval = ProcessInfo.processInfo.systemUptime
+    @State private var isVisible: Bool = false
     @State private var phaseStartTime: TimeInterval = 0
     @State private var boostProgress: Double = 0
     @State private var lastDebugPrintTime: TimeInterval = 0
@@ -25,8 +26,12 @@ struct AIGlowOverlay: View {
                 tickerNow = now
             }
             .onAppear {
+                isVisible = true
                 resetPhaseStart(active: active)
                 updateBoost()
+            }
+            .onDisappear {
+                isVisible = false
             }
             .onChangeCompat(of: reduceMotion) {
                 resetPhaseStart(active: active)
@@ -341,8 +346,8 @@ struct AIGlowOverlay: View {
     }
 
     private var tickerPublisher: AnyPublisher<TimeInterval, Never> {
-        if active {
-            return AIGlowTicker.shared.$now.eraseToAnyPublisher()
+        if active, isVisible {
+            return AIGlowTicker.shared.publisher
         }
         return Empty().eraseToAnyPublisher()
     }

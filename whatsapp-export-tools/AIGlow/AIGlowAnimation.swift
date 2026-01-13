@@ -29,18 +29,55 @@ final class AIGlowTicker: ObservableObject {
 
     @Published private(set) var now: TimeInterval
     private var timer: Timer?
+    private var subscriberCount: Int = 0
+    private lazy var sharedPublisher: AnyPublisher<TimeInterval, Never> = {
+        $now
+            .handleEvents(
+                receiveSubscription: { [weak self] _ in
+                    self?.incrementSubscribers()
+                },
+                receiveCancel: { [weak self] in
+                    self?.decrementSubscribers()
+                }
+            )
+            .eraseToAnyPublisher()
+    }()
 
     private init() {
         now = ProcessInfo.processInfo.systemUptime
-        start()
+    }
+
+    var publisher: AnyPublisher<TimeInterval, Never> {
+        sharedPublisher
+    }
+
+    private func incrementSubscribers() {
+        subscriberCount += 1
+        if subscriberCount == 1 {
+            start()
+        }
+    }
+
+    private func decrementSubscribers() {
+        subscriberCount = max(subscriberCount - 1, 0)
+        if subscriberCount == 0 {
+            stop()
+        }
     }
 
     private func start() {
+        guard timer == nil else { return }
+        now = ProcessInfo.processInfo.systemUptime
         let interval = 1.0 / max(Self.defaultFPS, 1)
         let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
             self?.now = ProcessInfo.processInfo.systemUptime
         }
         RunLoop.main.add(timer, forMode: .common)
         self.timer = timer
+    }
+
+    private func stop() {
+        timer?.invalidate()
+        timer = nil
     }
 }
