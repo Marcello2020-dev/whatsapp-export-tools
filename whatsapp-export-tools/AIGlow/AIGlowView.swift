@@ -76,13 +76,13 @@ struct AIGlowOverlay: View {
         let auraBlend = isLight ? style.auraBlendModeLight : style.auraBlendModeDark
         let innerAuraOpacityBase = isLight ? style.innerAuraOpacityLight : style.innerAuraOpacityDark
         let innerAuraBoost = isLight ? style.runningInnerAuraBoostLight : style.runningInnerAuraBoostDark
-        let innerAuraOpacity = clamp(innerAuraOpacityBase + boostProgress * innerAuraBoost, min: 0, max: 1)
+        var innerAuraOpacity = clamp(innerAuraOpacityBase + boostProgress * innerAuraBoost, min: 0, max: 1)
         let outerAuraOpacityBase = isLight ? style.outerAuraOpacityLight : style.outerAuraOpacityDark
         let outerAuraBoost = isLight ? style.runningOuterAuraBoostLight : style.runningOuterAuraBoostDark
-        let outerAuraOpacity = clamp(outerAuraOpacityBase + boostProgress * outerAuraBoost, min: 0, max: 1)
+        var outerAuraOpacity = clamp(outerAuraOpacityBase + boostProgress * outerAuraBoost, min: 0, max: 1)
         let outerAuraSecondaryBase = isLight ? style.outerAuraSecondaryOpacityLight : style.outerAuraSecondaryOpacityDark
         let outerAuraSecondaryBoost = isLight ? style.runningOuterAuraSecondaryBoostLight : style.runningOuterAuraSecondaryBoostDark
-        let outerAuraSecondaryOpacity = clamp(outerAuraSecondaryBase + boostProgress * outerAuraSecondaryBoost, min: 0, max: 1)
+        var outerAuraSecondaryOpacity = clamp(outerAuraSecondaryBase + boostProgress * outerAuraSecondaryBoost, min: 0, max: 1)
         let innerAuraBlurBase = isLight ? style.innerAuraBlurLight : style.innerAuraBlurDark
         let innerAuraBlurScale = 1 - boostProgress * (1 - style.runningInnerAuraBlurScale)
         let innerAuraBlur = innerAuraBlurBase * innerAuraBlurScale
@@ -101,13 +101,33 @@ struct AIGlowOverlay: View {
         let ringOpacityCore = clamp(ringOpacityCoreBase + boostProgress * style.runningRingBoostCore, min: 0, max: 1)
         let ringOpacitySoft = clamp(ringOpacitySoftBase + boostProgress * style.runningRingBoostSoft, min: 0, max: 1)
         let ringOpacityBloom = clamp(ringOpacityBloomBase + boostProgress * style.runningRingBoostBloom, min: 0, max: 1)
-        let ringOpacityShimmer = clamp(ringOpacityShimmerBase + boostProgress * style.runningRingBoostShimmer, min: 0, max: 1)
+        var ringOpacityShimmer = clamp(ringOpacityShimmerBase + boostProgress * style.runningRingBoostShimmer, min: 0, max: 1)
         let shape = AIGlowMask.roundedRect(cornerRadius: cornerRadius)
         let shimmerGradient = AngularGradient(
             gradient: Gradient(colors: style.ringColors),
             center: .center,
             angle: .degrees(phase + style.ringShimmerAngleOffset)
         )
+
+        if !showRing {
+            let baseline = AIGlowStyle.default
+            let baselineInnerBase = isLight ? baseline.innerAuraOpacityLight : baseline.innerAuraOpacityDark
+            let baselineInnerBoost = isLight ? baseline.runningInnerAuraBoostLight : baseline.runningInnerAuraBoostDark
+            let baselineInnerOpacity = clamp(baselineInnerBase + boostProgress * baselineInnerBoost, min: 0, max: 1)
+            let baselineOuterBase = isLight ? baseline.outerAuraOpacityLight : baseline.outerAuraOpacityDark
+            let baselineOuterBoost = isLight ? baseline.runningOuterAuraBoostLight : baseline.runningOuterAuraBoostDark
+            let baselineOuterOpacity = clamp(baselineOuterBase + boostProgress * baselineOuterBoost, min: 0, max: 1)
+            let baselineOuterSecondaryBase = isLight ? baseline.outerAuraSecondaryOpacityLight : baseline.outerAuraSecondaryOpacityDark
+            let baselineOuterSecondaryBoost = isLight ? baseline.runningOuterAuraSecondaryBoostLight : baseline.runningOuterAuraSecondaryBoostDark
+            let baselineOuterSecondaryOpacity = clamp(baselineOuterSecondaryBase + boostProgress * baselineOuterSecondaryBoost, min: 0, max: 1)
+            let baselineShimmerBase = isLight ? baseline.ringOpacityShimmerLight : baseline.ringOpacityShimmerDark
+            let baselineShimmerOpacity = clamp(baselineShimmerBase + boostProgress * baseline.runningRingBoostShimmer, min: 0, max: 1)
+
+            innerAuraOpacity = min(innerAuraOpacity, baselineInnerOpacity)
+            outerAuraOpacity = min(outerAuraOpacity, baselineOuterOpacity)
+            outerAuraSecondaryOpacity = min(outerAuraSecondaryOpacity, baselineOuterSecondaryOpacity)
+            ringOpacityShimmer = min(ringOpacityShimmer, baselineShimmerOpacity)
+        }
 
         return ZStack {
             if showInnerAura {
