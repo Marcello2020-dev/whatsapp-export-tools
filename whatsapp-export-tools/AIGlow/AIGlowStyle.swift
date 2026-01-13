@@ -18,12 +18,36 @@ public enum AIGlowFillMode: String, Sendable {
     case innerGlow
 }
 
+public enum AIGlowAuraOuterContour: Equatable, Sendable {
+    case matchTarget
+    case roundedRect(cornerRadius: CGFloat, outset: CGFloat)
+    case oval(scaleX: CGFloat, scaleY: CGFloat, outset: CGFloat)
+
+    func normalized(fallback: AIGlowAuraOuterContour) -> AIGlowAuraOuterContour {
+        switch self {
+        case .matchTarget:
+            return .matchTarget
+        case .roundedRect(let cornerRadius, let outset):
+            guard cornerRadius.isFinite, outset.isFinite else { return fallback }
+            return .roundedRect(cornerRadius: max(cornerRadius, 0), outset: max(outset, 0))
+        case .oval(let scaleX, let scaleY, let outset):
+            guard scaleX.isFinite, scaleY.isFinite, outset.isFinite else { return fallback }
+            return .oval(
+                scaleX: max(scaleX, 0),
+                scaleY: max(scaleY, 0),
+                outset: max(outset, 0)
+            )
+        }
+    }
+}
+
 /// Data-only styling options for AI Glow rendering.
 public struct AIGlowStyle: Equatable, @unchecked Sendable {
     public let ringColors: [Color]
     public let auraColors: [Color]
     public let components: AIGlowComponents
     public let fillMode: AIGlowFillMode
+    public let auraOuterContour: AIGlowAuraOuterContour
     public let ringLineWidthCore: CGFloat
     public let ringLineWidthSoft: CGFloat
     public let ringLineWidthBloom: CGFloat
@@ -95,6 +119,7 @@ public struct AIGlowStyle: Equatable, @unchecked Sendable {
         auraColors: [Color],
         components: AIGlowComponents,
         fillMode: AIGlowFillMode,
+        auraOuterContour: AIGlowAuraOuterContour,
         ringLineWidthCore: CGFloat,
         ringLineWidthSoft: CGFloat,
         ringLineWidthBloom: CGFloat,
@@ -165,6 +190,7 @@ public struct AIGlowStyle: Equatable, @unchecked Sendable {
         self.auraColors = auraColors
         self.components = components
         self.fillMode = fillMode
+        self.auraOuterContour = auraOuterContour
         self.ringLineWidthCore = ringLineWidthCore
         self.ringLineWidthSoft = ringLineWidthSoft
         self.ringLineWidthBloom = ringLineWidthBloom
@@ -237,6 +263,7 @@ public struct AIGlowStyle: Equatable, @unchecked Sendable {
         auraColors: AIGlowPalette.auraColors,
         components: .all,
         fillMode: .innerGlow,
+        auraOuterContour: .matchTarget,
         ringLineWidthCore: 3.4,
         ringLineWidthSoft: 5.4,
         ringLineWidthBloom: 11.0,
@@ -313,6 +340,7 @@ public struct AIGlowStyle: Equatable, @unchecked Sendable {
             auraColors: auraColors,
             components: components.intersection(.all),
             fillMode: fillMode,
+            auraOuterContour: auraOuterContour.normalized(fallback: baseline.auraOuterContour),
             ringLineWidthCore: Self.nonNegativeFinite(ringLineWidthCore, fallback: baseline.ringLineWidthCore),
             ringLineWidthSoft: Self.nonNegativeFinite(ringLineWidthSoft, fallback: baseline.ringLineWidthSoft),
             ringLineWidthBloom: Self.nonNegativeFinite(ringLineWidthBloom, fallback: baseline.ringLineWidthBloom),

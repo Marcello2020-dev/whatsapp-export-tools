@@ -122,6 +122,11 @@ struct AIGlowOverlay: View {
             center: .center,
             angle: .degrees(phase + style.ringShimmerAngleOffset)
         )
+        let auraMaskInfo = auraMaskInfo(
+            contour: style.auraOuterContour,
+            baseSize: baseSize,
+            outerPadding: style.outerPadding
+        )
 
         if showInnerAura {
             innerAuraOpacity = min(innerAuraOpacity, baselineInnerOpacity)
@@ -131,6 +136,11 @@ struct AIGlowOverlay: View {
             outerAuraOpacity = min(outerAuraOpacity, baselineOuterOpacity)
             outerAuraSecondaryOpacity = min(outerAuraSecondaryOpacity, baselineOuterSecondaryOpacity)
             ringOpacityShimmer = min(ringOpacityShimmer, baselineShimmerOpacity)
+        }
+
+        if let auraMaskInfo {
+            outerAuraOpacity = clamp(outerAuraOpacity * auraMaskInfo.attenuation, min: 0, max: 1)
+            outerAuraSecondaryOpacity = clamp(outerAuraSecondaryOpacity * auraMaskInfo.attenuation, min: 0, max: 1)
         }
 
         if reduceTransparencyOverride ?? accessibilityReduceTransparency {
@@ -174,6 +184,7 @@ struct AIGlowOverlay: View {
                         .blendMode(auraBlend)
                 }
                 .compositingGroup()
+                .modifier(AIGlowOptionalMask(mask: auraMaskInfo?.mask))
             }
 
             if showRing || showShimmer {
@@ -220,6 +231,70 @@ struct AIGlowOverlay: View {
         .saturation(saturation)
         .contrast(contrast)
         .allowsHitTesting(false)
+    }
+
+    private struct AuraMaskInfo {
+        let mask: AnyView
+        let attenuation: Double
+    }
+
+    private func auraMaskInfo(
+        contour: AIGlowAuraOuterContour,
+        baseSize: CGSize,
+        outerPadding: CGFloat
+    ) -> AuraMaskInfo? {
+        guard baseSize.width > 0, baseSize.height > 0 else { return nil }
+
+        let maxExtentScale: CGFloat = 1.6
+        let minDimension = min(baseSize.width, baseSize.height)
+        let maxOutsetByPadding = min(outerPadding, minDimension * 0.5)
+
+        func clampScale(_ value: CGFloat) -> CGFloat {
+            guard value.isFinite else { return 1 }
+            return min(max(value, 0), maxExtentScale)
+        }
+
+        func clampOutset(_ outset: CGFloat, scaleX: CGFloat, scaleY: CGFloat) -> CGFloat {
+            guard outset.isFinite else { return 0 }
+            let maxOutsetX = max(0, (maxExtentScale - scaleX) * baseSize.width / 2)
+            let maxOutsetY = max(0, (maxExtentScale - scaleY) * baseSize.height / 2)
+            let maxOutset = min(maxOutsetByPadding, maxOutsetX, maxOutsetY)
+            return min(max(outset, 0), maxOutset)
+        }
+
+        func attenuation(for maskSize: CGSize) -> Double {
+            let widthScale = maskSize.width / baseSize.width
+            let heightScale = maskSize.height / baseSize.height
+            let extentScale = max(widthScale, heightScale)
+            guard extentScale > 1 else { return 1 }
+            return max(0.35, min(1, 1 / Double(extentScale)))
+        }
+
+        switch contour {
+        case .matchTarget:
+            return nil
+        case .roundedRect(let overrideRadius, let outset):
+            let clampedOutset = clampOutset(outset, scaleX: 1, scaleY: 1)
+            let maskSize = CGSize(
+                width: baseSize.width + clampedOutset * 2,
+                height: baseSize.height + clampedOutset * 2
+            )
+            let radius = min(max(overrideRadius, 0), min(maskSize.width, maskSize.height) / 2)
+            let mask = RoundedRectangle(cornerRadius: radius, style: .continuous)
+                .frame(width: maskSize.width, height: maskSize.height)
+            return AuraMaskInfo(mask: AnyView(mask), attenuation: attenuation(for: maskSize))
+        case .oval(let scaleX, let scaleY, let outset):
+            let clampedScaleX = clampScale(scaleX)
+            let clampedScaleY = clampScale(scaleY)
+            let clampedOutset = clampOutset(outset, scaleX: clampedScaleX, scaleY: clampedScaleY)
+            let maskSize = CGSize(
+                width: baseSize.width * clampedScaleX + clampedOutset * 2,
+                height: baseSize.height * clampedScaleY + clampedOutset * 2
+            )
+            let mask = Ellipse()
+                .frame(width: maskSize.width, height: maskSize.height)
+            return AuraMaskInfo(mask: AnyView(mask), attenuation: attenuation(for: maskSize))
+        }
     }
 
     private func updateBoost() {
@@ -287,6 +362,19 @@ private struct AIGlowChangeObserver<Value: Equatable>: ViewModifier {
                 lastValue = newValue
                 action()
             }
+    }
+}
+
+private struct AIGlowOptionalMask: ViewModifier {
+    let mask: AnyView?
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if let mask {
+            content.mask(mask)
+        } else {
+            content
+        }
     }
 }
 
