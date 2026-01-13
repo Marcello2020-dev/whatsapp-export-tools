@@ -9,6 +9,7 @@ struct AIGlowModifier: ViewModifier {
     let debugTag: String?
 
     func body(content: Content) -> some View {
+        let resolvedStyle = style.normalized()
         content.background {
             GeometryReader { proxy in
                 if proxy.size.width > 0, proxy.size.height > 0 {
@@ -16,7 +17,7 @@ struct AIGlowModifier: ViewModifier {
                         active: active,
                         isRunning: isRunning,
                         cornerRadius: cornerRadius,
-                        style: style,
+                        style: resolvedStyle,
                         targetSize: proxy.size,
                         debugTag: debugTag
                     )
