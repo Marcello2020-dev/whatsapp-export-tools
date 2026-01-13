@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 /// Core rendering view for the Apple-Intelligence-style AI glow.
 struct AIGlowOverlay: View {
@@ -22,21 +23,21 @@ struct AIGlowOverlay: View {
                 resetPhaseStart(active: active)
                 updateBoost()
             }
-            .onChange(of: reduceMotion) {
+            .onChangeCompat(of: reduceMotion) {
                 resetPhaseStart(active: active)
             }
-            .onChange(of: active) {
+            .onChangeCompat(of: active) {
                 resetPhaseStart(active: active)
                 updateBoost()
             }
-            .onChange(of: isRunning) {
+            .onChangeCompat(of: isRunning) {
                 resetPhaseStart(active: active)
                 updateBoost()
             }
 
 #if DEBUG
         return base
-            .onChange(of: ticker.now) {
+            .onChangeCompat(of: ticker.now) {
                 guard active, let debugTag else { return }
                 let now = ticker.now
                 if now - lastDebugPrintTime >= 1.0 {
@@ -235,5 +236,32 @@ struct AIGlowOverlay: View {
         if value < min { return min }
         if value > max { return max }
         return value
+    }
+}
+
+private struct AIGlowChangeObserver<Value: Equatable>: ViewModifier {
+    let value: Value
+    let action: () -> Void
+    @State private var lastValue: Value
+
+    init(value: Value, action: @escaping () -> Void) {
+        self.value = value
+        self.action = action
+        _lastValue = State(initialValue: value)
+    }
+
+    func body(content: Content) -> some View {
+        content
+            .onReceive(Just(value)) { newValue in
+                guard newValue != lastValue else { return }
+                lastValue = newValue
+                action()
+            }
+    }
+}
+
+private extension View {
+    func onChangeCompat<Value: Equatable>(of value: Value, perform action: @escaping () -> Void) -> some View {
+        modifier(AIGlowChangeObserver(value: value, action: action))
     }
 }

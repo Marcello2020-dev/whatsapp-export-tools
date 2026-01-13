@@ -17,6 +17,11 @@ let package = Package(
         .target(
             name: "AIGlowKit",
             path: "Sources/AIGlowKit"
+        ),
+        .testTarget(
+            name: "AIGlowKitTests",
+            dependencies: ["AIGlowKit"],
+            path: "Tests/AIGlowKitTests"
         )
     ]
 )
