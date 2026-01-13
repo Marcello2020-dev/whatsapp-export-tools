@@ -52,7 +52,7 @@ struct AIGlowOverlay: View {
                 let now = tickerNow
                 if now - lastDebugPrintTime >= 1.0 {
                     lastDebugPrintTime = now
-                    let phase = String(format: "%.1f", currentPhase)
+                    let phase = String(format: "%.1f", currentPhase * 360)
                     print("[AIGlowPhase:\(debugTag)] \(phase)°")
                 }
             }
@@ -67,6 +67,7 @@ struct AIGlowOverlay: View {
         let contrast = isLight ? style.contrastLight : style.contrastDark
         let baseSize = targetSize
         let phase = currentPhase
+        let phaseDegrees = phase * 360
         let components = style.components
         let showAura = components.contains(.aura)
         let showRing = components.contains(.ring)
@@ -75,12 +76,12 @@ struct AIGlowOverlay: View {
         let ringGradient = AngularGradient(
             gradient: Gradient(colors: style.ringColors),
             center: .center,
-            angle: .degrees(phase)
+            angle: .degrees(phaseDegrees)
         )
         let auraGradient = AngularGradient(
             gradient: Gradient(colors: style.auraColors),
             center: .center,
-            angle: .degrees(phase)
+            angle: .degrees(phaseDegrees)
         )
         let ringBlend = isLight ? style.ringBlendModeLight : style.ringBlendModeDark
         let auraBlend = isLight ? style.auraBlendModeLight : style.auraBlendModeDark
@@ -128,7 +129,7 @@ struct AIGlowOverlay: View {
         let shimmerGradient = AngularGradient(
             gradient: Gradient(colors: style.ringColors),
             center: .center,
-            angle: .degrees(phase + style.ringShimmerAngleOffset)
+            angle: .degrees(phaseDegrees + style.ringShimmerAngleOffset)
         )
         let auraMaskInfo = auraMaskInfo(
             contour: style.auraOuterContour,
@@ -323,18 +324,19 @@ struct AIGlowOverlay: View {
 
     private var currentPhase: Double {
         guard active else { return 0 }
-        let duration = effectiveRotationDuration
-        guard duration > 0 else { return 0 }
+        let period = effectiveRotationPeriod
+        guard period > 0 else { return 0 }
         let start = phaseStartTime == 0 ? tickerNow : phaseStartTime
         let elapsed = tickerNow - start
-        let angle = (elapsed / duration) * 360
-        return angle.truncatingRemainder(dividingBy: 360)
+        return AIGlowAnimation.normalizedPhase(
+            elapsed: elapsed,
+            period: period,
+            phaseOffset: style.phaseOffset
+        )
     }
 
-    private var effectiveRotationDuration: Double {
-        let base = AIGlowAnimation.rotationDuration(style: style, isRunning: isRunning, reduceMotion: reduceMotion)
-        let scale = max(style.speedScale, 0.05)
-        return base / scale
+    private var effectiveRotationPeriod: Double {
+        AIGlowAnimation.rotationPeriod(style: style, isRunning: isRunning, reduceMotion: reduceMotion)
     }
 
     private func resetPhaseStart(active: Bool) {

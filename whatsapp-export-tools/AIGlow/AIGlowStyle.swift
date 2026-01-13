@@ -91,7 +91,9 @@ public struct AIGlowStyle: Equatable, @unchecked Sendable {
     public let rotationDuration: Double
     public let rotationDurationRunning: Double
     public let rotationDurationReducedMotion: Double
+    public var globalSpeedScale: Double
     public var speedScale: Double
+    public var phaseOffset: Double
     public let ringBlendModeDark: BlendMode
     public let ringBlendModeLight: BlendMode
     public let auraBlendModeDark: BlendMode
@@ -163,7 +165,9 @@ public struct AIGlowStyle: Equatable, @unchecked Sendable {
         rotationDuration: Double,
         rotationDurationRunning: Double,
         rotationDurationReducedMotion: Double,
+        globalSpeedScale: Double,
         speedScale: Double,
+        phaseOffset: Double,
         ringBlendModeDark: BlendMode,
         ringBlendModeLight: BlendMode,
         auraBlendModeDark: BlendMode,
@@ -234,7 +238,9 @@ public struct AIGlowStyle: Equatable, @unchecked Sendable {
         self.rotationDuration = rotationDuration
         self.rotationDurationRunning = rotationDurationRunning
         self.rotationDurationReducedMotion = rotationDurationReducedMotion
+        self.globalSpeedScale = globalSpeedScale
         self.speedScale = speedScale
+        self.phaseOffset = phaseOffset
         self.ringBlendModeDark = ringBlendModeDark
         self.ringBlendModeLight = ringBlendModeLight
         self.auraBlendModeDark = auraBlendModeDark
@@ -307,7 +313,9 @@ public struct AIGlowStyle: Equatable, @unchecked Sendable {
         rotationDuration: 11.5,
         rotationDurationRunning: 7,
         rotationDurationReducedMotion: 60,
+        globalSpeedScale: 1.0,
         speedScale: 1.0,
+        phaseOffset: 0,
         ringBlendModeDark: .plusLighter,
         ringBlendModeLight: .overlay,
         auraBlendModeDark: .plusLighter,
@@ -384,7 +392,9 @@ public struct AIGlowStyle: Equatable, @unchecked Sendable {
             rotationDuration: Self.positiveFinite(rotationDuration, fallback: baseline.rotationDuration),
             rotationDurationRunning: Self.positiveFinite(rotationDurationRunning, fallback: baseline.rotationDurationRunning),
             rotationDurationReducedMotion: Self.positiveFinite(rotationDurationReducedMotion, fallback: baseline.rotationDurationReducedMotion),
+            globalSpeedScale: Self.positiveFinite(globalSpeedScale, fallback: baseline.globalSpeedScale),
             speedScale: Self.positiveFinite(speedScale, fallback: baseline.speedScale),
+            phaseOffset: Self.normalizedPhaseOffset(phaseOffset, fallback: baseline.phaseOffset),
             ringBlendModeDark: ringBlendModeDark,
             ringBlendModeLight: ringBlendModeLight,
             auraBlendModeDark: auraBlendModeDark,
@@ -415,6 +425,18 @@ public struct AIGlowStyle: Equatable, @unchecked Sendable {
         return copy
     }
 
+    public func withGlobalSpeedScale(_ scale: Double) -> AIGlowStyle {
+        var copy = self
+        copy.globalSpeedScale = scale
+        return copy
+    }
+
+    public func withPhaseOffset(_ offset: Double) -> AIGlowStyle {
+        var copy = self
+        copy.phaseOffset = offset
+        return copy
+    }
+
     private static func unitInterval(_ value: Double) -> Double {
         guard value.isFinite else { return 0 }
         if value < 0 { return 0 }
@@ -442,5 +464,11 @@ public struct AIGlowStyle: Equatable, @unchecked Sendable {
     private static func positiveFinite(_ value: Double, fallback: Double) -> Double {
         guard value.isFinite else { return fallback }
         return value <= 0 ? max(fallback, 0.001) : value
+    }
+
+    private static func normalizedPhaseOffset(_ value: Double, fallback: Double) -> Double {
+        guard value.isFinite else { return fallback }
+        let remainder = value.truncatingRemainder(dividingBy: 1)
+        return remainder < 0 ? remainder + 1 : remainder
     }
 }

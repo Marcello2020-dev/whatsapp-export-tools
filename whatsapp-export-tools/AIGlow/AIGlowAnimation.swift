@@ -13,6 +13,21 @@ struct AIGlowAnimation {
         return isRunning ? style.rotationDurationRunning : style.rotationDuration
     }
 
+    static func rotationPeriod(style: AIGlowStyle, isRunning: Bool, reduceMotion: Bool) -> Double {
+        let base = rotationDuration(style: style, isRunning: isRunning, reduceMotion: reduceMotion)
+        let globalScale = max(style.globalSpeedScale, 0.05)
+        let instanceScale = max(style.speedScale, 0.05)
+        return base / (globalScale * instanceScale)
+    }
+
+    static func normalizedPhase(elapsed: TimeInterval, period: Double, phaseOffset: Double) -> Double {
+        guard period > 0 else { return 0 }
+        let cycles = elapsed / period
+        let phase = cycles + phaseOffset
+        let remainder = phase - floor(phase)
+        return remainder < 0 ? remainder + 1 : remainder
+    }
+
     static var boostInAnimation: Animation {
         .easeOut(duration: boostInDuration)
     }
