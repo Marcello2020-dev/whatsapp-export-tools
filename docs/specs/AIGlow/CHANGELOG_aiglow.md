@@ -48,10 +48,10 @@ This entry reflects the **v0.2 specification baseline**. Code changes implementi
 - Accessibility overrides: Reduce Motion slows shimmer and dims shimmer intensity; Reduce Transparency/Increase Contrast reduce aura intensity and clamp saturation/contrast for readability.
 
 ### Performance/gating changes
-- (Placeholder)
+- Offscreen lifecycle gating: detach from the shared ticker when views disappear to prevent lingering background work (AG-033).
 
 ### Validation evidence
-- Screenshots: `_local/aiglow-snapshots/AG-032` (Reduce Motion/Transparency/Contrast)
+- Screenshots: `_local/aiglow-snapshots/AG-032` (Reduce Motion/Transparency/Contrast), `_local/aiglow-snapshots/AG-033` (offscreen gating)
 
 ### Added
 - **Host-driven, data-only styling API:** `AIGlowStyle` as the **single** host options object (palette, components, fill mode, geometry/intensity, timing, tuning).

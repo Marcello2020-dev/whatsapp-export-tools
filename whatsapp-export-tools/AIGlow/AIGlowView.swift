@@ -37,13 +37,16 @@ struct AIGlowOverlay: View {
                 isVisible = false
             }
             .onChangeCompat(of: reduceMotion) {
+                guard isVisible else { return }
                 resetPhaseStart(active: active)
             }
             .onChangeCompat(of: active) {
+                guard isVisible else { return }
                 resetPhaseStart(active: active)
                 updateBoost()
             }
             .onChangeCompat(of: isRunning) {
+                guard isVisible else { return }
                 resetPhaseStart(active: active)
                 updateBoost()
             }
