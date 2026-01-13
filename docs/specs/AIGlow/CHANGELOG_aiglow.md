@@ -45,13 +45,13 @@ This entry reflects the **v0.2 specification baseline**. Code changes implementi
 - (Placeholder)
 
 ### Visual/timing changes
-- (Placeholder)
+- Accessibility overrides: Reduce Motion slows shimmer and dims shimmer intensity; Reduce Transparency/Increase Contrast reduce aura intensity and clamp saturation/contrast for readability.
 
 ### Performance/gating changes
 - (Placeholder)
 
 ### Validation evidence
-- (Placeholder: link to screenshot set + commit hash)
+- Screenshots: `_local/aiglow-snapshots/AG-032` (Reduce Motion/Transparency/Contrast)
 
 ### Added
 - **Host-driven, data-only styling API:** `AIGlowStyle` as the **single** host options object (palette, components, fill mode, geometry/intensity, timing, tuning).

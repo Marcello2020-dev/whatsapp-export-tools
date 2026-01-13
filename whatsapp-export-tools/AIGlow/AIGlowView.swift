@@ -11,8 +11,11 @@ struct AIGlowOverlay: View {
     let debugTag: String?
 
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.colorSchemeContrast) private var colorSchemeContrast
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityReduceTransparency) private var accessibilityReduceTransparency
+    @Environment(\.aiGlowReduceMotionOverride) private var reduceMotionOverride
+    @Environment(\.aiGlowIncreasedContrastOverride) private var increasedContrastOverride
     @Environment(\.aiGlowReduceTransparencyOverride) private var reduceTransparencyOverride
     @State private var tickerNow: TimeInterval = ProcessInfo.processInfo.systemUptime
     @State private var isVisible: Bool = false
@@ -63,8 +66,11 @@ struct AIGlowOverlay: View {
 
     private var glowBody: some View {
         let isLight = colorScheme == .light
-        let saturation = isLight ? style.saturationLight : style.saturationDark
-        let contrast = isLight ? style.contrastLight : style.contrastDark
+        var saturation = isLight ? style.saturationLight : style.saturationDark
+        var contrast = isLight ? style.contrastLight : style.contrastDark
+        let shouldReduceMotion = reduceMotionOverride ?? reduceMotion
+        let isHighContrast = increasedContrastOverride ?? (colorSchemeContrast == .increased)
+        let shouldReduceTransparency = reduceTransparencyOverride ?? accessibilityReduceTransparency
         let baseSize = targetSize
         let phase = currentPhase
         let phaseDegrees = phase * 360
@@ -109,9 +115,9 @@ struct AIGlowOverlay: View {
         let ringOpacitySoftBase = isLight ? style.ringOpacitySoftLight : style.ringOpacitySoftDark
         let ringOpacityBloomBase = isLight ? style.ringOpacityBloomLight : style.ringOpacityBloomDark
         let ringOpacityShimmerBase = isLight ? style.ringOpacityShimmerLight : style.ringOpacityShimmerDark
-        let ringOpacityCore = clamp(ringOpacityCoreBase + boostProgress * style.runningRingBoostCore, min: 0, max: 1)
-        let ringOpacitySoft = clamp(ringOpacitySoftBase + boostProgress * style.runningRingBoostSoft, min: 0, max: 1)
-        let ringOpacityBloom = clamp(ringOpacityBloomBase + boostProgress * style.runningRingBoostBloom, min: 0, max: 1)
+        var ringOpacityCore = clamp(ringOpacityCoreBase + boostProgress * style.runningRingBoostCore, min: 0, max: 1)
+        var ringOpacitySoft = clamp(ringOpacitySoftBase + boostProgress * style.runningRingBoostSoft, min: 0, max: 1)
+        var ringOpacityBloom = clamp(ringOpacityBloomBase + boostProgress * style.runningRingBoostBloom, min: 0, max: 1)
         var ringOpacityShimmer = clamp(ringOpacityShimmerBase + boostProgress * style.runningRingBoostShimmer, min: 0, max: 1)
         let baseline = AIGlowStyle.default
         let baselineInnerBase = isLight ? baseline.innerAuraOpacityLight : baseline.innerAuraOpacityDark
@@ -152,10 +158,32 @@ struct AIGlowOverlay: View {
             outerAuraSecondaryOpacity = clamp(outerAuraSecondaryOpacity * auraMaskInfo.attenuation, min: 0, max: 1)
         }
 
-        if reduceTransparencyOverride ?? accessibilityReduceTransparency {
+        if shouldReduceMotion {
+            ringOpacityShimmer = clamp(ringOpacityShimmer * 0.35, min: 0, max: 1)
+        }
+
+        if isHighContrast {
+            innerAuraOpacity = clamp(innerAuraOpacity * 0.6, min: 0, max: 1)
+            outerAuraOpacity = clamp(outerAuraOpacity * 0.5, min: 0, max: 1)
+            outerAuraSecondaryOpacity = clamp(outerAuraSecondaryOpacity * 0.5, min: 0, max: 1)
+            ringOpacityCore = clamp(ringOpacityCore * 1.1, min: 0, max: 1)
+            ringOpacitySoft = clamp(ringOpacitySoft * 1.05, min: 0, max: 1)
+            ringOpacityBloom = clamp(ringOpacityBloom * 0.9, min: 0, max: 1)
+            ringOpacityShimmer = clamp(ringOpacityShimmer * 0.9, min: 0, max: 1)
+            saturation = min(saturation, 1.2)
+            contrast = max(contrast, 1.1)
+        }
+
+        if shouldReduceTransparency {
             innerAuraOpacity = 0
-            outerAuraOpacity *= 0.45
-            outerAuraSecondaryOpacity *= 0.45
+            outerAuraOpacity = clamp(outerAuraOpacity * 0.35, min: 0, max: 1)
+            outerAuraSecondaryOpacity = clamp(outerAuraSecondaryOpacity * 0.35, min: 0, max: 1)
+            ringOpacityCore = clamp(ringOpacityCore * 1.1, min: 0, max: 1)
+            ringOpacitySoft = clamp(ringOpacitySoft * 1.05, min: 0, max: 1)
+            ringOpacityBloom = clamp(ringOpacityBloom * 0.85, min: 0, max: 1)
+            ringOpacityShimmer = clamp(ringOpacityShimmer * 0.8, min: 0, max: 1)
+            saturation = min(saturation, 1.1)
+            contrast = max(contrast, 1.1)
         }
 
         return ZStack {
@@ -336,7 +364,8 @@ struct AIGlowOverlay: View {
     }
 
     private var effectiveRotationPeriod: Double {
-        AIGlowAnimation.rotationPeriod(style: style, isRunning: isRunning, reduceMotion: reduceMotion)
+        let shouldReduceMotion = reduceMotionOverride ?? reduceMotion
+        return AIGlowAnimation.rotationPeriod(style: style, isRunning: isRunning, reduceMotion: shouldReduceMotion)
     }
 
     private func resetPhaseStart(active: Bool) {
@@ -405,9 +434,27 @@ struct AIGlowReduceTransparencyOverrideKey: EnvironmentKey {
     static let defaultValue: Bool? = nil
 }
 
+struct AIGlowReduceMotionOverrideKey: EnvironmentKey {
+    static let defaultValue: Bool? = nil
+}
+
+struct AIGlowIncreasedContrastOverrideKey: EnvironmentKey {
+    static let defaultValue: Bool? = nil
+}
+
 extension EnvironmentValues {
     var aiGlowReduceTransparencyOverride: Bool? {
         get { self[AIGlowReduceTransparencyOverrideKey.self] }
         set { self[AIGlowReduceTransparencyOverrideKey.self] = newValue }
+    }
+
+    var aiGlowReduceMotionOverride: Bool? {
+        get { self[AIGlowReduceMotionOverrideKey.self] }
+        set { self[AIGlowReduceMotionOverrideKey.self] = newValue }
+    }
+
+    var aiGlowIncreasedContrastOverride: Bool? {
+        get { self[AIGlowIncreasedContrastOverrideKey.self] }
+        set { self[AIGlowIncreasedContrastOverrideKey.self] = newValue }
     }
 }

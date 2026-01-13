@@ -15,6 +15,10 @@ struct AIGlowAnimation {
 
     static func rotationPeriod(style: AIGlowStyle, isRunning: Bool, reduceMotion: Bool) -> Double {
         let base = rotationDuration(style: style, isRunning: isRunning, reduceMotion: reduceMotion)
+        if reduceMotion {
+            let normal = rotationDuration(style: style, isRunning: isRunning, reduceMotion: false)
+            return max(base, normal * 2)
+        }
         let globalScale = max(style.globalSpeedScale, 0.05)
         let instanceScale = max(style.speedScale, 0.05)
         return base / (globalScale * instanceScale)

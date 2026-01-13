@@ -36,4 +36,14 @@ final class AIGlowTimingTests: XCTestCase {
         let reduced = AIGlowAnimation.rotationPeriod(style: style, isRunning: false, reduceMotion: true)
         XCTAssertGreaterThan(reduced, normal)
     }
+
+    func testReduceMotionIgnoresSpeedScalars() {
+        var style = AIGlowStyle.default
+        style.globalSpeedScale = 3.0
+        style.speedScale = 2.0
+
+        let reduced = AIGlowAnimation.rotationPeriod(style: style, isRunning: false, reduceMotion: true)
+        let expected = max(style.rotationDurationReducedMotion, style.rotationDuration * 2)
+        XCTAssertEqual(reduced, expected, accuracy: 1e-9)
+    }
 }

@@ -23,21 +23,27 @@ struct AIGlowSnapshotRunner {
             return
         }
 
-        let scenarios: [(String, ColorScheme, Bool, Bool)] = [
-            ("dark-idle", .dark, false, false),
-            ("dark-running", .dark, true, false),
-            ("light-idle", .light, false, false),
-            ("light-running", .light, true, false),
-            ("dark-idle-reduce-transparency", .dark, false, true),
-            ("light-idle-reduce-transparency", .light, false, true)
+        let scenarios: [SnapshotScenario] = [
+            SnapshotScenario(name: "dark-idle", scheme: .dark, isRunning: false, reduceTransparency: false, reduceMotion: false, increasedContrast: false),
+            SnapshotScenario(name: "dark-running", scheme: .dark, isRunning: true, reduceTransparency: false, reduceMotion: false, increasedContrast: false),
+            SnapshotScenario(name: "light-idle", scheme: .light, isRunning: false, reduceTransparency: false, reduceMotion: false, increasedContrast: false),
+            SnapshotScenario(name: "light-running", scheme: .light, isRunning: true, reduceTransparency: false, reduceMotion: false, increasedContrast: false),
+            SnapshotScenario(name: "dark-idle-reduce-transparency", scheme: .dark, isRunning: false, reduceTransparency: true, reduceMotion: false, increasedContrast: false),
+            SnapshotScenario(name: "light-idle-reduce-transparency", scheme: .light, isRunning: false, reduceTransparency: true, reduceMotion: false, increasedContrast: false),
+            SnapshotScenario(name: "dark-idle-reduce-motion", scheme: .dark, isRunning: false, reduceTransparency: false, reduceMotion: true, increasedContrast: false),
+            SnapshotScenario(name: "light-idle-reduce-motion", scheme: .light, isRunning: false, reduceTransparency: false, reduceMotion: true, increasedContrast: false),
+            SnapshotScenario(name: "dark-idle-increased-contrast", scheme: .dark, isRunning: false, reduceTransparency: false, reduceMotion: false, increasedContrast: true),
+            SnapshotScenario(name: "light-idle-increased-contrast", scheme: .light, isRunning: false, reduceTransparency: false, reduceMotion: false, increasedContrast: true)
         ]
 
-        for (name, scheme, isRunning, reduceTransparency) in scenarios {
+        for scenario in scenarios {
             renderSnapshot(
-                name: name,
-                scheme: scheme,
-                isRunning: isRunning,
-                reduceTransparency: reduceTransparency,
+                name: scenario.name,
+                scheme: scenario.scheme,
+                isRunning: scenario.isRunning,
+                reduceTransparency: scenario.reduceTransparency,
+                reduceMotion: scenario.reduceMotion,
+                increasedContrast: scenario.increasedContrast,
                 outputDir: outputDir
             )
         }
@@ -62,10 +68,14 @@ struct AIGlowSnapshotRunner {
         scheme: ColorScheme,
         isRunning: Bool,
         reduceTransparency: Bool,
+        reduceMotion: Bool,
+        increasedContrast: Bool,
         outputDir: URL
     ) {
         let view = AIGlowSnapshotView(isRunning: isRunning)
             .environment(\.colorScheme, scheme)
+            .environment(\.aiGlowReduceMotionOverride, reduceMotion)
+            .environment(\.aiGlowIncreasedContrastOverride, increasedContrast)
             .environment(\.aiGlowReduceTransparencyOverride, reduceTransparency)
         let renderer = ImageRenderer(content: view)
         renderer.scale = NSScreen.main?.backingScaleFactor ?? 2
@@ -80,6 +90,15 @@ struct AIGlowSnapshotRunner {
         let url = outputDir.appendingPathComponent("ai-glow-\(name).png")
         try? png.write(to: url)
     }
+}
+
+private struct SnapshotScenario {
+    let name: String
+    let scheme: ColorScheme
+    let isRunning: Bool
+    let reduceTransparency: Bool
+    let reduceMotion: Bool
+    let increasedContrast: Bool
 }
 
 struct AIGlowSnapshotView: View {
