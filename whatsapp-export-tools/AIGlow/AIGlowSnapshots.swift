@@ -23,15 +23,23 @@ struct AIGlowSnapshotRunner {
             return
         }
 
-        let scenarios: [(String, ColorScheme, Bool)] = [
-            ("dark-idle", .dark, false),
-            ("dark-running", .dark, true),
-            ("light-idle", .light, false),
-            ("light-running", .light, true)
+        let scenarios: [(String, ColorScheme, Bool, Bool)] = [
+            ("dark-idle", .dark, false, false),
+            ("dark-running", .dark, true, false),
+            ("light-idle", .light, false, false),
+            ("light-running", .light, true, false),
+            ("dark-idle-reduce-transparency", .dark, false, true),
+            ("light-idle-reduce-transparency", .light, false, true)
         ]
 
-        for (name, scheme, isRunning) in scenarios {
-            renderSnapshot(name: name, scheme: scheme, isRunning: isRunning, outputDir: outputDir)
+        for (name, scheme, isRunning, reduceTransparency) in scenarios {
+            renderSnapshot(
+                name: name,
+                scheme: scheme,
+                isRunning: isRunning,
+                reduceTransparency: reduceTransparency,
+                outputDir: outputDir
+            )
         }
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
@@ -49,16 +57,23 @@ struct AIGlowSnapshotRunner {
     }
 
     @available(macOS 13.0, *)
-    private static func renderSnapshot(name: String, scheme: ColorScheme, isRunning: Bool, outputDir: URL) {
+    private static func renderSnapshot(
+        name: String,
+        scheme: ColorScheme,
+        isRunning: Bool,
+        reduceTransparency: Bool,
+        outputDir: URL
+    ) {
         let view = AIGlowSnapshotView(isRunning: isRunning)
             .environment(\.colorScheme, scheme)
+            .environment(\.aiGlowReduceTransparencyOverride, reduceTransparency)
         let renderer = ImageRenderer(content: view)
         renderer.scale = NSScreen.main?.backingScaleFactor ?? 2
 
         guard let nsImage = renderer.nsImage,
               let tiff = nsImage.tiffRepresentation,
               let rep = NSBitmapImageRep(data: tiff),
-              let png = rep.representation(using: .png, properties: [:]) else {
+              let png = rep.representation(using: NSBitmapImageRep.FileType.png, properties: [:]) else {
             return
         }
 

@@ -12,6 +12,8 @@ struct AIGlowOverlay: View {
 
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceTransparency) private var accessibilityReduceTransparency
+    @Environment(\.aiGlowReduceTransparencyOverride) private var reduceTransparencyOverride
     @ObservedObject private var ticker = AIGlowTicker.shared
     @State private var phaseStartTime: TimeInterval = 0
     @State private var boostProgress: Double = 0
@@ -102,6 +104,18 @@ struct AIGlowOverlay: View {
         let ringOpacitySoft = clamp(ringOpacitySoftBase + boostProgress * style.runningRingBoostSoft, min: 0, max: 1)
         let ringOpacityBloom = clamp(ringOpacityBloomBase + boostProgress * style.runningRingBoostBloom, min: 0, max: 1)
         var ringOpacityShimmer = clamp(ringOpacityShimmerBase + boostProgress * style.runningRingBoostShimmer, min: 0, max: 1)
+        let baseline = AIGlowStyle.default
+        let baselineInnerBase = isLight ? baseline.innerAuraOpacityLight : baseline.innerAuraOpacityDark
+        let baselineInnerBoost = isLight ? baseline.runningInnerAuraBoostLight : baseline.runningInnerAuraBoostDark
+        let baselineInnerOpacity = clamp(baselineInnerBase + boostProgress * baselineInnerBoost, min: 0, max: 1)
+        let baselineOuterBase = isLight ? baseline.outerAuraOpacityLight : baseline.outerAuraOpacityDark
+        let baselineOuterBoost = isLight ? baseline.runningOuterAuraBoostLight : baseline.runningOuterAuraBoostDark
+        let baselineOuterOpacity = clamp(baselineOuterBase + boostProgress * baselineOuterBoost, min: 0, max: 1)
+        let baselineOuterSecondaryBase = isLight ? baseline.outerAuraSecondaryOpacityLight : baseline.outerAuraSecondaryOpacityDark
+        let baselineOuterSecondaryBoost = isLight ? baseline.runningOuterAuraSecondaryBoostLight : baseline.runningOuterAuraSecondaryBoostDark
+        let baselineOuterSecondaryOpacity = clamp(baselineOuterSecondaryBase + boostProgress * baselineOuterSecondaryBoost, min: 0, max: 1)
+        let baselineShimmerBase = isLight ? baseline.ringOpacityShimmerLight : baseline.ringOpacityShimmerDark
+        let baselineShimmerOpacity = clamp(baselineShimmerBase + boostProgress * baseline.runningRingBoostShimmer, min: 0, max: 1)
         let shape = AIGlowMask.roundedRect(cornerRadius: cornerRadius)
         let shimmerGradient = AngularGradient(
             gradient: Gradient(colors: style.ringColors),
@@ -109,24 +123,20 @@ struct AIGlowOverlay: View {
             angle: .degrees(phase + style.ringShimmerAngleOffset)
         )
 
-        if !showRing {
-            let baseline = AIGlowStyle.default
-            let baselineInnerBase = isLight ? baseline.innerAuraOpacityLight : baseline.innerAuraOpacityDark
-            let baselineInnerBoost = isLight ? baseline.runningInnerAuraBoostLight : baseline.runningInnerAuraBoostDark
-            let baselineInnerOpacity = clamp(baselineInnerBase + boostProgress * baselineInnerBoost, min: 0, max: 1)
-            let baselineOuterBase = isLight ? baseline.outerAuraOpacityLight : baseline.outerAuraOpacityDark
-            let baselineOuterBoost = isLight ? baseline.runningOuterAuraBoostLight : baseline.runningOuterAuraBoostDark
-            let baselineOuterOpacity = clamp(baselineOuterBase + boostProgress * baselineOuterBoost, min: 0, max: 1)
-            let baselineOuterSecondaryBase = isLight ? baseline.outerAuraSecondaryOpacityLight : baseline.outerAuraSecondaryOpacityDark
-            let baselineOuterSecondaryBoost = isLight ? baseline.runningOuterAuraSecondaryBoostLight : baseline.runningOuterAuraSecondaryBoostDark
-            let baselineOuterSecondaryOpacity = clamp(baselineOuterSecondaryBase + boostProgress * baselineOuterSecondaryBoost, min: 0, max: 1)
-            let baselineShimmerBase = isLight ? baseline.ringOpacityShimmerLight : baseline.ringOpacityShimmerDark
-            let baselineShimmerOpacity = clamp(baselineShimmerBase + boostProgress * baseline.runningRingBoostShimmer, min: 0, max: 1)
-
+        if showInnerAura {
             innerAuraOpacity = min(innerAuraOpacity, baselineInnerOpacity)
+        }
+
+        if !showRing {
             outerAuraOpacity = min(outerAuraOpacity, baselineOuterOpacity)
             outerAuraSecondaryOpacity = min(outerAuraSecondaryOpacity, baselineOuterSecondaryOpacity)
             ringOpacityShimmer = min(ringOpacityShimmer, baselineShimmerOpacity)
+        }
+
+        if reduceTransparencyOverride ?? accessibilityReduceTransparency {
+            innerAuraOpacity = 0
+            outerAuraOpacity *= 0.45
+            outerAuraSecondaryOpacity *= 0.45
         }
 
         return ZStack {
@@ -283,5 +293,16 @@ private struct AIGlowChangeObserver<Value: Equatable>: ViewModifier {
 private extension View {
     func onChangeCompat<Value: Equatable>(of value: Value, perform action: @escaping () -> Void) -> some View {
         modifier(AIGlowChangeObserver(value: value, action: action))
+    }
+}
+
+struct AIGlowReduceTransparencyOverrideKey: EnvironmentKey {
+    static let defaultValue: Bool? = nil
+}
+
+extension EnvironmentValues {
+    var aiGlowReduceTransparencyOverride: Bool? {
+        get { self[AIGlowReduceTransparencyOverrideKey.self] }
+        set { self[AIGlowReduceTransparencyOverrideKey.self] = newValue }
     }
 }
