@@ -11,6 +11,10 @@ let package = Package(
         .library(
             name: "AIGlowKit",
             targets: ["AIGlowKit"]
+        ),
+        .executable(
+            name: "AIGlowHarness",
+            targets: ["AIGlowHarness"]
         )
     ],
     targets: [
@@ -18,9 +22,22 @@ let package = Package(
             name: "AIGlowKit",
             path: "Sources/AIGlowKit"
         ),
+        .target(
+            name: "AIGlowKitDevTools",
+            dependencies: ["AIGlowKit"],
+            path: "Sources/AIGlowKitDevTools"
+        ),
+        .executableTarget(
+            name: "AIGlowHarness",
+            dependencies: ["AIGlowKitDevTools"],
+            path: "Sources/AIGlowHarness",
+            swiftSettings: [
+                .define("AIGLOW_HARNESS")
+            ]
+        ),
         .testTarget(
             name: "AIGlowKitTests",
-            dependencies: ["AIGlowKit"],
+            dependencies: ["AIGlowKit", "AIGlowKitDevTools"],
             path: "Tests/AIGlowKitTests"
         )
     ]
