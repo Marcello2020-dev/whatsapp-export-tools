@@ -1,9 +1,29 @@
 import SwiftUI
 
+public struct AIGlowComponents: OptionSet, Sendable {
+    public let rawValue: Int
+
+    public init(rawValue: Int) {
+        self.rawValue = rawValue
+    }
+
+    public static let aura = AIGlowComponents(rawValue: 1 << 0)
+    public static let ring = AIGlowComponents(rawValue: 1 << 1)
+    public static let shimmer = AIGlowComponents(rawValue: 1 << 2)
+    public static let all: AIGlowComponents = [.aura, .ring, .shimmer]
+}
+
+public enum AIGlowFillMode: String, Sendable {
+    case outlineOnly
+    case innerGlow
+}
+
 /// Data-only styling options for AI Glow rendering.
 public struct AIGlowStyle: Equatable, @unchecked Sendable {
     public let ringColors: [Color]
     public let auraColors: [Color]
+    public let components: AIGlowComponents
+    public let fillMode: AIGlowFillMode
     public let ringLineWidthCore: CGFloat
     public let ringLineWidthSoft: CGFloat
     public let ringLineWidthBloom: CGFloat
@@ -73,6 +93,8 @@ public struct AIGlowStyle: Equatable, @unchecked Sendable {
     public init(
         ringColors: [Color],
         auraColors: [Color],
+        components: AIGlowComponents,
+        fillMode: AIGlowFillMode,
         ringLineWidthCore: CGFloat,
         ringLineWidthSoft: CGFloat,
         ringLineWidthBloom: CGFloat,
@@ -141,6 +163,8 @@ public struct AIGlowStyle: Equatable, @unchecked Sendable {
     ) {
         self.ringColors = ringColors
         self.auraColors = auraColors
+        self.components = components
+        self.fillMode = fillMode
         self.ringLineWidthCore = ringLineWidthCore
         self.ringLineWidthSoft = ringLineWidthSoft
         self.ringLineWidthBloom = ringLineWidthBloom
@@ -211,6 +235,8 @@ public struct AIGlowStyle: Equatable, @unchecked Sendable {
     public static let appleIntelligenceDefault = AIGlowStyle(
         ringColors: AIGlowPalette.ringColors,
         auraColors: AIGlowPalette.auraColors,
+        components: .all,
+        fillMode: .innerGlow,
         ringLineWidthCore: 3.4,
         ringLineWidthSoft: 5.4,
         ringLineWidthBloom: 11.0,
@@ -285,6 +311,8 @@ public struct AIGlowStyle: Equatable, @unchecked Sendable {
         return AIGlowStyle(
             ringColors: ringColors,
             auraColors: auraColors,
+            components: components.intersection(.all),
+            fillMode: fillMode,
             ringLineWidthCore: Self.nonNegativeFinite(ringLineWidthCore, fallback: baseline.ringLineWidthCore),
             ringLineWidthSoft: Self.nonNegativeFinite(ringLineWidthSoft, fallback: baseline.ringLineWidthSoft),
             ringLineWidthBloom: Self.nonNegativeFinite(ringLineWidthBloom, fallback: baseline.ringLineWidthBloom),

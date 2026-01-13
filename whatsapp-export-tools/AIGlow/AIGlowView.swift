@@ -56,6 +56,11 @@ struct AIGlowOverlay: View {
         let contrast = isLight ? style.contrastLight : style.contrastDark
         let baseSize = targetSize
         let phase = currentPhase
+        let components = style.components
+        let showAura = components.contains(.aura)
+        let showRing = components.contains(.ring)
+        let showShimmer = components.contains(.shimmer)
+        let showInnerAura = showAura && style.fillMode == .innerGlow
         let ringGradient = AngularGradient(
             gradient: Gradient(colors: style.ringColors),
             center: .center,
@@ -104,68 +109,78 @@ struct AIGlowOverlay: View {
         )
 
         return ZStack {
-            ZStack {
-                shape
-                    .fill(auraGradient)
-                    .frame(width: baseSize.width, height: baseSize.height)
-                    .opacity(innerAuraOpacity)
-                    .blur(radius: innerAuraBlur)
-                    .mask(
+            if showInnerAura {
+                ZStack {
+                    shape
+                        .fill(auraGradient)
+                        .frame(width: baseSize.width, height: baseSize.height)
+                        .opacity(innerAuraOpacity)
+                        .blur(radius: innerAuraBlur)
+                        .mask(
+                            shape
+                                .frame(width: baseSize.width, height: baseSize.height)
+                        )
+                        .blendMode(auraBlend)
+                }
+                .compositingGroup()
+            }
+
+            if showAura {
+                ZStack {
+                    shape
+                        .stroke(auraGradient, lineWidth: style.outerAuraLineWidth)
+                        .frame(width: baseSize.width, height: baseSize.height)
+                        .opacity(outerAuraOpacity)
+                        .blur(radius: outerAuraBlur)
+                        .blendMode(auraBlend)
+
+                    shape
+                        .stroke(auraGradient, lineWidth: style.outerAuraSecondaryLineWidth)
+                        .frame(width: baseSize.width, height: baseSize.height)
+                        .opacity(outerAuraSecondaryOpacity)
+                        .blur(radius: outerAuraSecondaryBlur)
+                        .offset(style.outerAuraSecondaryOffset)
+                        .blendMode(auraBlend)
+                }
+                .compositingGroup()
+            }
+
+            if showRing || showShimmer {
+                ZStack {
+                    if showRing {
                         shape
+                            .stroke(ringGradient, lineWidth: style.ringLineWidthCore)
                             .frame(width: baseSize.width, height: baseSize.height)
-                    )
-                    .blendMode(auraBlend)
+                            .blur(radius: ringBlurCore)
+                            .opacity(ringOpacityCore)
+                            .blendMode(ringBlend)
+
+                        shape
+                            .stroke(ringGradient, lineWidth: style.ringLineWidthSoft)
+                            .frame(width: baseSize.width, height: baseSize.height)
+                            .blur(radius: ringBlurSoft)
+                            .opacity(ringOpacitySoft)
+                            .blendMode(ringBlend)
+
+                        shape
+                            .stroke(ringGradient, lineWidth: style.ringLineWidthBloom)
+                            .frame(width: baseSize.width, height: baseSize.height)
+                            .blur(radius: ringBlurBloom)
+                            .opacity(ringOpacityBloom)
+                            .blendMode(ringBlend)
+                    }
+
+                    if showShimmer {
+                        shape
+                            .stroke(shimmerGradient, lineWidth: style.ringLineWidthShimmer)
+                            .frame(width: baseSize.width, height: baseSize.height)
+                            .blur(radius: ringBlurShimmer)
+                            .opacity(ringOpacityShimmer)
+                            .blendMode(ringBlend)
+                    }
+                }
+                .compositingGroup()
             }
-            .compositingGroup()
-
-            ZStack {
-                shape
-                    .stroke(auraGradient, lineWidth: style.outerAuraLineWidth)
-                    .frame(width: baseSize.width, height: baseSize.height)
-                    .opacity(outerAuraOpacity)
-                    .blur(radius: outerAuraBlur)
-                    .blendMode(auraBlend)
-
-                shape
-                    .stroke(auraGradient, lineWidth: style.outerAuraSecondaryLineWidth)
-                    .frame(width: baseSize.width, height: baseSize.height)
-                    .opacity(outerAuraSecondaryOpacity)
-                    .blur(radius: outerAuraSecondaryBlur)
-                    .offset(style.outerAuraSecondaryOffset)
-                    .blendMode(auraBlend)
-            }
-            .compositingGroup()
-
-            ZStack {
-                shape
-                    .stroke(ringGradient, lineWidth: style.ringLineWidthCore)
-                    .frame(width: baseSize.width, height: baseSize.height)
-                    .blur(radius: ringBlurCore)
-                    .opacity(ringOpacityCore)
-                    .blendMode(ringBlend)
-
-                shape
-                    .stroke(ringGradient, lineWidth: style.ringLineWidthSoft)
-                    .frame(width: baseSize.width, height: baseSize.height)
-                    .blur(radius: ringBlurSoft)
-                    .opacity(ringOpacitySoft)
-                    .blendMode(ringBlend)
-
-                shape
-                    .stroke(ringGradient, lineWidth: style.ringLineWidthBloom)
-                    .frame(width: baseSize.width, height: baseSize.height)
-                    .blur(radius: ringBlurBloom)
-                    .opacity(ringOpacityBloom)
-                    .blendMode(ringBlend)
-
-                shape
-                    .stroke(shimmerGradient, lineWidth: style.ringLineWidthShimmer)
-                    .frame(width: baseSize.width, height: baseSize.height)
-                    .blur(radius: ringBlurShimmer)
-                    .opacity(ringOpacityShimmer)
-                    .blendMode(ringBlend)
-            }
-            .compositingGroup()
         }
         .frame(width: baseSize.width, height: baseSize.height)
         .padding(style.outerPadding)
