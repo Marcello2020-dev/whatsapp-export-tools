@@ -953,6 +953,10 @@ struct ContentView: View {
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
         panel.allowedContentTypes = [UTType.plainText]
+        if let current = chatURL {
+            panel.directoryURL = current.deletingLastPathComponent()
+            panel.nameFieldStringValue = current.lastPathComponent
+        }
 
         if panel.runModal() == .OK, let url = panel.url {
             setChatURL(url)
@@ -969,6 +973,9 @@ struct ContentView: View {
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowedContentTypes = [.folder]
+        if let current = outBaseURL {
+            panel.directoryURL = current
+        }
 
         if panel.runModal() == .OK, let url = panel.url {
             setOutputBaseURL(url)
