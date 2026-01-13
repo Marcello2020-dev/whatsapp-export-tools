@@ -17,24 +17,26 @@ struct AIGlowOverlay: View {
     @State private var lastDebugPrintTime: TimeInterval = 0
 
     var body: some View {
-        glowBody
+        let base = glowBody
             .onAppear {
                 resetPhaseStart(active: active)
                 updateBoost()
             }
-            .onChange(of: reduceMotion, perform: { _ in
+            .onChange(of: reduceMotion) {
                 resetPhaseStart(active: active)
-            })
-            .onChange(of: active, perform: { _ in
-                resetPhaseStart(active: active)
-                updateBoost()
-            })
-            .onChange(of: isRunning, perform: { _ in
+            }
+            .onChange(of: active) {
                 resetPhaseStart(active: active)
                 updateBoost()
-            })
+            }
+            .onChange(of: isRunning) {
+                resetPhaseStart(active: active)
+                updateBoost()
+            }
+
 #if DEBUG
-            .onChange(of: ticker.now, perform: { _ in
+        return base
+            .onChange(of: ticker.now) {
                 guard active, let debugTag else { return }
                 let now = ticker.now
                 if now - lastDebugPrintTime >= 1.0 {
@@ -42,7 +44,9 @@ struct AIGlowOverlay: View {
                     let phase = String(format: "%.1f", currentPhase)
                     print("[AIGlowPhase:\(debugTag)] \(phase)°")
                 }
-            })
+            }
+#else
+        return base
 #endif
     }
 

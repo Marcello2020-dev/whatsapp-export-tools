@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
@@ -219,6 +220,10 @@ struct ContentView: View {
 
     @State private var chatURL: URL?
     @State private var outBaseURL: URL?
+    @State private var chatURLAccess: SecurityScopedURL? = nil
+    @State private var outBaseURLAccess: SecurityScopedURL? = nil
+    @State private var didRestoreSettings: Bool = false
+    @State private var isRestoringSettings: Bool = false
 
     // Independent export toggles (default: all enabled)
     @State private var exportHTMLMax: Bool = true
@@ -266,6 +271,10 @@ struct ContentView: View {
         .background(WhatsAppBackground().ignoresSafeArea())
         .onAppear {
             applyInitialWindowSizeIfNeeded()
+            if !didRestoreSettings {
+                didRestoreSettings = true
+                restorePersistedSettings()
+            }
             if let u = chatURL, detectedParticipants.isEmpty {
                 refreshParticipants(for: u)
             }
@@ -419,6 +428,9 @@ struct ContentView: View {
                 }
                 .accessibilityLabel("HTML Max")
                 .disabled(isRunning)
+                .onChange(of: exportHTMLMax) {
+                    persistExportSettings()
+                }
                 .frame(maxWidth: .infinity, alignment: .leading)
 
                 Toggle(isOn: $exportHTMLMid) {
@@ -429,6 +441,9 @@ struct ContentView: View {
                 }
                 .accessibilityLabel("HTML Kompakt")
                 .disabled(isRunning)
+                .onChange(of: exportHTMLMid) {
+                    persistExportSettings()
+                }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             GridRow {
@@ -440,6 +455,9 @@ struct ContentView: View {
                 }
                 .accessibilityLabel("HTML E-Mail")
                 .disabled(isRunning)
+                .onChange(of: exportHTMLMin) {
+                    persistExportSettings()
+                }
                 .frame(maxWidth: .infinity, alignment: .leading)
 
                 Toggle(isOn: $exportMarkdown) {
@@ -450,6 +468,9 @@ struct ContentView: View {
                 }
                 .accessibilityLabel("Markdown Ausgabe")
                 .disabled(isRunning)
+                .onChange(of: exportMarkdown) {
+                    persistExportSettings()
+                }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
@@ -473,6 +494,9 @@ struct ContentView: View {
         }
         .accessibilityLabel("Sidecar Ausgabe")
         .disabled(isRunning)
+        .onChange(of: exportSortedAttachments) {
+            persistExportSettings()
+        }
     }
 
     private var deleteOriginalsToggle: some View {
@@ -484,6 +508,9 @@ struct ContentView: View {
         }
         .accessibilityLabel("Originaldaten löschen")
         .disabled(isRunning || !exportSortedAttachments)
+        .onChange(of: deleteOriginalsAfterSidecar) {
+            persistExportSettings()
+        }
     }
 
     private var chatPartnerSelectionRow: some View {
@@ -927,9 +954,9 @@ struct ContentView: View {
         panel.canChooseFiles = true
         panel.allowedContentTypes = [UTType.plainText]
 
-        if panel.runModal() == .OK {
-            chatURL = panel.url
-            if let url = panel.url { refreshParticipants(for: url) }
+        if panel.runModal() == .OK, let url = panel.url {
+            setChatURL(url)
+            refreshParticipants(for: url)
         }
     }
 
@@ -943,8 +970,50 @@ struct ContentView: View {
         panel.canChooseFiles = false
         panel.allowedContentTypes = [.folder]
 
-        if panel.runModal() == .OK {
-            outBaseURL = panel.url
+        if panel.runModal() == .OK, let url = panel.url {
+            setOutputBaseURL(url)
+        }
+    }
+
+    private func setChatURL(_ url: URL?) {
+        chatURLAccess?.stopAccessing()
+        guard let url else {
+            chatURL = nil
+            chatURLAccess = nil
+            if !isRestoringSettings { persistExportSettings() }
+            return
+        }
+        if let scoped = SecurityScopedURL(url: url) {
+            chatURLAccess = scoped
+            chatURL = scoped.resourceURL
+        } else {
+            appendLog("WARN: Sicherheitszugriff auf den Chat-Export konnte nicht aktiviert werden.")
+            chatURL = nil
+            chatURLAccess = nil
+        }
+        if !isRestoringSettings {
+            persistExportSettings()
+        }
+    }
+
+    private func setOutputBaseURL(_ url: URL?) {
+        outBaseURLAccess?.stopAccessing()
+        guard let url else {
+            outBaseURL = nil
+            outBaseURLAccess = nil
+            if !isRestoringSettings { persistExportSettings() }
+            return
+        }
+        if let scoped = SecurityScopedURL(url: url) {
+            outBaseURLAccess = scoped
+            outBaseURL = scoped.resourceURL
+        } else {
+            appendLog("WARN: Sicherheitszugriff auf den Zielordner konnte nicht aktiviert werden.")
+            outBaseURL = nil
+            outBaseURLAccess = nil
+        }
+        if !isRestoringSettings {
+            persistExportSettings()
         }
     }
 
@@ -1995,6 +2064,84 @@ struct ContentView: View {
             appendLog("ERROR: Löschen fehlgeschlagen: \(failed.map { $0.path }.joined(separator: ", "))")
         }
     }
+
+    private func restorePersistedSettings() {
+        guard let snapshot = WETExportSettingsStorage.shared.load() else { return }
+        isRestoringSettings = true
+        defer {
+            isRestoringSettings = false
+            persistExportSettings()
+        }
+
+        exportHTMLMax = snapshot.exportHTMLMax
+        exportHTMLMid = snapshot.exportHTMLMid
+        exportHTMLMin = snapshot.exportHTMLMin
+        exportMarkdown = snapshot.exportMarkdown
+        exportSortedAttachments = snapshot.exportSortedAttachments
+        deleteOriginalsAfterSidecar = snapshot.deleteOriginalsAfterSidecar
+
+        if let chatBookmark = snapshot.chatBookmark {
+            if let url = resolveBookmark(chatBookmark, expectDirectory: false) {
+                setChatURL(url)
+            } else {
+                appendLog("WARN: Letzter Chat-Export nicht verfügbar. Bitte erneut auswählen.")
+                setChatURL(nil)
+            }
+        }
+
+        if let outputBookmark = snapshot.outputBookmark {
+            if let url = resolveBookmark(outputBookmark, expectDirectory: true) {
+                setOutputBaseURL(url)
+            } else {
+                appendLog("WARN: Letzter Zielordner nicht verfügbar. Bitte erneut auswählen.")
+                setOutputBaseURL(nil)
+            }
+        }
+    }
+
+    private func persistExportSettings() {
+        guard !isRestoringSettings else { return }
+        let snapshot = WETExportSettingsSnapshot(
+            schemaVersion: WETExportSettingsSnapshot.currentVersion,
+            chatBookmark: bookmarkData(for: chatURL),
+            outputBookmark: bookmarkData(for: outBaseURL),
+            exportHTMLMax: exportHTMLMax,
+            exportHTMLMid: exportHTMLMid,
+            exportHTMLMin: exportHTMLMin,
+            exportMarkdown: exportMarkdown,
+            exportSortedAttachments: exportSortedAttachments,
+            deleteOriginalsAfterSidecar: deleteOriginalsAfterSidecar
+        )
+        WETExportSettingsStorage.shared.save(snapshot)
+    }
+
+    private func bookmarkData(for url: URL?) -> Data? {
+        guard let url else { return nil }
+        return try? url.bookmarkData(
+            options: [.withSecurityScope],
+            includingResourceValuesForKeys: nil,
+            relativeTo: nil
+        )
+    }
+
+    private func resolveBookmark(_ data: Data, expectDirectory: Bool) -> URL? {
+        var stale = false
+        guard let url = try? URL(
+            resolvingBookmarkData: data,
+            options: [.withSecurityScope],
+            relativeTo: nil,
+            bookmarkDataIsStale: &stale
+        ) else {
+            return nil
+        }
+        var isDirectory: ObjCBool = false
+        let exists = FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory)
+        if !exists { return nil }
+        if expectDirectory && !isDirectory.boolValue { return nil }
+        if !expectDirectory && isDirectory.boolValue { return nil }
+        _ = stale
+        return url
+    }
 }
 
 // MARK: - Helpers (Dateiebene)
@@ -2073,5 +2220,59 @@ private struct WACard: ViewModifier {
 extension View {
     func waCard() -> some View {
         modifier(WACard())
+    }
+}
+
+private final class SecurityScopedURL {
+    private let url: URL
+    private var isAccessing: Bool = false
+
+    var resourceURL: URL { url }
+
+    init?(url: URL) {
+        guard url.startAccessingSecurityScopedResource() else { return nil }
+        self.url = url
+        self.isAccessing = true
+    }
+
+    func stopAccessing() {
+        guard isAccessing else { return }
+        url.stopAccessingSecurityScopedResource()
+        isAccessing = false
+    }
+
+    deinit {
+        stopAccessing()
+    }
+}
+
+private struct WETExportSettingsSnapshot: Codable {
+    static let currentVersion = 1
+
+    let schemaVersion: Int
+    let chatBookmark: Data?
+    let outputBookmark: Data?
+    let exportHTMLMax: Bool
+    let exportHTMLMid: Bool
+    let exportHTMLMin: Bool
+    let exportMarkdown: Bool
+    let exportSortedAttachments: Bool
+    let deleteOriginalsAfterSidecar: Bool
+}
+
+private final class WETExportSettingsStorage {
+    static let shared = WETExportSettingsStorage()
+
+    private let defaults = UserDefaults.standard
+    private let storageKey = "wet.exportSettings"
+
+    func load() -> WETExportSettingsSnapshot? {
+        guard let data = defaults.data(forKey: storageKey) else { return nil }
+        return try? JSONDecoder().decode(WETExportSettingsSnapshot.self, from: data)
+    }
+
+    func save(_ snapshot: WETExportSettingsSnapshot) {
+        guard let data = try? JSONEncoder().encode(snapshot) else { return }
+        defaults.set(data, forKey: storageKey)
     }
 }
