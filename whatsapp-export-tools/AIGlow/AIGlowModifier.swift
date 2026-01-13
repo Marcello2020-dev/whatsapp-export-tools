@@ -28,7 +28,7 @@ struct AIGlowModifier: ViewModifier {
     }
 }
 
-extension View {
+public extension View {
     /// Adds the Apple-Intelligence-style glow behind the current view.
     func aiGlow(
         active: Bool,
