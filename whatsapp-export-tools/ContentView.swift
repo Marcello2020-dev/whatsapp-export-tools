@@ -587,6 +587,7 @@ struct ContentView: View {
                             RoundedRectangle(cornerRadius: 6, style: .continuous)
                                 .stroke(.white.opacity(0.10), lineWidth: 1)
                         )
+                        .contentShape(Rectangle())
                         .aiGlow(active: shouldShowAIGlow, isRunning: false, cornerRadius: 6)
                     }
                     .buttonStyle(.plain)
