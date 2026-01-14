@@ -71,6 +71,10 @@ struct ContentView: View {
     private static let logSectionVerticalPadding: CGFloat = 16
     private static let logMinLinesContent: Int = 8
 
+#if DEBUG
+    private static var didRunAIGlowHostStateCheck = false
+#endif
+
 
     // MARK: - Export options
 
@@ -278,6 +282,9 @@ struct ContentView: View {
             if let u = chatURL, detectedParticipants.isEmpty {
                 refreshParticipants(for: u)
             }
+#if DEBUG
+            runAIGlowHostStateCheckIfNeeded()
+#endif
         }
         .alert("Datei bereits vorhanden", isPresented: $showReplaceAlert) {
             Button("Abbrechen", role: .cancel) { }
@@ -635,12 +642,6 @@ struct ContentView: View {
                         get: { phoneParticipantOverrides[num] ?? "" },
                         set: { newValue in
                             phoneParticipantOverrides[num] = newValue
-                            if let suggestion = autoSuggestedPhoneNames[num] {
-                                let match = normalizedDisplayName(newValue).lowercased() == normalizedDisplayName(suggestion).lowercased()
-                                if !match {
-                                    autoSuggestedPhoneNames[num] = nil
-                                }
-                            }
                         }
                     )
 
@@ -837,6 +838,15 @@ struct ContentView: View {
         normalizedDisplayName(s).lowercased()
     }
 
+    private func isSuggestedCurrentlyShown(current: String, suggested: String?) -> Bool {
+        guard let suggested else { return false }
+        let currentKey = normalizedKey(current)
+        guard !currentKey.isEmpty else { return false }
+        let suggestedKey = normalizedKey(suggested)
+        guard !suggestedKey.isEmpty else { return false }
+        return currentKey == suggestedKey
+    }
+
     private func firstMatchingParticipant(_ name: String, in list: [String]) -> String? {
         let key = normalizedKey(name)
         guard !key.isEmpty else { return nil }
@@ -909,16 +919,48 @@ struct ContentView: View {
     }
 
     private var shouldShowAIGlow: Bool {
-        guard let autoDetectedChatPartnerName else { return false }
-        return normalizedKey(chatPartnerSelection) == normalizedKey(autoDetectedChatPartnerName)
+        isSuggestedCurrentlyShown(current: chatPartnerSelection, suggested: autoDetectedChatPartnerName)
     }
 
     private func shouldShowPhoneSuggestionGlow(for phone: String) -> Bool {
-        guard let suggestion = autoSuggestedPhoneNames[phone] else { return false }
-        let current = normalizedDisplayName(phoneParticipantOverrides[phone] ?? "")
-        guard !current.isEmpty else { return false }
-        return current.lowercased() == normalizedDisplayName(suggestion).lowercased()
+        isSuggestedCurrentlyShown(current: phoneParticipantOverrides[phone] ?? "", suggested: autoSuggestedPhoneNames[phone])
     }
+
+#if DEBUG
+    private func runAIGlowHostStateCheckIfNeeded() {
+        guard !Self.didRunAIGlowHostStateCheck else { return }
+        guard ProcessInfo.processInfo.environment["WET_AIGLOW_HOST_STATE_CHECK"] == "1" else { return }
+        Self.didRunAIGlowHostStateCheck = true
+
+        var failures: [String] = []
+        func expect(_ condition: Bool, _ label: String) {
+            if !condition { failures.append(label) }
+        }
+
+        let suggestion = "Alice Example"
+        let other = "Bob Example"
+
+        expect(isSuggestedCurrentlyShown(current: suggestion, suggested: suggestion), "suggestion shown => glow ON")
+        expect(!isSuggestedCurrentlyShown(current: other, suggested: suggestion), "user diverges => glow OFF")
+        expect(isSuggestedCurrentlyShown(current: suggestion, suggested: suggestion), "revert to suggestion => glow ON")
+        expect(!isSuggestedCurrentlyShown(current: "", suggested: suggestion), "empty current => glow OFF")
+        expect(!isSuggestedCurrentlyShown(current: suggestion, suggested: nil), "missing suggestion => glow OFF")
+        expect(isSuggestedCurrentlyShown(current: "  ALICE   EXAMPLE ", suggested: "alice example"), "normalized match => glow ON")
+
+        if failures.isEmpty {
+            print("AIGlow host state check: PASS")
+        } else {
+            print("AIGlow host state check: FAIL (\(failures.count))")
+            for failure in failures {
+                print(" - \(failure)")
+            }
+        }
+
+        DispatchQueue.main.async {
+            NSApp.terminate(nil)
+        }
+    }
+#endif
 
     private func applyInitialWindowSizeIfNeeded() {
         guard !didSetInitialWindowSize else { return }
@@ -1067,19 +1109,16 @@ struct ContentView: View {
                 newOverrides[p] = phoneParticipantOverrides[p] ?? ""
             }
             var newAutoSuggested: [String: String] = [:]
-            for (phone, suggestion) in autoSuggestedPhoneNames {
-                guard phones.contains(phone) else { continue }
-                let current = normalizedDisplayName(newOverrides[phone] ?? "")
-                if !current.isEmpty,
-                   current.lowercased() == normalizedDisplayName(suggestion).lowercased() {
-                    newAutoSuggested[phone] = suggestion
-                }
+            for (phone, suggestion) in autoSuggestedPhoneNames where phones.contains(phone) {
+                newAutoSuggested[phone] = suggestion
             }
             if let partnerHint, phones.count == 1, parts.count == 2 {
                 let phone = phones[0]
                 let existing = newOverrides[phone]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 if existing.isEmpty {
                     newOverrides[phone] = partnerHint
+                }
+                if newAutoSuggested[phone] == nil {
                     newAutoSuggested[phone] = partnerHint
                 }
             }
@@ -1089,6 +1128,8 @@ struct ContentView: View {
                     let existing = newOverrides[partnerRaw]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                     if existing.isEmpty {
                         newOverrides[partnerRaw] = partnerHint
+                    }
+                    if newAutoSuggested[partnerRaw] == nil {
                         newAutoSuggested[partnerRaw] = partnerHint
                     }
                 }
