@@ -82,13 +82,15 @@ struct AIGlowOverlay: View {
         let showRing = components.contains(.ring)
         let showShimmer = components.contains(.shimmer)
         let showInnerAura = showAura && style.fillMode == .innerGlow
+        let ringStops = style.ringGradientStops(for: colorScheme)
+        let auraStops = style.auraGradientStops(for: colorScheme)
         let ringGradient = AngularGradient(
-            gradient: Gradient(colors: style.ringColors),
+            gradient: Gradient(stops: ringStops),
             center: .center,
             angle: .degrees(phaseDegrees)
         )
         let auraGradient = AngularGradient(
-            gradient: Gradient(colors: style.auraColors),
+            gradient: Gradient(stops: auraStops),
             center: .center,
             angle: .degrees(phaseDegrees)
         )
@@ -136,7 +138,7 @@ struct AIGlowOverlay: View {
         let baselineShimmerOpacity = clamp(baselineShimmerBase + boostProgress * baseline.runningRingBoostShimmer, min: 0, max: 1)
         let shape = AIGlowMask.roundedRect(cornerRadius: cornerRadius)
         let shimmerGradient = AngularGradient(
-            gradient: Gradient(colors: style.ringColors),
+            gradient: Gradient(stops: ringStops),
             center: .center,
             angle: .degrees(phaseDegrees + style.ringShimmerAngleOffset)
         )

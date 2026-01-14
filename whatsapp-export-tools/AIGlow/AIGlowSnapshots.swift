@@ -107,7 +107,7 @@ struct AIGlowSnapshotView: View {
     @State private var samplePhoneName: String = "Sample Contact"
 
     private var logGlowStyle: AIGlowStyle {
-        AIGlowStyle.default.withSpeedScale(0.7)
+        AIGlowStyle.wetDefault.withSpeedScale(0.7)
     }
 
     private var sampleLog: String {

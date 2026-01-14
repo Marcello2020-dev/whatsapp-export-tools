@@ -115,6 +115,30 @@ public struct AIGlowPalette: Equatable, Sendable {
         return AIGlowPalette(name: "Apple Default", light: variant)
     }()
 
+    public static let whatsAppGreen: AIGlowPalette = {
+        let ringHexLight: [UInt32] = [
+            0x25D366, 0x6EE6B0, 0x34B7F1, 0x2ECC71, 0x25D366
+        ]
+        let auraHexLight: [UInt32] = [
+            0x1D8A55, 0x46B98A, 0x2A7FA1, 0x249E67, 0x1D8A55
+        ]
+        let ringHexDark: [UInt32] = [
+            0x1FB85B, 0x35D58B, 0x2CA0D1, 0x23B96B, 0x1FB85B
+        ]
+        let auraHexDark: [UInt32] = [
+            0x0F5A37, 0x1F7A59, 0x17607D, 0x1A6A4A, 0x0F5A37
+        ]
+        let light = Variant(
+            ringStops: Self.evenStops(hexes: ringHexLight),
+            auraStops: Self.evenStops(hexes: auraHexLight)
+        )
+        let dark = Variant(
+            ringStops: Self.evenStops(hexes: ringHexDark),
+            auraStops: Self.evenStops(hexes: auraHexDark)
+        )
+        return AIGlowPalette(name: "WhatsApp Green", light: light, dark: dark)
+    }()
+
     public static let `default` = appleDefault
 
     public static var ringColors: [Color] {

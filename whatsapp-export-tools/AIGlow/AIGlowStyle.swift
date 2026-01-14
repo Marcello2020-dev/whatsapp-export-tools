@@ -45,6 +45,7 @@ public enum AIGlowAuraOuterContour: Equatable, Sendable {
 public struct AIGlowStyle: Equatable, @unchecked Sendable {
     public let ringColors: [Color]
     public let auraColors: [Color]
+    public var palette: AIGlowPalette?
     public let components: AIGlowComponents
     public let fillMode: AIGlowFillMode
     public let auraOuterContour: AIGlowAuraOuterContour
@@ -119,6 +120,7 @@ public struct AIGlowStyle: Equatable, @unchecked Sendable {
     public init(
         ringColors: [Color],
         auraColors: [Color],
+        palette: AIGlowPalette? = nil,
         components: AIGlowComponents,
         fillMode: AIGlowFillMode,
         auraOuterContour: AIGlowAuraOuterContour,
@@ -192,6 +194,7 @@ public struct AIGlowStyle: Equatable, @unchecked Sendable {
     ) {
         self.ringColors = ringColors
         self.auraColors = auraColors
+        self.palette = palette
         self.components = components
         self.fillMode = fillMode
         self.auraOuterContour = auraOuterContour
@@ -267,6 +270,7 @@ public struct AIGlowStyle: Equatable, @unchecked Sendable {
     public static let appleIntelligenceDefault = AIGlowStyle(
         ringColors: AIGlowPalette.ringColors,
         auraColors: AIGlowPalette.auraColors,
+        palette: nil,
         components: .all,
         fillMode: .innerGlow,
         auraOuterContour: .matchTarget,
@@ -340,12 +344,15 @@ public struct AIGlowStyle: Equatable, @unchecked Sendable {
     )
 
     public static let `default` = appleIntelligenceDefault
+    public static let whatsAppGreen = AIGlowStyle.default.withPalette(.whatsAppGreen)
+    public static let wetDefault = whatsAppGreen
 
     public func normalized() -> AIGlowStyle {
         let baseline = AIGlowStyle.default
         return AIGlowStyle(
             ringColors: ringColors,
             auraColors: auraColors,
+            palette: palette?.normalized(),
             components: components.intersection(.all),
             fillMode: fillMode,
             auraOuterContour: auraOuterContour.normalized(fallback: baseline.auraOuterContour),
@@ -419,6 +426,26 @@ public struct AIGlowStyle: Equatable, @unchecked Sendable {
         )
     }
 
+    public func ringGradientStops(for colorScheme: ColorScheme) -> [Gradient.Stop] {
+        if let palette {
+            return palette.normalized().ringGradientStops(for: colorScheme)
+        }
+        return Self.evenStops(colors: ringColors)
+    }
+
+    public func auraGradientStops(for colorScheme: ColorScheme) -> [Gradient.Stop] {
+        if let palette {
+            return palette.normalized().auraGradientStops(for: colorScheme)
+        }
+        return Self.evenStops(colors: auraColors)
+    }
+
+    public func withPalette(_ palette: AIGlowPalette?) -> AIGlowStyle {
+        var copy = self
+        copy.palette = palette
+        return copy
+    }
+
     public func withSpeedScale(_ scale: Double) -> AIGlowStyle {
         var copy = self
         copy.speedScale = scale
@@ -470,5 +497,14 @@ public struct AIGlowStyle: Equatable, @unchecked Sendable {
         guard value.isFinite else { return fallback }
         let remainder = value.truncatingRemainder(dividingBy: 1)
         return remainder < 0 ? remainder + 1 : remainder
+    }
+
+    private static func evenStops(colors: [Color]) -> [Gradient.Stop] {
+        guard !colors.isEmpty else { return [] }
+        let count = max(colors.count - 1, 1)
+        return colors.enumerated().map { index, color in
+            let location = Double(index) / Double(count)
+            return Gradient.Stop(color: color, location: location)
+        }
     }
 }

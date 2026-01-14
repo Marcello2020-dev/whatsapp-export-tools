@@ -37,7 +37,7 @@ public extension View {
         active: Bool,
         isRunning: Bool,
         cornerRadius: CGFloat,
-        style: AIGlowStyle = .default,
+        style: AIGlowStyle = .wetDefault,
         debugTag: String? = nil
     ) -> some View {
         modifier(
