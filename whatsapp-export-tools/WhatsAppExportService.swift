@@ -325,6 +325,18 @@ public enum WhatsAppExportService {
         pattern: #"(https?://[^\s<>\]]+)"#,
         options: [.caseInsensitive]
     )
+    nonisolated private static let bareDomainRe = try! NSRegularExpression(
+        pattern: #"(?i)(?<![\w@])((?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,})(?![\w])"#,
+        options: []
+    )
+    nonisolated private static let markdownLinkRe = try! NSRegularExpression(
+        pattern: #"\[[^\]]+\]\([^)]+\)"#,
+        options: []
+    )
+    nonisolated private static let anchorTagRe = try! NSRegularExpression(
+        pattern: #"<a\s[^>]*>.*?</a>"#,
+        options: [.caseInsensitive]
+    )
 
     // Attachments
     // Attachment markers like "<Anhang: filename>".
@@ -1577,7 +1589,7 @@ public enum WhatsAppExportService {
         let ns = text as NSString
         let matches = urlRe.matches(in: text, options: [], range: NSRange(location: 0, length: ns.length))
         var urls: [String] = []
-        let rstripSet = CharacterSet(charactersIn: ").,;:!?]\"'")
+        let rstripSet = CharacterSet(charactersIn: ").,;:!?]}'\"")
         for m in matches {
             let raw = ns.substring(with: m.range(at: 1))
             let trimmed = raw.trimmingCharacters(in: rstripSet)
@@ -1599,7 +1611,7 @@ public enum WhatsAppExportService {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty { return false }
 
-        let rstripSet = CharacterSet(charactersIn: ").,;:!?]\"')")
+        let rstripSet = CharacterSet(charactersIn: ").,;:!?]}'\"")
         let tokens = trimmed.split(whereSeparator: { $0.isWhitespace })
         if tokens.isEmpty { return false }
 
@@ -3155,11 +3167,7 @@ nonisolated private static func stageThumbnailForExport(
     // Escapes text as HTML and (optionally) turns http(s) URLs into clickable <a> links.
     // Keeps original newlines by converting them to <br> (same behavior as htmlEscapeKeepNewlines).
     nonisolated private static func htmlEscapeAndLinkifyKeepNewlines(_ s: String, linkify: Bool) -> String {
-        if !linkify {
-            return htmlEscapeKeepNewlines(s)
-        }
-
-        let rstripSet = CharacterSet(charactersIn: ").,;:!?]\"'")
+        let rstripSet = CharacterSet(charactersIn: ").,;:!?]}'\"")
 
         func splitURLTrailingPunct(_ raw: String) -> (core: String, trailing: String) {
             var core = raw
@@ -3177,44 +3185,104 @@ nonisolated private static func stageThumbnailForExport(
 
         for line in lines {
             let ns = line as NSString
-            let matches = urlRe.matches(in: line, options: [], range: NSRange(location: 0, length: ns.length))
-            if matches.isEmpty {
+            let fullRange = NSRange(location: 0, length: ns.length)
+            let protectedRanges: [NSRange] = {
+                var ranges: [NSRange] = []
+                for re in [markdownLinkRe, anchorTagRe] {
+                    let matches = re.matches(in: line, options: [], range: fullRange)
+                    for m in matches where m.range.length > 0 {
+                        ranges.append(m.range)
+                    }
+                }
+                return ranges
+            }()
+
+            let httpMatches = urlRe.matches(in: line, options: [], range: fullRange)
+            let httpRanges: [NSRange] = httpMatches.compactMap { match in
+                let r = match.range(at: 1)
+                return (r.location == NSNotFound || r.length == 0) ? nil : r
+            }
+
+            func intersects(_ range: NSRange, _ ranges: [NSRange]) -> Bool {
+                for r in ranges where NSIntersectionRange(range, r).length > 0 {
+                    return true
+                }
+                return false
+            }
+
+            enum LinkKind {
+                case http
+                case bare
+            }
+
+            struct LinkMatch {
+                let range: NSRange
+                let kind: LinkKind
+            }
+
+            var linkMatches: [LinkMatch] = []
+            if linkify {
+                for r in httpRanges where !intersects(r, protectedRanges) {
+                    linkMatches.append(LinkMatch(range: r, kind: .http))
+                }
+            }
+
+            let bareMatches = bareDomainRe.matches(in: line, options: [], range: fullRange)
+            for match in bareMatches {
+                let r = match.range(at: 1)
+                if r.location == NSNotFound || r.length == 0 { continue }
+                if intersects(r, protectedRanges) || intersects(r, httpRanges) { continue }
+                linkMatches.append(LinkMatch(range: r, kind: .bare))
+            }
+
+            if linkMatches.isEmpty {
                 outLines.append(htmlEscape(line))
                 continue
+            }
+
+            linkMatches.sort { lhs, rhs in
+                if lhs.range.location == rhs.range.location {
+                    return lhs.range.length > rhs.range.length
+                }
+                return lhs.range.location < rhs.range.location
             }
 
             var out = ""
             var cursor = 0
 
-            for m in matches {
-                let r = m.range(at: 1)
-                if r.location == NSNotFound || r.length == 0 { continue }
+            for match in linkMatches {
+                if match.range.location < cursor { continue }
 
-                // Append text before the URL
-                if r.location > cursor {
-                    let before = ns.substring(with: NSRange(location: cursor, length: r.location - cursor))
+                if match.range.location > cursor {
+                    let before = ns.substring(with: NSRange(location: cursor, length: match.range.location - cursor))
                     out += htmlEscape(before)
                 }
 
-                let rawURL = ns.substring(with: r)
-                let (core, trailing) = splitURLTrailingPunct(rawURL)
+                let rawToken = ns.substring(with: match.range)
+                let (core, trailing) = splitURLTrailingPunct(rawToken)
 
                 if !core.isEmpty {
-                    let href = htmlEscape(core)
+                    let hrefValue: String
+                    switch match.kind {
+                    case .http:
+                        hrefValue = core
+                    case .bare:
+                        hrefValue = "https://" + core
+                    }
+                    let href = htmlEscape(hrefValue)
                     let shown = htmlEscape(core)
                     out += "<a href='\(href)' target='_blank' rel='noopener'>\(shown)</a>"
                 } else {
-                    out += htmlEscape(rawURL)
+                    out += htmlEscape(rawToken)
                 }
 
                 if !trailing.isEmpty {
                     out += htmlEscape(trailing)
                 }
 
-                cursor = r.location + r.length
+                cursor = match.range.location + match.range.length
             }
 
-            // Append remainder
             if cursor < ns.length {
                 let rest = ns.substring(from: cursor)
                 out += htmlEscape(rest)
@@ -3224,6 +3292,11 @@ nonisolated private static func stageThumbnailForExport(
         }
 
         return outLines.joined(separator: "<br>")
+    }
+
+    // Internal testing hook for deterministic linkify checks.
+    nonisolated static func _linkifyHTMLForTesting(_ s: String, linkifyHTTP: Bool) -> String {
+        htmlEscapeAndLinkifyKeepNewlines(s, linkify: linkifyHTTP)
     }
 
     // ---------------------------

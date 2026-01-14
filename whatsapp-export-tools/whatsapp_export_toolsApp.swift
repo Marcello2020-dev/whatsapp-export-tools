@@ -12,7 +12,12 @@ struct whatsapp_export_toolsApp: App {
     var body: some Scene {
         WindowGroup("WhatsApp Export Tools") {
             Group {
-                if WETReplaceSelectionCheck.isEnabled {
+                if WETBareDomainLinkifyCheck.isEnabled {
+                    Text("Running WET bare-domain linkify check…")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .padding()
+                } else if WETReplaceSelectionCheck.isEnabled {
                     Text("Running WET replace selection check…")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
@@ -24,6 +29,7 @@ struct whatsapp_export_toolsApp: App {
                 }
             }
             .onAppear {
+                WETBareDomainLinkifyCheck.runIfNeeded()
                 WETReplaceSelectionCheck.runIfNeeded()
                 AIGlowSnapshotRunner.runIfNeeded()
             }

@@ -250,3 +250,89 @@ struct WETReplaceSelectionCheck {
         }
     }
 }
+
+@MainActor
+struct WETBareDomainLinkifyCheck {
+    static let isEnabled: Bool = ProcessInfo.processInfo.environment["WET_LINKIFY_CHECK"] == "1"
+    private static var didRun = false
+
+    static func runIfNeeded() {
+        guard isEnabled, !didRun else { return }
+        didRun = true
+        run()
+    }
+
+    private struct Case {
+        let name: String
+        let input: String
+        let expected: String
+        let linkifyHTTP: Bool
+    }
+
+    private static func run() {
+        let cases: [Case] = [
+            Case(
+                name: "bare domain",
+                input: "www.kama.info",
+                expected: "<a href='https://www.kama.info' target='_blank' rel='noopener'>www.kama.info</a>",
+                linkifyHTTP: true
+            ),
+            Case(
+                name: "bare domain trailing punctuation",
+                input: "kama.info.",
+                expected: "<a href='https://kama.info' target='_blank' rel='noopener'>kama.info</a>.",
+                linkifyHTTP: true
+            ),
+            Case(
+                name: "bare domain in parentheses",
+                input: "(www.kama.info)",
+                expected: "(<a href='https://www.kama.info' target='_blank' rel='noopener'>www.kama.info</a>)",
+                linkifyHTTP: true
+            ),
+            Case(
+                name: "email is not a bare domain",
+                input: "kontakt@kama.info",
+                expected: "kontakt@kama.info",
+                linkifyHTTP: true
+            ),
+            Case(
+                name: "already schemed URL",
+                input: "https://www.kama.info",
+                expected: "<a href='https://www.kama.info' target='_blank' rel='noopener'>https://www.kama.info</a>",
+                linkifyHTTP: true
+            ),
+            Case(
+                name: "already anchored markdown link",
+                input: "[www.kama.info](https://www.kama.info)",
+                expected: "[www.kama.info](https://www.kama.info)",
+                linkifyHTTP: true
+            ),
+            Case(
+                name: "bare domain with previews enabled",
+                input: "www.kama.info",
+                expected: "<a href='https://www.kama.info' target='_blank' rel='noopener'>www.kama.info</a>",
+                linkifyHTTP: false
+            )
+        ]
+
+        var failures: [String] = []
+
+        for c in cases {
+            let output = WhatsAppExportService._linkifyHTMLForTesting(c.input, linkifyHTTP: c.linkifyHTTP)
+            if output != c.expected {
+                failures.append("[\(c.name)] expected: \(c.expected) | got: \(output)")
+            }
+        }
+
+        if failures.isEmpty {
+            print("WET_LINKIFY_CHECK: PASS")
+        } else {
+            print("WET_LINKIFY_CHECK: FAIL")
+            for failure in failures {
+                print(" - \(failure)")
+            }
+        }
+
+        NSApp.terminate(nil)
+    }
+}
