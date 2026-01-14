@@ -75,6 +75,7 @@ This entry reflects the **v0.2 specification baseline**. Code changes implementi
   - `_local/aiglow-snapshots/AG-040` (PII-safe harness)
   - `_local/aiglow-snapshots/AG-053` (dropdown interaction)
   - Unit/test harness logs for deterministic normalization/clamping (see `AIGlowKit/Tests`)
+- AG-061 validation matrix run: unable to execute on this machine because `swift run` cannot write its Xcode cache files and module cache under `/var/folders/*` (Operation not permitted), so no `_local/ai-glow-screenshots/AG-061` outputs were produced.
 
 ### Added
 - **Host-driven, data-only styling API:** `AIGlowStyle` as the **single** host options object (palette, components, fill mode, geometry/intensity, timing, tuning).
