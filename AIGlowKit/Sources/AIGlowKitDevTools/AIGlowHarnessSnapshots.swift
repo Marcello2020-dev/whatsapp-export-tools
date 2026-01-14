@@ -37,6 +37,10 @@ public enum AIGlowHarnessScraper {
             .fixtures
             .sorted { $0.id < $1.id }
 
+        for scenario in scenarios {
+            prepareScenarioDirectory(outputDir: outputDir, scenario: scenario)
+        }
+
         for fixture in fixtures {
             for scenario in scenarios {
                 renderSnapshot(
@@ -58,7 +62,7 @@ public enum AIGlowHarnessScraper {
         }
         let cwd = FileManager.default.currentDirectoryPath
         return URL(fileURLWithPath: cwd, isDirectory: true)
-            .appendingPathComponent("Codex Reports/screenshots", isDirectory: true)
+            .appendingPathComponent("_local/aiglow-snapshots/default", isDirectory: true)
     }
 
     @available(macOS 13.0, *)
@@ -69,20 +73,51 @@ public enum AIGlowHarnessScraper {
     ) {
         let view = AIGlowHarnessSnapshotView(fixture: fixture, scenario: scenario)
             .environment(\.colorScheme, scenario.scheme)
+            .transaction { transaction in
+                transaction.animation = nil
+                transaction.disablesAnimations = true
+            }
+        let scale = NSScreen.main?.backingScaleFactor ?? 2
+        let size = CGSize(width: 1100, height: 720)
+        let hostingView = NSHostingView(rootView: view)
+        hostingView.frame = NSRect(origin: .zero, size: size)
+        hostingView.wantsLayer = true
+        hostingView.layer?.contentsScale = scale
+        hostingView.layoutSubtreeIfNeeded()
 
-        let renderer = ImageRenderer(content: view)
-        renderer.scale = NSScreen.main?.backingScaleFactor ?? 2
+        guard let rep = hostingView.bitmapImageRepForCachingDisplay(in: hostingView.bounds) else { return }
+        rep.size = size
+        hostingView.cacheDisplay(in: hostingView.bounds, to: rep)
 
-        guard let nsImage = renderer.nsImage,
-              let tiff = nsImage.tiffRepresentation,
-              let rep = NSBitmapImageRep(data: tiff),
-              let png = rep.representation(using: NSBitmapImageRep.FileType.png, properties: [:]) else {
+        guard let png = rep.representation(using: NSBitmapImageRep.FileType.png, properties: [:]) else {
             return
         }
 
-        let filename = "aiglow-harness-\(fixture.id)-\(scenario.name).png"
-        let url = outputDir.appendingPathComponent(filename)
+        let filename = "aiglow-harness-\(fixture.id).png"
+        let scenarioDir = outputDir.appendingPathComponent(scenario.name, isDirectory: true)
+        let url = scenarioDir.appendingPathComponent(filename)
         try? png.write(to: url)
+    }
+
+    private static func prepareScenarioDirectory(
+        outputDir: URL,
+        scenario: AIGlowHarnessSnapshotScenario
+    ) {
+        let dir = outputDir.appendingPathComponent(scenario.name, isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        } catch {
+            return
+        }
+
+        guard let existing = try? FileManager.default.contentsOfDirectory(
+            at: dir,
+            includingPropertiesForKeys: nil
+        ) else { return }
+
+        for file in existing where file.lastPathComponent.hasPrefix("aiglow-harness-") {
+            try? FileManager.default.removeItem(at: file)
+        }
     }
 }
 
@@ -121,10 +156,33 @@ public struct AIGlowHarnessSnapshotScenario: Hashable, Sendable {
     public let name: String
     public let scheme: ColorScheme
 
-    public static let defaultScenarios: [AIGlowHarnessSnapshotScenario] = [
-        AIGlowHarnessSnapshotScenario(name: "light", scheme: .light),
-        AIGlowHarnessSnapshotScenario(name: "dark", scheme: .dark)
-    ]
+    public init(name: String, scheme: ColorScheme) {
+        self.name = name
+        self.scheme = scheme
+    }
+
+    public static var defaultScenarios: [AIGlowHarnessSnapshotScenario] {
+        let suffix = accessibilitySuffix()
+        return [
+            AIGlowHarnessSnapshotScenario(name: "light\(suffix)", scheme: .light),
+            AIGlowHarnessSnapshotScenario(name: "dark\(suffix)", scheme: .dark)
+        ]
+    }
+
+    private static func accessibilitySuffix() -> String {
+        var parts: [String] = []
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            parts.append("reduce-motion")
+        }
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency {
+            parts.append("reduce-transparency")
+        }
+        if NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast {
+            parts.append("high-contrast")
+        }
+        guard !parts.isEmpty else { return "" }
+        return "-" + parts.joined(separator: "-")
+    }
 }
 
 struct AIGlowHarnessSnapshotView: View {
@@ -140,7 +198,7 @@ struct AIGlowHarnessSnapshotView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            AIGlowHarnessFixturePreview(fixture: fixture)
+            AIGlowHarnessFixturePreview(fixture: fixture, isSnapshot: true)
                 .padding(16)
                 .background(
                     RoundedRectangle(cornerRadius: 12, style: .continuous)

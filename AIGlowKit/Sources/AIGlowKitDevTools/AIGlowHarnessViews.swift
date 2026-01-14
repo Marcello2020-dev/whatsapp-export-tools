@@ -44,7 +44,7 @@ struct AIGlowHarnessFixtureDetailView: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
-            AIGlowHarnessFixturePreview(fixture: fixture)
+            AIGlowHarnessFixturePreview(fixture: fixture, isSnapshot: false)
                 .frame(
                     maxWidth: .infinity,
                     maxHeight: .infinity,
@@ -64,31 +64,37 @@ struct AIGlowHarnessFixtureDetailView: View {
 
 struct AIGlowHarnessFixturePreview: View {
     let fixture: AIGlowHarnessFixture
+    let isSnapshot: Bool
     @Environment(\.colorScheme) private var colorScheme
 
     private var style: AIGlowStyle {
-        AIGlowHarnessStyleBuilder.style(for: fixture, colorScheme: colorScheme)
+        AIGlowHarnessStyleBuilder.style(
+            for: fixture,
+            colorScheme: colorScheme,
+            isSnapshot: isSnapshot
+        )
     }
 
     var body: some View {
+        let running = isSnapshot ? false : fixture.isRunning
         switch fixture.kind {
         case .form:
             AIGlowHarnessFormView(
                 style: style,
                 active: fixture.active,
-                isRunning: fixture.isRunning
+                isRunning: running
             )
         case .focusedField:
             AIGlowHarnessFocusedFieldView(
                 style: style,
                 active: fixture.active,
-                isRunning: fixture.isRunning
+                isRunning: running
             )
         case .listTable:
             AIGlowHarnessListTableView(
                 style: style,
                 active: fixture.active,
-                isRunning: fixture.isRunning
+                isRunning: running
             )
         }
     }
@@ -235,15 +241,38 @@ struct AIGlowHarnessRow: Identifiable, Hashable {
 }
 
 enum AIGlowHarnessStyleBuilder {
-    static func style(for fixture: AIGlowHarnessFixture, colorScheme: ColorScheme) -> AIGlowStyle {
+    static func style(
+        for fixture: AIGlowHarnessFixture,
+        colorScheme: ColorScheme,
+        isSnapshot: Bool
+    ) -> AIGlowStyle {
         let palette = fixture.palette.normalized()
         let ringColors = palette.ringColors(for: colorScheme)
         let auraColors = palette.auraColors(for: colorScheme)
-        return AIGlowStyle.default.overriding(
+        let base = AIGlowStyle.default.overriding(
             ringColors: ringColors,
             auraColors: auraColors,
             components: fixture.components,
             fillMode: fixture.fillMode
+        )
+        guard isSnapshot else { return base }
+        return base.overriding(
+            rotationDuration: 1.0e9,
+            rotationDurationRunning: 1.0e9,
+            rotationDurationReducedMotion: 1.0e9,
+            phaseOffset: 0,
+            runningRingBoostCore: 0,
+            runningRingBoostSoft: 0,
+            runningRingBoostBloom: 0,
+            runningRingBoostShimmer: 0,
+            runningInnerAuraBoostDark: 0,
+            runningInnerAuraBoostLight: 0,
+            runningOuterAuraBoostDark: 0,
+            runningOuterAuraBoostLight: 0,
+            runningOuterAuraSecondaryBoostDark: 0,
+            runningOuterAuraSecondaryBoostLight: 0,
+            runningInnerAuraBlurScale: 1,
+            runningOuterAuraBlurScale: 1
         )
     }
 }
@@ -253,7 +282,23 @@ private extension AIGlowStyle {
         ringColors: [Color]? = nil,
         auraColors: [Color]? = nil,
         components: AIGlowComponents? = nil,
-        fillMode: AIGlowFillMode? = nil
+        fillMode: AIGlowFillMode? = nil,
+        rotationDuration: Double? = nil,
+        rotationDurationRunning: Double? = nil,
+        rotationDurationReducedMotion: Double? = nil,
+        phaseOffset: Double? = nil,
+        runningRingBoostCore: Double? = nil,
+        runningRingBoostSoft: Double? = nil,
+        runningRingBoostBloom: Double? = nil,
+        runningRingBoostShimmer: Double? = nil,
+        runningInnerAuraBoostDark: Double? = nil,
+        runningInnerAuraBoostLight: Double? = nil,
+        runningOuterAuraBoostDark: Double? = nil,
+        runningOuterAuraBoostLight: Double? = nil,
+        runningOuterAuraSecondaryBoostDark: Double? = nil,
+        runningOuterAuraSecondaryBoostLight: Double? = nil,
+        runningInnerAuraBlurScale: CGFloat? = nil,
+        runningOuterAuraBlurScale: CGFloat? = nil
     ) -> AIGlowStyle {
         AIGlowStyle(
             ringColors: ringColors ?? self.ringColors,
@@ -301,12 +346,12 @@ private extension AIGlowStyle {
             outerAuraSecondaryPadding: outerAuraSecondaryPadding,
             ringOuterPadding: ringOuterPadding,
             ringBloomPadding: ringBloomPadding,
-            rotationDuration: rotationDuration,
-            rotationDurationRunning: rotationDurationRunning,
-            rotationDurationReducedMotion: rotationDurationReducedMotion,
+            rotationDuration: rotationDuration ?? self.rotationDuration,
+            rotationDurationRunning: rotationDurationRunning ?? self.rotationDurationRunning,
+            rotationDurationReducedMotion: rotationDurationReducedMotion ?? self.rotationDurationReducedMotion,
             globalSpeedScale: globalSpeedScale,
             speedScale: speedScale,
-            phaseOffset: phaseOffset,
+            phaseOffset: phaseOffset ?? self.phaseOffset,
             ringBlendModeDark: ringBlendModeDark,
             ringBlendModeLight: ringBlendModeLight,
             auraBlendModeDark: auraBlendModeDark,
@@ -315,18 +360,18 @@ private extension AIGlowStyle {
             saturationLight: saturationLight,
             contrastDark: contrastDark,
             contrastLight: contrastLight,
-            runningRingBoostCore: runningRingBoostCore,
-            runningRingBoostSoft: runningRingBoostSoft,
-            runningRingBoostBloom: runningRingBoostBloom,
-            runningRingBoostShimmer: runningRingBoostShimmer,
-            runningInnerAuraBoostDark: runningInnerAuraBoostDark,
-            runningInnerAuraBoostLight: runningInnerAuraBoostLight,
-            runningOuterAuraBoostDark: runningOuterAuraBoostDark,
-            runningOuterAuraBoostLight: runningOuterAuraBoostLight,
-            runningOuterAuraSecondaryBoostDark: runningOuterAuraSecondaryBoostDark,
-            runningOuterAuraSecondaryBoostLight: runningOuterAuraSecondaryBoostLight,
-            runningInnerAuraBlurScale: runningInnerAuraBlurScale,
-            runningOuterAuraBlurScale: runningOuterAuraBlurScale,
+            runningRingBoostCore: runningRingBoostCore ?? self.runningRingBoostCore,
+            runningRingBoostSoft: runningRingBoostSoft ?? self.runningRingBoostSoft,
+            runningRingBoostBloom: runningRingBoostBloom ?? self.runningRingBoostBloom,
+            runningRingBoostShimmer: runningRingBoostShimmer ?? self.runningRingBoostShimmer,
+            runningInnerAuraBoostDark: runningInnerAuraBoostDark ?? self.runningInnerAuraBoostDark,
+            runningInnerAuraBoostLight: runningInnerAuraBoostLight ?? self.runningInnerAuraBoostLight,
+            runningOuterAuraBoostDark: runningOuterAuraBoostDark ?? self.runningOuterAuraBoostDark,
+            runningOuterAuraBoostLight: runningOuterAuraBoostLight ?? self.runningOuterAuraBoostLight,
+            runningOuterAuraSecondaryBoostDark: runningOuterAuraSecondaryBoostDark ?? self.runningOuterAuraSecondaryBoostDark,
+            runningOuterAuraSecondaryBoostLight: runningOuterAuraSecondaryBoostLight ?? self.runningOuterAuraSecondaryBoostLight,
+            runningInnerAuraBlurScale: runningInnerAuraBlurScale ?? self.runningInnerAuraBlurScale,
+            runningOuterAuraBlurScale: runningOuterAuraBlurScale ?? self.runningOuterAuraBlurScale,
             outerPadding: outerPadding
         )
     }

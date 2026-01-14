@@ -52,6 +52,7 @@ public enum AIGlowHarnessStrings {
     public static let componentsGroup = "Components"
     public static let focusGroup = "Focus"
     public static let listGroup = "List/Table"
+    public static let stateGroup = "State"
     public static let fixtureDefaultPalette = "Default Palette"
     public static let fixtureCustomPalette = "Custom Palette"
     public static let fixtureFillOutline = "Fill: Outline Only"
@@ -61,6 +62,7 @@ public enum AIGlowHarnessStrings {
     public static let fixtureShimmerOnly = "Components: Shimmer Only"
     public static let fixtureFocusedField = "Focused Field Example"
     public static let fixtureListTable = "List/Table Example"
+    public static let fixtureInactive = "Inactive (active=false)"
     public static let detailDefaultPalette = "Apple-fidelity baseline palette."
     public static let detailCustomPalette = "Synthetic custom palette with light/dark variants."
     public static let detailFillOutline = "Outline only."
@@ -70,6 +72,7 @@ public enum AIGlowHarnessStrings {
     public static let detailShimmerOnly = "Shimmer only."
     public static let detailFocusedField = "Focused field with glow."
     public static let detailListTable = "Dense list and table rendering."
+    public static let detailInactive = "Glow disabled (active=false)."
     public static let tableFallback = "Table view requires macOS 13 or newer."
     public static let listItems = [
         "Item Alpha",
@@ -107,6 +110,7 @@ public enum AIGlowHarnessStrings {
             componentsGroup,
             focusGroup,
             listGroup,
+            stateGroup,
             fixtureDefaultPalette,
             fixtureCustomPalette,
             fixtureFillOutline,
@@ -116,6 +120,7 @@ public enum AIGlowHarnessStrings {
             fixtureShimmerOnly,
             fixtureFocusedField,
             fixtureListTable,
+            fixtureInactive,
             detailDefaultPalette,
             detailCustomPalette,
             detailFillOutline,
@@ -125,6 +130,7 @@ public enum AIGlowHarnessStrings {
             detailShimmerOnly,
             detailFocusedField,
             detailListTable,
+            detailInactive,
             tableFallback
         ]
         + listItems
@@ -259,6 +265,23 @@ public enum AIGlowHarnessFixtures {
                     components: [.shimmer],
                     active: true,
                     isRunning: true
+                )
+            ]
+        ),
+        AIGlowHarnessFixtureGroup(
+            id: "state",
+            name: AIGlowHarnessStrings.stateGroup,
+            fixtures: [
+                AIGlowHarnessFixture(
+                    id: "inactive",
+                    name: AIGlowHarnessStrings.fixtureInactive,
+                    detail: AIGlowHarnessStrings.detailInactive,
+                    kind: .form,
+                    palette: .default,
+                    fillMode: .innerGlow,
+                    components: .all,
+                    active: false,
+                    isRunning: false
                 )
             ]
         ),
