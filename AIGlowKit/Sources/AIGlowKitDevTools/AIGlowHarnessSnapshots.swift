@@ -4,7 +4,16 @@ import AIGlowKit
 
 @MainActor
 public enum AIGlowHarnessSnapshotRunner {
-    public static let isEnabled: Bool = ProcessInfo.processInfo.environment["AIGLOW_HARNESS_SNAPSHOT"] == "1"
+    public static let isEnabled: Bool = AIGlowHarnessScraper.isEnabled
+
+    public static func runIfNeeded() {
+        AIGlowHarnessScraper.runIfNeeded()
+    }
+}
+
+@MainActor
+public enum AIGlowHarnessScraper {
+    public static let isEnabled: Bool = AIGlowHarnessScraperConfiguration.shouldRun
 
     public static func runIfNeeded() {
         guard isEnabled else { return }
@@ -21,8 +30,12 @@ public enum AIGlowHarnessSnapshotRunner {
             return
         }
 
-        let scenarios = AIGlowHarnessSnapshotScenario.defaultScenarios
-        let fixtures = AIGlowHarnessFixtures.snapshotFixtures
+        let scenarios = AIGlowHarnessScraperConfiguration
+            .scenarios
+            .sorted { $0.name < $1.name }
+        let fixtures = AIGlowHarnessScraperConfiguration
+            .fixtures
+            .sorted { $0.id < $1.id }
 
         for fixture in fixtures {
             for scenario in scenarios {
@@ -40,8 +53,8 @@ public enum AIGlowHarnessSnapshotRunner {
     }
 
     private static func snapshotOutputDirectory() -> URL {
-        if let override = ProcessInfo.processInfo.environment["AIGLOW_HARNESS_SNAPSHOT_DIR"], !override.isEmpty {
-            return URL(fileURLWithPath: override, isDirectory: true)
+        if let override = AIGlowHarnessScraperConfiguration.outputDirectoryOverride {
+            return override
         }
         let cwd = FileManager.default.currentDirectoryPath
         return URL(fileURLWithPath: cwd, isDirectory: true)
@@ -70,6 +83,37 @@ public enum AIGlowHarnessSnapshotRunner {
         let filename = "aiglow-harness-\(fixture.id)-\(scenario.name).png"
         let url = outputDir.appendingPathComponent(filename)
         try? png.write(to: url)
+    }
+}
+
+private enum AIGlowHarnessScraperConfiguration {
+    static let shouldRun: Bool = {
+        let env = ProcessInfo.processInfo.environment["AIGLOW_HARNESS_SNAPSHOT"] == "1"
+        let args = CommandLine.arguments
+        let arg = args.contains("--snapshot") || args.contains("--scrape")
+        return env || arg
+    }()
+
+    static let outputDirectoryOverride: URL? = {
+        if let env = ProcessInfo.processInfo.environment["AIGLOW_HARNESS_SNAPSHOT_DIR"], !env.isEmpty {
+            return URL(fileURLWithPath: env, isDirectory: true)
+        }
+        if let path = argumentValue(after: "--output") {
+            return URL(fileURLWithPath: path, isDirectory: true)
+        }
+        return nil
+    }()
+
+    static let fixtures: [AIGlowHarnessFixture] = AIGlowHarnessFixtures.snapshotFixtures
+    static let scenarios: [AIGlowHarnessSnapshotScenario] = AIGlowHarnessSnapshotScenario.defaultScenarios
+
+    private static func argumentValue(after flag: String) -> String? {
+        let args = CommandLine.arguments
+        guard let index = args.firstIndex(of: flag), args.count > index + 1 else {
+            return nil
+        }
+        let value = args[index + 1]
+        return value.isEmpty ? nil : value
     }
 }
 
