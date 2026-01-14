@@ -76,6 +76,7 @@ This entry reflects the **v0.2 specification baseline**. Code changes implementi
   - `_local/aiglow-snapshots/AG-053` (dropdown interaction)
   - Unit/test harness logs for deterministic normalization/clamping (see `AIGlowKit/Tests`)
 - AG-061 validation matrix run: unable to execute on this machine because `swift run` cannot write its Xcode cache files and module cache under `/var/folders/*` (Operation not permitted), so no `_local/ai-glow-screenshots/AG-061` outputs were produced.
+- Legacy drift gate policy: any change to `AIGlowStyle.default` now requires this changelog entry plus deterministic screenshot/evidence captured via the AI Glow harness (`docs/specs/AIGlow/POLICY_legacy-drift-gate_v0.2.md`).
 
 ### Added
 - **Host-driven, data-only styling API:** `AIGlowStyle` as the **single** host options object (palette, components, fill mode, geometry/intensity, timing, tuning).
@@ -90,6 +91,7 @@ This entry reflects the **v0.2 specification baseline**. Code changes implementi
 ### Changed
 - **Module boundary contract (hard):** Host owns meaning/state; AIGlowKit renders only. No inference from strings/focus/content inside AIGlowKit.
 - **Architecture & extraction readiness:** v0.2 requires strict “no WET dependencies” discipline and an extraction roadmap (monorepo → local Swift Package → optional dedicated repo).
+- **Legacy drift gate policy introduced:** `AIGlowStyle.default` retains the v0.1 baseline unless this policy’s requirements (changelog entry + evidence) are satisfied (`docs/specs/AIGlow/POLICY_legacy-drift-gate_v0.2.md`).
 
 ### Fixed
 - (Reserved for implementation)
