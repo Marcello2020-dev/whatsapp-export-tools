@@ -118,8 +118,6 @@ private struct SnapshotScenario {
 
 struct AIGlowSnapshotView: View {
     let isRunning: Bool
-    @State private var sampleName: String = "Sample Contact"
-    @State private var samplePhoneName: String = "Sample Contact"
 
     private var logGlowStyle: AIGlowStyle {
         AIGlowStyle.wetDefault.withSpeedScale(0.7)
@@ -138,26 +136,55 @@ struct AIGlowSnapshotView: View {
     }
 
     var body: some View {
+        let suggestedName = "Sample Contact"
+        let userName = "Custom Name"
         VStack(alignment: .leading, spacing: 16) {
             Text("AI Glow Snapshot")
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundStyle(.secondary)
 
-            HStack(spacing: 12) {
-                Text("Chat partner")
-                    .frame(width: 120, alignment: .leading)
-                TextField("", text: $sampleName)
-                    .textFieldStyle(.roundedBorder)
-                    .aiGlow(active: true, isRunning: isRunning, cornerRadius: 6)
-            }
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 12) {
+                    Text("Chat partner (suggested)")
+                        .frame(width: 180, alignment: .leading)
+                    TextField("", text: .constant(suggestedName))
+                        .textFieldStyle(.roundedBorder)
+                        .aiGlow(active: true, isRunning: isRunning, cornerRadius: 6)
+                }
 
-            HStack(spacing: 12) {
-                Text("+00 000 000000")
-                    .font(.system(.body, design: .monospaced))
-                    .frame(width: 120, alignment: .leading)
-                TextField("", text: $samplePhoneName)
-                    .textFieldStyle(.roundedBorder)
-                    .aiGlow(active: true, isRunning: isRunning, cornerRadius: 6)
+                HStack(spacing: 12) {
+                    Text("Chat partner (user edit)")
+                        .frame(width: 180, alignment: .leading)
+                    TextField("", text: .constant(userName))
+                        .textFieldStyle(.roundedBorder)
+                        .aiGlow(active: false, isRunning: isRunning, cornerRadius: 6)
+                }
+
+                HStack(spacing: 12) {
+                    Text("Chat partner (restored)")
+                        .frame(width: 180, alignment: .leading)
+                    TextField("", text: .constant(suggestedName))
+                        .textFieldStyle(.roundedBorder)
+                        .aiGlow(active: true, isRunning: isRunning, cornerRadius: 6)
+                }
+
+                HStack(spacing: 12) {
+                    Text("+00 000 000000 (suggested)")
+                        .font(.system(.body, design: .monospaced))
+                        .frame(width: 180, alignment: .leading)
+                    TextField("", text: .constant(suggestedName))
+                        .textFieldStyle(.roundedBorder)
+                        .aiGlow(active: true, isRunning: isRunning, cornerRadius: 6)
+                }
+
+                HStack(spacing: 12) {
+                    Text("+00 000 000000 (user edit)")
+                        .font(.system(.body, design: .monospaced))
+                        .frame(width: 180, alignment: .leading)
+                    TextField("", text: .constant(userName))
+                        .textFieldStyle(.roundedBorder)
+                        .aiGlow(active: false, isRunning: isRunning, cornerRadius: 6)
+                }
             }
 
             VStack(alignment: .leading, spacing: 8) {
