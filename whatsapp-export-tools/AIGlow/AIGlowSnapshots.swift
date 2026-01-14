@@ -4,7 +4,10 @@ import AppKit
 /// Generates AI-glow snapshot images when the environment flag is enabled.
 @MainActor
 struct AIGlowSnapshotRunner {
-    static let isEnabled: Bool = ProcessInfo.processInfo.environment["AI_GLOW_SNAPSHOT"] == "1"
+    static let isEnabled: Bool = {
+        if CommandLine.arguments.contains("--ai-glow-snapshot") { return true }
+        return ProcessInfo.processInfo.environment["AI_GLOW_SNAPSHOT"] == "1"
+    }()
     private static var didRun = false
 
     static func runIfNeeded() {
@@ -54,12 +57,24 @@ struct AIGlowSnapshotRunner {
     }
 
     private static func snapshotOutputDirectory() -> URL {
+        if let path = argumentValue(after: "--ai-glow-snapshot-dir") {
+            return URL(fileURLWithPath: path, isDirectory: true)
+        }
         if let override = ProcessInfo.processInfo.environment["AI_GLOW_SNAPSHOT_DIR"], !override.isEmpty {
             return URL(fileURLWithPath: override, isDirectory: true)
         }
         let cwd = FileManager.default.currentDirectoryPath
         return URL(fileURLWithPath: cwd, isDirectory: true)
-            .appendingPathComponent("Codex Reports/screenshots", isDirectory: true)
+            .appendingPathComponent("_local/ai-glow-screenshots/default", isDirectory: true)
+    }
+
+    private static func argumentValue(after flag: String) -> String? {
+        let args = CommandLine.arguments
+        guard let index = args.firstIndex(of: flag), args.count > index + 1 else {
+            return nil
+        }
+        let value = args[index + 1]
+        return value.isEmpty ? nil : value
     }
 
     @available(macOS 13.0, *)
