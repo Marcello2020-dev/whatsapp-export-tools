@@ -1587,21 +1587,73 @@ public enum WhatsAppExportService {
     // Extract distinct URLs from a text blob.
     nonisolated private static func extractURLs(_ text: String) -> [String] {
         let ns = text as NSString
-        let matches = urlRe.matches(in: text, options: [], range: NSRange(location: 0, length: ns.length))
-        var urls: [String] = []
+        let fullRange = NSRange(location: 0, length: ns.length)
         let rstripSet = CharacterSet(charactersIn: ").,;:!?]}'\"")
-        for m in matches {
-            let raw = ns.substring(with: m.range(at: 1))
+
+        let protectedRanges: [NSRange] = {
+            var ranges: [NSRange] = []
+            for re in [markdownLinkRe, anchorTagRe] {
+                let matches = re.matches(in: text, options: [], range: fullRange)
+                for m in matches where m.range.length > 0 {
+                    ranges.append(m.range)
+                }
+            }
+            return ranges
+        }()
+
+        func intersects(_ range: NSRange, _ ranges: [NSRange]) -> Bool {
+            for r in ranges where NSIntersectionRange(range, r).length > 0 {
+                return true
+            }
+            return false
+        }
+
+        struct PreviewMatch {
+            let range: NSRange
+            let target: String
+        }
+
+        let httpMatches = urlRe.matches(in: text, options: [], range: fullRange)
+        let httpRanges: [NSRange] = httpMatches.compactMap { match in
+            let r = match.range(at: 1)
+            return (r.location == NSNotFound || r.length == 0) ? nil : r
+        }
+
+        var candidates: [PreviewMatch] = []
+        for r in httpRanges where !intersects(r, protectedRanges) {
+            let raw = ns.substring(with: r)
             let trimmed = raw.trimmingCharacters(in: rstripSet)
-            urls.append(trimmed)
+            if !trimmed.isEmpty {
+                candidates.append(PreviewMatch(range: r, target: trimmed))
+            }
         }
-        // unique stable
-        var seen = Set<String>()
+
+        let bareMatches = bareDomainRe.matches(in: text, options: [], range: fullRange)
+        for m in bareMatches {
+            let r = m.range(at: 1)
+            if r.location == NSNotFound || r.length == 0 { continue }
+            if intersects(r, protectedRanges) || intersects(r, httpRanges) { continue }
+            let raw = ns.substring(with: r)
+            let trimmed = raw.trimmingCharacters(in: rstripSet)
+            if !trimmed.isEmpty {
+                let target = "https://" + trimmed
+                candidates.append(PreviewMatch(range: r, target: target))
+            }
+        }
+
+        candidates.sort { lhs, rhs in
+            if lhs.range.location == rhs.range.location {
+                return lhs.range.length > rhs.range.length
+            }
+            return lhs.range.location < rhs.range.location
+        }
+
         var out: [String] = []
-        for u in urls where !seen.contains(u) {
-            seen.insert(u)
-            out.append(u)
+        var seen = Set<String>()
+        for candidate in candidates where seen.insert(candidate.target).inserted {
+            out.append(candidate.target)
         }
+
         return out
     }
 
@@ -1615,11 +1667,25 @@ public enum WhatsAppExportService {
         let tokens = trimmed.split(whereSeparator: { $0.isWhitespace })
         if tokens.isEmpty { return false }
 
+        func isBareDomainToken(_ token: String) -> Bool {
+            let ns = token as NSString
+            let range = NSRange(location: 0, length: ns.length)
+            guard let match = bareDomainRe.firstMatch(in: token, options: [], range: range) else {
+                return false
+            }
+            let r = match.range(at: 1)
+            return r.location == 0 && r.length == ns.length
+        }
+
         for t0 in tokens {
             let t1 = String(t0).trimmingCharacters(in: rstripSet)
             let low = t1.lowercased()
-            if !(low.hasPrefix("http://") || low.hasPrefix("https://")) { return false }
-            if URL(string: t1) == nil { return false }
+            if low.hasPrefix("http://") || low.hasPrefix("https://") {
+                if URL(string: t1) == nil { return false }
+                continue
+            }
+            if isBareDomainToken(t1) { continue }
+            return false
         }
         return true
     }
@@ -3297,6 +3363,11 @@ nonisolated private static func stageThumbnailForExport(
     // Internal testing hook for deterministic linkify checks.
     nonisolated static func _linkifyHTMLForTesting(_ s: String, linkifyHTTP: Bool) -> String {
         htmlEscapeAndLinkifyKeepNewlines(s, linkify: linkifyHTTP)
+    }
+
+    nonisolated static func _previewTargetsForTesting(_ s: String) -> [String] {
+        let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        return extractURLs(trimmed)
     }
 
     // ---------------------------

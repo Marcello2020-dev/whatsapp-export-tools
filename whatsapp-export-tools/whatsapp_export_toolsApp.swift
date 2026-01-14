@@ -9,10 +9,24 @@ import SwiftUI
 
 @main
 struct whatsapp_export_toolsApp: App {
+    init() {
+        Task { @MainActor in
+            WETBareDomainPreviewCheck.runIfNeeded()
+            WETBareDomainLinkifyCheck.runIfNeeded()
+            WETReplaceSelectionCheck.runIfNeeded()
+            AIGlowSnapshotRunner.runIfNeeded()
+        }
+    }
+
     var body: some Scene {
         WindowGroup("WhatsApp Export Tools") {
             Group {
-                if WETBareDomainLinkifyCheck.isEnabled {
+                if WETBareDomainPreviewCheck.isEnabled {
+                    Text("Running WET bare-domain preview check…")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .padding()
+                } else if WETBareDomainLinkifyCheck.isEnabled {
                     Text("Running WET bare-domain linkify check…")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
@@ -29,6 +43,7 @@ struct whatsapp_export_toolsApp: App {
                 }
             }
             .onAppear {
+                WETBareDomainPreviewCheck.runIfNeeded()
                 WETBareDomainLinkifyCheck.runIfNeeded()
                 WETReplaceSelectionCheck.runIfNeeded()
                 AIGlowSnapshotRunner.runIfNeeded()

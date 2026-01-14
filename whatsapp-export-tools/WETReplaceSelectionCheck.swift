@@ -336,3 +336,81 @@ struct WETBareDomainLinkifyCheck {
         NSApp.terminate(nil)
     }
 }
+
+@MainActor
+struct WETBareDomainPreviewCheck {
+    static let isEnabled: Bool = ProcessInfo.processInfo.environment["WET_LINK_PREVIEW_CHECK"] == "1"
+    private static var didRun = false
+
+    static func runIfNeeded() {
+        guard isEnabled, !didRun else { return }
+        didRun = true
+        run()
+    }
+
+    private struct Case {
+        let name: String
+        let input: String
+        let expected: [String]
+    }
+
+    private static func run() {
+        let cases: [Case] = [
+            Case(
+                name: "bare domain",
+                input: "www.kama.info",
+                expected: ["https://www.kama.info"]
+            ),
+            Case(
+                name: "bare domain trailing punctuation",
+                input: "www.kama.info.",
+                expected: ["https://www.kama.info"]
+            ),
+            Case(
+                name: "bare domain in parentheses",
+                input: "(www.kama.info)",
+                expected: ["https://www.kama.info"]
+            ),
+            Case(
+                name: "email is not a preview",
+                input: "kontakt@kama.info",
+                expected: []
+            ),
+            Case(
+                name: "already schemed URL",
+                input: "https://www.kama.info",
+                expected: ["https://www.kama.info"]
+            ),
+            Case(
+                name: "markdown link should not preview",
+                input: "[www.kama.info](https://www.kama.info)",
+                expected: []
+            ),
+            Case(
+                name: "html anchor should not preview",
+                input: "<a href=\"https://www.kama.info\">www.kama.info</a>",
+                expected: []
+            )
+        ]
+
+        var failures: [String] = []
+
+        for c in cases {
+            let output = WhatsAppExportService._previewTargetsForTesting(c.input)
+            if output != c.expected {
+                failures.append("[\(c.name)] expected: \(c.expected) | got: \(output)")
+            }
+        }
+
+        if failures.isEmpty {
+            print("WET_LINK_PREVIEW_CHECK: PASS")
+        } else {
+            print("WET_LINK_PREVIEW_CHECK: FAIL")
+            for failure in failures {
+                print(" - \(failure)")
+            }
+        }
+
+        NSApp.terminate(nil)
+    }
+}
