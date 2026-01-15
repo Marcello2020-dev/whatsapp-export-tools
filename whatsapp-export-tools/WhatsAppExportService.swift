@@ -2114,6 +2114,10 @@ public enum WhatsAppExportService {
         return index
     }
 
+    nonisolated static func prewarmAttachmentIndex(for sourceDir: URL) {
+        _ = attachmentIndex(for: sourceDir)
+    }
+
     nonisolated private static func resolveAttachmentURL(fileName: String, sourceDir: URL) -> URL? {
         let fm = FileManager.default
 

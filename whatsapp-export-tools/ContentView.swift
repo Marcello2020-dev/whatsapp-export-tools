@@ -23,6 +23,7 @@ struct ContentView: View {
         let chatPartner: String
         let participantNameOverrides: [String: String]
         let selectedVariantsInOrder: [HTMLVariant]
+        let plan: RunPlan
         let wantsMD: Bool
         let wantsSidecar: Bool
         let wantsDeleteOriginals: Bool
@@ -37,6 +38,20 @@ struct ContentView: View {
         let primaryHTML: URL?
         let sidecarImmutabilityWarnings: [String]
         let outputSuffixArtifacts: [String]
+    }
+
+    private struct RunPlan: Sendable {
+        let variants: [HTMLVariant]
+        let wantsMD: Bool
+        let wantsSidecar: Bool
+
+        nonisolated var variantSuffixes: [String] {
+            variants.map { ContentView.htmlVariantSuffix(for: $0) }
+        }
+
+        nonisolated var wantsAnyThumbs: Bool {
+            wantsSidecar || variants.contains(where: { $0 == .embedAll || $0 == .thumbnailsOnly })
+        }
     }
 
     private struct OutputPreflight: Sendable {
@@ -1773,6 +1788,12 @@ struct ContentView: View {
             return
         }
 
+        let plan = RunPlan(
+            variants: selectedVariantsInOrder,
+            wantsMD: wantsMD,
+            wantsSidecar: wantsSidecar
+        )
+
         let subfolderName = suggestedChatSubfolderName(chatURL: chatURL, chatPartner: chatPartner)
         let exportDir = outDir.appendingPathComponent(subfolderName, isDirectory: true)
 
@@ -1797,6 +1818,7 @@ struct ContentView: View {
             chatPartner: chatPartner,
             participantNameOverrides: participantNameOverrides,
             selectedVariantsInOrder: selectedVariantsInOrder,
+            plan: plan,
             wantsMD: wantsMD,
             wantsSidecar: wantsSidecar,
             wantsDeleteOriginals: wantsDeleteOriginals,
@@ -1945,7 +1967,6 @@ struct ContentView: View {
 
         var existing: [URL] = []
         let exportDir = context.exportDir.standardizedFileURL
-        let orderedVariants: [HTMLVariant] = [.embedAll, .thumbnailsOnly, .textOnly]
 
         let existingNames: Set<String> = (try? fm.contentsOfDirectory(
             at: exportDir,
@@ -1961,7 +1982,7 @@ struct ContentView: View {
         let sidecarHTML = Self.outputSidecarHTML(baseName: baseName, in: exportDir)
         if existingNames.contains(sidecarHTML.lastPathComponent) { existing.append(sidecarHTML) }
 
-        for variant in orderedVariants {
+        for variant in context.plan.variants {
             let variantURL = Self.outputHTMLURL(baseName: baseName, variant: variant, in: exportDir)
             if existingNames.contains(variantURL.lastPathComponent) { existing.append(variantURL) }
         }
@@ -1977,18 +1998,20 @@ struct ContentView: View {
     ) async throws -> ExportWorkResult {
         let fm = FileManager.default
         let exportDir = context.exportDir.standardizedFileURL
+        let plan = context.plan
 
         // exportDir exists by workflow (picked by user + subfolder), but creating it is harmless.
         try fm.createDirectory(at: exportDir, withIntermediateDirectories: true)
         try WhatsAppExportService.cleanupTemporaryExportFolders(in: exportDir)
-        let orderedVariants: [HTMLVariant] = [.embedAll, .thumbnailsOnly, .textOnly]
         let baseHTMLName = "\(baseName).html"
 
+        // Prewarm derived resources once per run (attachment index, caches).
+        WhatsAppExportService.prewarmAttachmentIndex(for: prepared.chatURL.deletingLastPathComponent())
+
         if context.allowOverwrite {
-            let variantSuffixes = context.selectedVariantsInOrder.map { htmlVariantSuffix(for: $0) }
             let deleteTargets = Self.replaceDeleteTargets(
                 baseName: baseName,
-                variantSuffixes: variantSuffixes,
+                variantSuffixes: plan.variantSuffixes,
                 wantsMarkdown: context.wantsMD,
                 wantsSidecar: context.wantsSidecar,
                 in: exportDir
@@ -2122,7 +2145,7 @@ struct ContentView: View {
         if context.wantsSidecar {
             steps.append(.sidecar)
         }
-        for v in orderedVariants where context.selectedVariantsInOrder.contains(v) {
+        for v in plan.variants {
             steps.append(.html(v))
         }
         if context.wantsMD {
@@ -2251,12 +2274,12 @@ struct ContentView: View {
         try? fm.removeItem(at: stagingDir)
         didRemoveStaging = true
 
-        let htmls: [URL] = orderedVariants.compactMap { htmlByVariant[$0] }
+        let htmls: [URL] = plan.variants.compactMap { htmlByVariant[$0] }
         let primaryHTML: URL? = htmlByVariant[.embedAll] ?? htmls.first
 
         let suffixArtifacts = outputSuffixArtifacts(
             baseName: baseName,
-            variants: context.selectedVariantsInOrder,
+            variants: plan.variants,
             wantsMarkdown: context.wantsMD,
             wantsSidecar: context.wantsSidecar,
             in: exportDir
