@@ -46,6 +46,7 @@ public struct WAPreview: Sendable {
 
 public enum WAExportError: Error, LocalizedError {
     case outputAlreadyExists(urls: [URL])
+    case suffixArtifactsFound(names: [String])
 
     public var errorDescription: String? {
         switch self {
@@ -53,6 +54,9 @@ public enum WAExportError: Error, LocalizedError {
             if urls.isEmpty { return "Output files already exist." }
             if urls.count == 1 { return "Output file already exists: \(urls[0].lastPathComponent)" }
             return "Output files already exist: \(urls.map { $0.lastPathComponent }.joined(separator: ", "))"
+        case .suffixArtifactsFound(let names):
+            let joined = names.isEmpty ? "unknown artifacts" : names.joined(separator: ", ")
+            return "Suffix artifacts detected (clean required): \(joined)"
         }
     }
 }

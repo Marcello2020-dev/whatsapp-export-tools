@@ -1956,6 +1956,9 @@ struct ContentView: View {
                     let count = replaceExistingNames.count
                     logger.log("Vorhandene Ausgaben gefunden: \(count) Datei(en). Warte auf Bestätigung zum Ersetzen…")
                     return
+                case .suffixArtifactsFound(let names):
+                    logger.log("ERROR: Suffix-Artefakte gefunden (bitte Zielordner bereinigen): \(names.joined(separator: ", "))")
+                    return
                 }
             }
             logger.log("ERROR: \(error)")
@@ -1985,6 +1988,17 @@ struct ContentView: View {
         for variant in context.plan.variants {
             let variantURL = Self.outputHTMLURL(baseName: baseName, variant: variant, in: exportDir)
             if existingNames.contains(variantURL.lastPathComponent) { existing.append(variantURL) }
+        }
+
+        let suffixArtifacts = outputSuffixArtifacts(
+            baseName: baseName,
+            variants: context.plan.variants,
+            wantsMarkdown: context.wantsMD,
+            wantsSidecar: context.wantsSidecar,
+            in: exportDir
+        )
+        if !suffixArtifacts.isEmpty {
+            throw WAExportError.suffixArtifactsFound(names: suffixArtifacts)
         }
 
         return OutputPreflight(baseName: baseName, existing: existing)
@@ -2284,6 +2298,9 @@ struct ContentView: View {
             wantsSidecar: context.wantsSidecar,
             in: exportDir
         )
+        if !suffixArtifacts.isEmpty {
+            throw WAExportError.suffixArtifactsFound(names: suffixArtifacts)
+        }
 
         return ExportWorkResult(
             exportDir: exportDir,
