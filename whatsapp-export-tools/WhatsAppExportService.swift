@@ -44,6 +44,36 @@ public struct WAPreview: Sendable {
     public var imageDataURL: String?
 }
 
+public struct WAInputSnapshot: Sendable {
+    public let inputURL: URL
+    public let chatURL: URL
+    public let exportDir: URL
+    public let tempWorkspaceURL: URL?
+}
+
+public enum WAInputError: Error, LocalizedError {
+    case unsupportedInput(url: URL)
+    case transcriptNotFound(url: URL)
+    case ambiguousTranscript(urls: [URL])
+    case zipExtractionFailed(url: URL, reason: String)
+    case tempWorkspaceCreateFailed(url: URL, underlying: Error)
+
+    public var errorDescription: String? {
+        switch self {
+        case .unsupportedInput(let url):
+            return "Unsupported input. Please select a WhatsApp export folder, ZIP, or Chat.txt/_chat.txt. (\(url.lastPathComponent))"
+        case .transcriptNotFound(let url):
+            return "Chat.txt or _chat.txt not found in input: \(url.lastPathComponent)"
+        case .ambiguousTranscript(let urls):
+            return "Multiple transcript candidates found: \(urls.map { $0.lastPathComponent }.joined(separator: ", "))"
+        case .zipExtractionFailed(let url, let reason):
+            return "ZIP extraction failed for \(url.lastPathComponent): \(reason)"
+        case .tempWorkspaceCreateFailed(let url, let underlying):
+            return "Could not create temp workspace \(url.lastPathComponent): \(underlying.localizedDescription)"
+        }
+    }
+}
+
 public enum WAExportError: Error, LocalizedError {
     case outputAlreadyExists(urls: [URL])
     case suffixArtifactsFound(names: [String])
@@ -657,6 +687,45 @@ public enum WhatsAppExportService {
     // ---------------------------
     // Public API
     // ---------------------------
+
+    /// Resolve a user-selected input (folder, ZIP, or Chat.txt) into a transcript URL.
+    public static func resolveInputSnapshot(inputURL: URL) throws -> WAInputSnapshot {
+        let fm = FileManager.default
+        let input = inputURL.standardizedFileURL
+        let values = try input.resourceValues(forKeys: [.isDirectoryKey])
+        if values.isDirectory == true {
+            let (chatURL, exportDir) = try resolveTranscript(in: input)
+            return WAInputSnapshot(inputURL: input, chatURL: chatURL, exportDir: exportDir, tempWorkspaceURL: nil)
+        }
+
+        if input.pathExtension.lowercased() == "zip" {
+            let workspace = deterministicInputWorkspace(for: input)
+            do {
+                try recreateDirectory(workspace)
+            } catch {
+                throw WAInputError.tempWorkspaceCreateFailed(url: workspace, underlying: error)
+            }
+            do {
+                try extractZip(at: input, to: workspace)
+                let (chatURL, exportDir) = try resolveTranscript(in: workspace)
+                return WAInputSnapshot(inputURL: input, chatURL: chatURL, exportDir: exportDir, tempWorkspaceURL: workspace)
+            } catch let error as WAInputError {
+                try? fm.removeItem(at: workspace)
+                throw error
+            } catch {
+                try? fm.removeItem(at: workspace)
+                throw WAInputError.zipExtractionFailed(url: input, reason: error.localizedDescription)
+            }
+        }
+
+        let lowerName = input.lastPathComponent.lowercased()
+        if lowerName == "chat.txt" || lowerName == "_chat.txt" {
+            let exportDir = input.deletingLastPathComponent()
+            return WAInputSnapshot(inputURL: input, chatURL: input, exportDir: exportDir, tempWorkspaceURL: nil)
+        }
+
+        throw WAInputError.unsupportedInput(url: input)
+    }
 
     /// Returns unique participant names detected in the chat export (excluding obvious system markers).
     /// Used by the GUI to ask the user who "me" is when --me is not provided.
@@ -1639,6 +1708,95 @@ public enum WhatsAppExportService {
         }
 
         return x
+    }
+
+    nonisolated private static func stableHashHex(_ s: String) -> String {
+        var hash: UInt64 = 14695981039346656037
+        for b in s.utf8 {
+            hash ^= UInt64(b)
+            hash &*= 1099511628211
+        }
+        return String(format: "%016llx", hash)
+    }
+
+    nonisolated private static func deterministicInputWorkspace(for zipURL: URL) -> URL {
+        let fm = FileManager.default
+        let base = fm.temporaryDirectory.appendingPathComponent("wa_export_input", isDirectory: true)
+        let attrs = (try? fm.attributesOfItem(atPath: zipURL.path)) ?? [:]
+        let size = attrs[.size] as? UInt64 ?? 0
+        let mtime = (attrs[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        let key = "\(zipURL.path)|\(size)|\(mtime)"
+        let hash = stableHashHex(key)
+        return base.appendingPathComponent(".wa_zip_\(hash)", isDirectory: true)
+    }
+
+    nonisolated private static func recreateDirectory(_ url: URL) throws {
+        let fm = FileManager.default
+        if fm.fileExists(atPath: url.path) {
+            try fm.removeItem(at: url)
+        }
+        try fm.createDirectory(at: url, withIntermediateDirectories: true)
+    }
+
+    nonisolated private static func extractZip(at zipURL: URL, to destDir: URL) throws {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+        proc.arguments = ["-x", "-k", zipURL.path, destDir.path]
+        let out = Pipe()
+        let err = Pipe()
+        proc.standardOutput = out
+        proc.standardError = err
+        try proc.run()
+        proc.waitUntilExit()
+        if proc.terminationStatus != 0 {
+            let data = err.fileHandleForReading.readDataToEndOfFile()
+            let msg = String(data: data, encoding: .utf8) ?? "exit \(proc.terminationStatus)"
+            throw WAInputError.zipExtractionFailed(url: zipURL, reason: msg.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+    }
+
+    nonisolated private static func resolveTranscript(in dir: URL) throws -> (chatURL: URL, exportDir: URL) {
+        let fm = FileManager.default
+        let root = dir.standardizedFileURL
+        let candidates = ["Chat.txt", "_chat.txt"]
+
+        for name in candidates {
+            let url = root.appendingPathComponent(name)
+            if fm.fileExists(atPath: url.path) {
+                return (url, root)
+            }
+        }
+
+        guard let entries = try? fm.contentsOfDirectory(
+            at: root,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            throw WAInputError.transcriptNotFound(url: root)
+        }
+
+        var matches: [URL] = []
+        var exportDirs: [URL] = []
+        for url in entries {
+            let rv = try? url.resourceValues(forKeys: [.isDirectoryKey])
+            guard rv?.isDirectory == true else { continue }
+            for name in candidates {
+                let candidate = url.appendingPathComponent(name)
+                if fm.fileExists(atPath: candidate.path) {
+                    matches.append(candidate)
+                    exportDirs.append(url)
+                }
+            }
+        }
+
+        if matches.count == 1, let chatURL = matches.first, let exportDir = exportDirs.first {
+            return (chatURL, exportDir)
+        }
+        if matches.count > 1 {
+            throw WAInputError.ambiguousTranscript(urls: matches)
+        }
+
+        throw WAInputError.transcriptNotFound(url: root)
     }
 
     // Normalize participant labels for filenames (NFC + space collapse).

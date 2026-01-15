@@ -1007,12 +1007,12 @@ struct ContentView: View {
     private func pickChatFile() {
         let panel = NSOpenPanel()
         panel.title = "WhatsApp-Chat-Export auswählen"
-        panel.message = "Bitte die WhatsApp-Exportdatei _chat.txt auswählen."
+        panel.message = "Bitte WhatsApp-Exportordner, ZIP oder _chat.txt auswählen."
         panel.prompt = "Auswählen"
         panel.allowsMultipleSelection = false
-        panel.canChooseDirectories = false
+        panel.canChooseDirectories = true
         panel.canChooseFiles = true
-        panel.allowedContentTypes = [UTType.plainText]
+        panel.allowedContentTypes = [.folder, .zip, .plainText]
         if let current = chatURL {
             panel.directoryURL = current.deletingLastPathComponent()
             panel.nameFieldStringValue = current.lastPathComponent
@@ -1087,7 +1087,19 @@ struct ContentView: View {
     // MARK: - Participants
 
     @MainActor
-    private func refreshParticipants(for chatURL: URL) {
+    private func refreshParticipants(for inputURL: URL) {
+        let snapshot: WAInputSnapshot
+        do {
+            snapshot = try WhatsAppExportService.resolveInputSnapshot(inputURL: inputURL)
+        } catch {
+            appendLog("ERROR: \(error.localizedDescription)")
+            return
+        }
+        defer {
+            cleanupTempWorkspace(snapshot.tempWorkspaceURL, label: "InputPipeline")
+        }
+
+        let chatURL = snapshot.chatURL
         do {
             var parts = try WhatsAppExportService.participants(chatURL: chatURL)
             let usedFallbackParticipant = parts.isEmpty
@@ -1225,6 +1237,18 @@ struct ContentView: View {
             exporterName = "Ich"
             autoSuggestedPhoneNames = [:]
             appendLog("WARN: Teilnehmer konnten nicht ermittelt werden. \(error)")
+        }
+    }
+
+    @MainActor
+    private func cleanupTempWorkspace(_ url: URL?, label: String) {
+        guard let url else { return }
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: url.path) else { return }
+        do {
+            try fm.removeItem(at: url)
+        } catch {
+            appendLog("WARN: Could not remove temp workspace (\(label)): \(url.lastPathComponent)")
         }
     }
 
@@ -1736,6 +1760,23 @@ struct ContentView: View {
             refreshParticipants(for: chatURL)
         }
 
+        let snapshot: WAInputSnapshot
+        do {
+            snapshot = try WhatsAppExportService.resolveInputSnapshot(inputURL: chatURL)
+        } catch {
+            appendLog("ERROR: \(error.localizedDescription)")
+            isRunning = false
+            return
+        }
+        var cleanupOnExit = true
+        defer {
+            if cleanupOnExit {
+                cleanupTempWorkspace(snapshot.tempWorkspaceURL, label: "InputPipeline")
+            }
+        }
+
+        let resolvedChatURL = snapshot.chatURL
+
         let exporter = resolvedExporterName()
         if exporter.isEmpty {
             appendLog("ERROR: Ersteller konnte nicht ermittelt werden.")
@@ -1794,7 +1835,7 @@ struct ContentView: View {
             wantsSidecar: wantsSidecar
         )
 
-        let subfolderName = suggestedChatSubfolderName(chatURL: chatURL, chatPartner: chatPartner)
+        let subfolderName = suggestedChatSubfolderName(chatURL: resolvedChatURL, chatPartner: chatPartner)
         let exportDir = outDir.appendingPathComponent(subfolderName, isDirectory: true)
 
         let isOverwriteRetry = overwriteConfirmed
@@ -1807,7 +1848,7 @@ struct ContentView: View {
         }
 
         let context = ExportContext(
-            chatURL: chatURL,
+            chatURL: resolvedChatURL,
             outDir: outDir,
             exportDir: exportDir,
             allowOverwrite: allowOverwrite,
@@ -1825,9 +1866,11 @@ struct ContentView: View {
             htmlLabel: htmlLabel
         )
 
+        cleanupOnExit = false
         Task {
             logExportTiming("T2 export task enqueued", startUptime: t0)
             await runExportFlow(context: context, startUptime: t0)
+            cleanupTempWorkspace(snapshot.tempWorkspaceURL, label: "InputPipeline")
         }
     }
 
