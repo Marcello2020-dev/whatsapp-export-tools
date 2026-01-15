@@ -68,6 +68,15 @@ struct ContentView: View {
         }
     }
 
+    private struct EmptyArtifactError: LocalizedError, Sendable {
+        let url: URL
+        let reason: String
+
+        var errorDescription: String? {
+            "Empty artifact not allowed: \(url.lastPathComponent) (\(reason))"
+        }
+    }
+
     private struct ExportProgressLogger: Sendable {
         let append: @Sendable (String) -> Void
 
@@ -251,11 +260,12 @@ struct ContentView: View {
     @State private var exportHTMLMid: Bool = true
     @State private var exportHTMLMin: Bool = true
     @State private var exportMarkdown: Bool = true
-    
+
     // NEW: Optional "Sidecar" folder export (sorted attachments) next to the HTML/MD export.
     // IMPORTANT: HTML outputs must remain standalone and must NOT depend on the Sidecar folder.
     @State private var exportSortedAttachments: Bool = true
     @State private var deleteOriginalsAfterSidecar: Bool = false
+    @State private var wetDebugLoggingEnabled: Bool = false
 
     @State private var detectedParticipants: [String] = []
     @State private var chatPartnerCandidates: [String] = []
@@ -428,6 +438,7 @@ struct ContentView: View {
 
             sidecarToggle
             deleteOriginalsToggle
+            debugLoggingToggle
         }
         .controlSize(.small)
     }
@@ -533,6 +544,20 @@ struct ContentView: View {
         .accessibilityLabel("Originaldaten löschen")
         .disabled(isRunning || !exportSortedAttachments)
         .onChange(of: deleteOriginalsAfterSidecar) {
+            persistExportSettings()
+        }
+    }
+
+    private var debugLoggingToggle: some View {
+        Toggle(isOn: $wetDebugLoggingEnabled) {
+            HStack(spacing: 6) {
+                Text("Debug logging")
+                helpIcon("Emits detailed staging/validation/publish logs. Use only for troubleshooting.")
+            }
+        }
+        .accessibilityLabel("Debug logging")
+        .disabled(isRunning)
+        .onChange(of: wetDebugLoggingEnabled) {
             persistExportSettings()
         }
     }
@@ -1595,8 +1620,7 @@ struct ContentView: View {
 
     nonisolated private static func captureSidecarTimestampSnapshot(
         sidecarBaseDir: URL,
-        maxFiles: Int = 8,
-        maxDirs: Int = 4
+        maxFiles: Int = 8
     ) -> SidecarTimestampSnapshot {
         let fm = FileManager.default
         let base = sidecarBaseDir.standardizedFileURL
@@ -1613,41 +1637,29 @@ struct ContentView: View {
         }
 
         var entries: [String: FileTimestamps] = [:]
-        if let rootStamp = timestamps(for: base) {
-            entries["."] = rootStamp
-        }
 
         guard let en = fm.enumerator(
             at: base,
-            includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey],
+            includingPropertiesForKeys: [.isRegularFileKey],
             options: [.skipsHiddenFiles, .skipsPackageDescendants]
         ) else {
             return SidecarTimestampSnapshot(entries: entries)
         }
 
+        // Track files only to avoid noisy directory timestamp drift (e.g., Finder metadata).
         var fileCount = 0
-        var dirCount = 0
 
         for case let url as URL in en {
-            let rv = try? url.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey])
-            if rv?.isDirectory == true {
-                if dirCount >= maxDirs { continue }
-                dirCount += 1
-            } else if rv?.isRegularFile == true {
-                if fileCount >= maxFiles { continue }
-                fileCount += 1
-            } else {
-                continue
-            }
+            let rv = try? url.resourceValues(forKeys: [.isRegularFileKey])
+            guard rv?.isRegularFile == true else { continue }
+            if fileCount >= maxFiles { continue }
+            fileCount += 1
 
             let relPath = url.path.replacingOccurrences(of: base.path + "/", with: "")
             if let stamp = timestamps(for: url) {
                 entries[relPath] = stamp
             }
-
-            if fileCount >= maxFiles && dirCount >= maxDirs {
-                break
-            }
+            if fileCount >= maxFiles { break }
         }
 
         return SidecarTimestampSnapshot(entries: entries)
@@ -1720,12 +1732,23 @@ struct ContentView: View {
             guard expectedURL.pathExtension == actualURL.pathExtension else { return false }
             let expectedBase = expectedURL.deletingPathExtension().lastPathComponent
             let actualBase = actualURL.deletingPathExtension().lastPathComponent
-            guard actualBase.hasPrefix(expectedBase + " ") else { return false }
-            let suffix = actualBase.dropFirst(expectedBase.count + 1)
-            if let num = Int(suffix), num >= 2 {
-                return true
+
+            func suffixNumber(from remainder: Substring) -> Int? {
+                let trimmed = remainder.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { return nil }
+                if trimmed.hasPrefix("("), trimmed.hasSuffix(")") {
+                    let inner = trimmed.dropFirst().dropLast()
+                    let digits = inner.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard let num = Int(digits), num >= 2 else { return nil }
+                    return num
+                }
+                guard let num = Int(trimmed), num >= 2 else { return nil }
+                return num
             }
-            return false
+
+            guard actualBase.hasPrefix(expectedBase) else { return false }
+            let remainder = actualBase.dropFirst(expectedBase.count)
+            return suffixNumber(from: remainder) != nil
         }
 
         var offenders: [String] = []
@@ -1885,6 +1908,11 @@ struct ContentView: View {
             appendLog(message)
         }
         let logger = ExportProgressLogger(append: append)
+        let debugEnabled = wetDebugLoggingEnabled || ProcessInfo.processInfo.environment["WET_SIDECAR_DEBUG"] == "1"
+        let debugLog: @Sendable (String) -> Void = { [appendLog] message in
+            guard debugEnabled else { return }
+            appendLog("WET-DBG: \(message)")
+        }
 
         let prepared: WhatsAppExportService.PreparedExport
         do {
@@ -1922,6 +1950,15 @@ struct ContentView: View {
             "Sidecar=\(onOff(context.wantsSidecar)) " +
             "Originale löschen=\(onOff(context.wantsDeleteOriginals))"
         )
+        debugLog("RUN START: \(Self.formatClockTime(runStartWall))")
+        debugLog("TARGET DIR: \(context.exportDir.path)")
+        debugLog("EXPORT NAME: \(baseName)")
+        debugLog("OPTIONS: Max=\(onOff(context.selectedVariantsInOrder.contains(.embedAll))) " +
+                 "Kompakt=\(onOff(context.selectedVariantsInOrder.contains(.thumbnailsOnly))) " +
+                 "E-Mail=\(onOff(context.selectedVariantsInOrder.contains(.textOnly))) " +
+                 "Markdown=\(onOff(context.wantsMD)) " +
+                 "Sidecar=\(onOff(context.wantsSidecar)) " +
+                 "DeleteOriginals=\(onOff(context.wantsDeleteOriginals))")
 
         do {
             let preflight: OutputPreflight
@@ -1946,7 +1983,9 @@ struct ContentView: View {
                     context: context,
                     baseName: preflight.baseName,
                     prepared: prepared,
-                    log: append
+                    log: append,
+                    debugEnabled: debugEnabled,
+                    debugLog: debugLog
                 )
             }.value
 
@@ -1966,6 +2005,11 @@ struct ContentView: View {
 
             let totalDuration = ProcessInfo.processInfo.systemUptime - runStartUptime
             logger.log("Abgeschlossen: \(Self.formatDuration(totalDuration))")
+            var published: [String] = []
+            if context.wantsSidecar { published.append("Sidecar") }
+            published.append(contentsOf: context.plan.variants.map { Self.htmlVariantLogLabel(for: $0) })
+            if context.wantsMD { published.append("Markdown") }
+            debugLog("RUN DONE: \(Self.formatDuration(totalDuration)) published=\(published.joined(separator: ", "))")
             writePerfReport(
                 context: context,
                 baseName: baseName,
@@ -1991,10 +2035,18 @@ struct ContentView: View {
                         wantsSidecar: context.wantsSidecar,
                         in: exportDir
                     )
+                    let suffixArtifacts = Self.outputSuffixArtifacts(
+                        baseName: baseName,
+                        variants: context.plan.variants,
+                        wantsMarkdown: context.wantsMD,
+                        wantsSidecar: context.wantsSidecar,
+                        in: exportDir
+                    )
                     let fm = FileManager.default
                     replaceExistingNames = replaceTargets
                         .filter { fm.fileExists(atPath: $0.path) }
                         .map { $0.lastPathComponent }
+                        + suffixArtifacts.filter { fm.fileExists(atPath: exportDir.appendingPathComponent($0).path) }
                     showReplaceAlert = true
                     let count = replaceExistingNames.count
                     logger.log("Vorhandene Ausgaben gefunden: \(count) Datei(en). Warte auf Bestätigung zum Ersetzen…")
@@ -2033,7 +2085,7 @@ struct ContentView: View {
             if existingNames.contains(variantURL.lastPathComponent) { existing.append(variantURL) }
         }
 
-        let suffixArtifacts = outputSuffixArtifacts(
+        let suffixArtifacts = Self.outputSuffixArtifacts(
             baseName: baseName,
             variants: context.plan.variants,
             wantsMarkdown: context.wantsMD,
@@ -2041,7 +2093,7 @@ struct ContentView: View {
             in: exportDir
         )
         if !suffixArtifacts.isEmpty {
-            throw WAExportError.suffixArtifactsFound(names: suffixArtifacts)
+            existing.append(contentsOf: suffixArtifacts.map { exportDir.appendingPathComponent($0) })
         }
 
         return OutputPreflight(baseName: baseName, existing: existing)
@@ -2051,7 +2103,9 @@ struct ContentView: View {
         context: ExportContext,
         baseName: String,
         prepared: WhatsAppExportService.PreparedExport,
-        log: @Sendable (String) -> Void
+        log: @Sendable (String) -> Void,
+        debugEnabled: Bool,
+        debugLog: @Sendable (String) -> Void
     ) async throws -> ExportWorkResult {
         let fm = FileManager.default
         let exportDir = context.exportDir.standardizedFileURL
@@ -2065,34 +2119,10 @@ struct ContentView: View {
         // Prewarm derived resources once per run (attachment index, caches).
         WhatsAppExportService.prewarmAttachmentIndex(for: prepared.chatURL.deletingLastPathComponent())
 
-        if context.allowOverwrite {
-            let deleteTargets = Self.replaceDeleteTargets(
-                baseName: baseName,
-                variantSuffixes: plan.variantSuffixes,
-                wantsMarkdown: context.wantsMD,
-                wantsSidecar: context.wantsSidecar,
-                in: exportDir
-            )
-            for u in deleteTargets {
-                let target = u.standardizedFileURL
-                guard Self.isSafeReplaceDeleteTarget(target, exportDir: exportDir) else {
-                    let error = NSError(
-                        domain: "WETReplace",
-                        code: 1,
-                        userInfo: [NSLocalizedDescriptionKey: "Unsafe delete target"]
-                    )
-                    throw OutputDeletionError(url: target, underlying: error)
-                }
-                guard fm.fileExists(atPath: target.path) else { continue }
-                do {
-                    try fm.removeItem(at: target)
-                } catch {
-                    throw OutputDeletionError(url: target, underlying: error)
-                }
-            }
-        }
-
         let stagingDir = try WhatsAppExportService.createStagingDirectory(in: exportDir)
+        if debugEnabled {
+            debugLog("STAGING ROOT CREATED: \(stagingDir.path)")
+        }
         var didRemoveStaging = false
         defer {
             if !didRemoveStaging {
@@ -2102,6 +2132,9 @@ struct ContentView: View {
                 try WhatsAppExportService.cleanupTemporaryExportFolders(in: exportDir)
             } catch {
                 log("ERROR: \(error)")
+            }
+            if debugEnabled {
+                debugLog("STAGING CLEANUP: \(stagingDir.path)")
             }
         }
 
@@ -2143,6 +2176,87 @@ struct ContentView: View {
             return true
         }
 
+        func ensureNonEmptyArtifact(_ url: URL, artifact: Artifact) throws {
+            do {
+                let rv = try url.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey, .fileSizeKey])
+                if rv.isDirectory == true {
+                    let contents = try fm.contentsOfDirectory(
+                        at: url,
+                        includingPropertiesForKeys: nil,
+                        options: [.skipsHiddenFiles]
+                    )
+                    if contents.isEmpty {
+                        throw EmptyArtifactError(url: url, reason: "directory is empty")
+                    }
+                } else if rv.isRegularFile == true {
+                    let size = rv.fileSize ?? 0
+                    if size == 0 {
+                        throw EmptyArtifactError(url: url, reason: "file is empty")
+                    }
+                } else {
+                    throw EmptyArtifactError(url: url, reason: "missing output")
+                }
+            } catch let error as EmptyArtifactError {
+                throw error
+            } catch {
+                throw EmptyArtifactError(url: url, reason: "unreadable output")
+            }
+        }
+
+        let sidecarDebugEnabled = debugEnabled || ProcessInfo.processInfo.environment["WET_SIDECAR_DEBUG"] == "1"
+
+        func logSidecarTree(root: URL, label: String) {
+            guard sidecarDebugEnabled else { return }
+            debugLog("\(label): \(root.path)")
+            let fm = FileManager.default
+            guard let en = fm.enumerator(
+                at: root,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles]
+            ) else {
+                debugLog("(empty)")
+                return
+            }
+            var paths: [String] = []
+            for case let url as URL in en {
+                let rel = url.path.replacingOccurrences(of: root.path, with: "")
+                paths.append(rel.isEmpty ? "/" : rel)
+            }
+            if paths.isEmpty {
+                debugLog("(empty)")
+                return
+            }
+            for p in paths.sorted() {
+                debugLog(p)
+            }
+        }
+
+        func logSidecarDiagnostics(_ url: URL, label: String) {
+            guard sidecarDebugEnabled else { return }
+            let fm = FileManager.default
+            var isDir = ObjCBool(false)
+            let exists = fm.fileExists(atPath: url.path, isDirectory: &isDir)
+            debugLog("\(label): \(url.path)")
+            debugLog("exists=\(exists) isDir=\(isDir.boolValue)")
+            guard exists else { return }
+
+            if isDir.boolValue {
+                let contents = (try? fm.contentsOfDirectory(
+                    at: url,
+                    includingPropertiesForKeys: [.isDirectoryKey],
+                    options: [.skipsHiddenFiles]
+                )) ?? []
+                debugLog("childCount=\(contents.count)")
+                for child in contents.prefix(10) {
+                    let isChildDir = (try? child.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+                    debugLog("child \(isChildDir ? "dir" : "file"): \(child.lastPathComponent)")
+                }
+            } else {
+                let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+                debugLog("fileSize=\(size)")
+            }
+        }
+
         func finalizeSidecarTimestamps(sidecarBaseDir: URL, logMismatches: Bool) {
             let sourceDir = prepared.chatURL.deletingLastPathComponent()
             let finalSidecarOriginalDir = sidecarBaseDir.appendingPathComponent(sourceDir.lastPathComponent, isDirectory: true)
@@ -2178,9 +2292,21 @@ struct ContentView: View {
             recordLabel: String,
             movedOutputs: inout [URL]
         ) throws {
+            if debugEnabled {
+                debugLog("PUBLISH START: \(staged.path) -> \(final.path)")
+            }
             guard recordPublishAttempt(final, artifact: artifact) else {
                 try? fm.removeItem(at: staged)
                 return
+            }
+
+            do {
+                try ensureNonEmptyArtifact(staged, artifact: artifact)
+            } catch let error as EmptyArtifactError {
+                if sidecarDebugEnabled, artifact == .sidecar {
+                    logSidecarDiagnostics(staged, label: "Sidecar publish preflight failed")
+                }
+                throw error
             }
 
             // Ensure parent exists before attempting to move/replace.
@@ -2189,6 +2315,9 @@ struct ContentView: View {
             let moveStart = ProcessInfo.processInfo.systemUptime
             if fm.fileExists(atPath: final.path) {
                 if context.allowOverwrite {
+                    if debugEnabled {
+                        debugLog("PUBLISH REPLACE: \(final.path)")
+                    }
                     _ = try fm.replaceItemAt(final, withItemAt: staged, backupItemName: nil, options: [.usingNewMetadataOnly])
                 } else {
                     throw OutputCollisionError(url: final)
@@ -2199,6 +2328,9 @@ struct ContentView: View {
             let moveDuration = ProcessInfo.processInfo.systemUptime - moveStart
             WhatsAppExportService.recordPublishDuration(label: recordLabel, duration: moveDuration)
             movedOutputs.append(final)
+            if debugEnabled {
+                debugLog("PUBLISH OK: \(final.path)")
+            }
         }
 
         var steps: [Artifact] = []
@@ -2218,43 +2350,106 @@ struct ContentView: View {
         var finalSidecarBaseDir: URL? = nil
         var sidecarSnapshot: SidecarTimestampSnapshot? = nil
         var sidecarImmutabilityWarnings: Set<String> = []
+        var stagedSidecarHTML: URL? = nil
+        var stagedSidecarBaseDir: URL? = nil
+        var expectedSidecarAttachments = 0
 
         do {
             for step in steps {
+                if debugEnabled {
+                    debugLog("VARIANT START: \(artifactLabel(step))")
+                }
                 logStart(step)
                 let stepStart = ProcessInfo.processInfo.systemUptime
                 switch step {
                 case .sidecar:
-                    _ = try await Self.debugMeasureAsync("generate sidecar") {
+                    let sidecarResult = try await Self.debugMeasureAsync("generate sidecar") {
                         try await WhatsAppExportService.renderSidecar(
                             prepared: prepared,
-                            outDir: stagingDir
+                            outDir: stagingDir,
+                            allowStagingOverwrite: true
                         )
                     }
+                    expectedSidecarAttachments = sidecarResult.expectedAttachments
+                    if debugEnabled {
+                        debugLog("SIDE: expected attachments: \(expectedSidecarAttachments)")
+                    }
                     let sourceDir = prepared.chatURL.deletingLastPathComponent()
-                    let stagedSidecarBaseDir = Self.outputSidecarDir(baseName: baseName, in: stagingDir)
-                    let stagedSidecarOriginalDir = stagedSidecarBaseDir.appendingPathComponent(sourceDir.lastPathComponent, isDirectory: true)
-                    let stagedSidecarHTML = Self.outputSidecarHTML(baseName: baseName, in: stagingDir)
+                    stagedSidecarHTML = sidecarResult.sidecarHTML
+                    stagedSidecarBaseDir = sidecarResult.sidecarBaseDir
+                    if debugEnabled, let stagedSidecarHTML {
+                        debugLog("STAGE PATH: \(stagedSidecarHTML.path)")
+                    }
 
-                    try WhatsAppExportService.validateSidecarLayout(sidecarBaseDir: stagedSidecarBaseDir)
-                    WhatsAppExportService.normalizeOriginalCopyTimestamps(
-                        sourceDir: sourceDir,
-                        destDir: stagedSidecarOriginalDir,
-                        skippingPathPrefixes: [
-                            context.outDir.standardizedFileURL.path,
-                            stagedSidecarBaseDir.standardizedFileURL.path
-                        ]
-                    )
+                    if expectedSidecarAttachments == 0 {
+                        if debugEnabled {
+                            debugLog("SIDE: no attachments; publishing HTML-only sidecar.")
+                        }
+                    } else {
+                        guard let stagedSidecarBaseDir else {
+                            throw EmptyArtifactError(
+                                url: stagingDir,
+                                reason: "expected attachments > 0 but sidecar assets dir is missing"
+                            )
+                        }
+                        if debugEnabled {
+                            debugLog("STAGE PATH: \(stagedSidecarBaseDir.path)")
+                        }
+                        let stagedSidecarOriginalDir = stagedSidecarBaseDir.appendingPathComponent(
+                            sourceDir.lastPathComponent,
+                            isDirectory: true
+                        )
+                        if debugEnabled {
+                            debugLog("SIDE: create assets dir: \(stagedSidecarBaseDir.path)")
+                        }
+                        logSidecarTree(root: stagedSidecarBaseDir, label: "Sidecar staging root before validation")
+                        logSidecarDiagnostics(stagedSidecarBaseDir, label: "Sidecar staging dir before validation")
+                        try ensureNonEmptyArtifact(stagedSidecarBaseDir, artifact: .sidecar)
+                        try WhatsAppExportService.validateSidecarLayout(sidecarBaseDir: stagedSidecarBaseDir)
+                        WhatsAppExportService.normalizeOriginalCopyTimestamps(
+                            sourceDir: sourceDir,
+                            destDir: stagedSidecarOriginalDir,
+                            skippingPathPrefixes: [
+                                context.outDir.standardizedFileURL.path,
+                                stagedSidecarBaseDir.standardizedFileURL.path
+                            ]
+                        )
+                    }
+                    guard let stagedSidecarHTML else {
+                        throw EmptyArtifactError(url: stagingDir, reason: "sidecar HTML missing")
+                    }
+                    logSidecarDiagnostics(stagedSidecarHTML, label: "Sidecar HTML before validation")
+                    try ensureNonEmptyArtifact(stagedSidecarHTML, artifact: .sidecar)
+
+                    if debugEnabled {
+                        debugLog("VALIDATE OK: Sidecar")
+                    }
 
                     let finalSidecarDir = Self.outputSidecarDir(baseName: baseName, in: exportDir)
                     let finalSidecarHTML = Self.outputSidecarHTML(baseName: baseName, in: exportDir)
-                    try publishMove(
-                        from: stagedSidecarBaseDir,
-                        to: finalSidecarDir,
-                        artifact: .sidecar,
-                        recordLabel: artifactLabel(.sidecar),
-                        movedOutputs: &movedOutputs
-                    )
+                    if expectedSidecarAttachments > 0 {
+                        guard let stagedSidecarBaseDir else {
+                            throw EmptyArtifactError(url: stagingDir, reason: "sidecar assets missing")
+                        }
+                        logSidecarDiagnostics(stagedSidecarBaseDir, label: "Sidecar staging dir before publish")
+                        if debugEnabled {
+                            debugLog("PUBLISH TARGET: \(stagedSidecarBaseDir.path) -> \(finalSidecarDir.path)")
+                        }
+                        try publishMove(
+                            from: stagedSidecarBaseDir,
+                            to: finalSidecarDir,
+                            artifact: .sidecar,
+                            recordLabel: artifactLabel(.sidecar),
+                            movedOutputs: &movedOutputs
+                        )
+                        if debugEnabled {
+                            debugLog("CLEANUP: staged sidecar dir moved")
+                        }
+                    }
+                    logSidecarDiagnostics(stagedSidecarHTML, label: "Sidecar HTML before publish")
+                    if debugEnabled {
+                        debugLog("PUBLISH TARGET: \(stagedSidecarHTML.path) -> \(finalSidecarHTML.path)")
+                    }
                     try publishMove(
                         from: stagedSidecarHTML,
                         to: finalSidecarHTML,
@@ -2262,9 +2457,14 @@ struct ContentView: View {
                         recordLabel: artifactLabel(.sidecar),
                         movedOutputs: &movedOutputs
                     )
-                    finalizeSidecarTimestamps(sidecarBaseDir: finalSidecarDir, logMismatches: false)
-                    finalSidecarBaseDir = finalSidecarDir
-                    sidecarSnapshot = captureSidecarTimestampSnapshot(sidecarBaseDir: finalSidecarDir)
+                    if debugEnabled {
+                        debugLog("CLEANUP: staged sidecar HTML moved")
+                    }
+                    if expectedSidecarAttachments > 0 {
+                        finalizeSidecarTimestamps(sidecarBaseDir: finalSidecarDir, logMismatches: false)
+                        finalSidecarBaseDir = finalSidecarDir
+                        sidecarSnapshot = captureSidecarTimestampSnapshot(sidecarBaseDir: finalSidecarDir)
+                    }
                 case .html(let variant):
                     let stagedHTML = try await Self.debugMeasureAsync("generate \(artifactLabel(.html(variant)))") {
                         try await WhatsAppExportService.renderHTMLPrepared(
@@ -2277,7 +2477,17 @@ struct ContentView: View {
                             perfLabel: artifactLabel(.html(variant))
                         )
                     }
+                    if debugEnabled {
+                        debugLog("STAGE PATH: \(stagedHTML.path)")
+                    }
+                    try ensureNonEmptyArtifact(stagedHTML, artifact: .html(variant))
+                    if debugEnabled {
+                        debugLog("VALIDATE OK: \(stagedHTML.path)")
+                    }
                     let finalHTML = Self.outputHTMLURL(baseName: baseName, variant: variant, in: exportDir)
+                    if debugEnabled {
+                        debugLog("PUBLISH TARGET: \(stagedHTML.path) -> \(finalHTML.path)")
+                    }
                     try publishMove(
                         from: stagedHTML,
                         to: finalHTML,
@@ -2285,28 +2495,46 @@ struct ContentView: View {
                         recordLabel: artifactLabel(.html(variant)),
                         movedOutputs: &movedOutputs
                     )
+                    if debugEnabled {
+                        debugLog("CLEANUP: staged HTML moved")
+                    }
                     htmlByVariant[variant] = finalHTML
                 case .markdown:
-                    let stagedMD = try Self.debugMeasure("generate Markdown") {
+                    let stagedMDURL = try Self.debugMeasure("generate Markdown") {
                         try WhatsAppExportService.renderMarkdown(
                             prepared: prepared,
                             outDir: stagingDir
                         )
                     }
+                    if debugEnabled {
+                        debugLog("STAGE PATH: \(stagedMDURL.path)")
+                    }
+                    try ensureNonEmptyArtifact(stagedMDURL, artifact: .markdown)
+                    if debugEnabled {
+                        debugLog("VALIDATE OK: \(stagedMDURL.path)")
+                    }
                     let finalMDURL = Self.outputMarkdownURL(baseName: baseName, in: exportDir)
+                    if debugEnabled {
+                        debugLog("PUBLISH TARGET: \(stagedMDURL.path) -> \(finalMDURL.path)")
+                    }
                     try publishMove(
-                        from: stagedMD,
+                        from: stagedMDURL,
                         to: finalMDURL,
                         artifact: .markdown,
                         recordLabel: artifactLabel(.markdown),
                         movedOutputs: &movedOutputs
                     )
+                    if debugEnabled {
+                        debugLog("CLEANUP: staged Markdown moved")
+                    }
                     finalMD = finalMDURL
                 }
                 let elapsed = ProcessInfo.processInfo.systemUptime - stepStart
+                if debugEnabled {
+                    debugLog("VARIANT DONE: \(artifactLabel(step)) duration=\(Self.formatDuration(elapsed))")
+                }
                 logDone(step, duration: elapsed)
                 WhatsAppExportService.recordArtifactDuration(label: artifactLabel(step), duration: elapsed)
-
                 if step != .sidecar, let finalSidecarBaseDir, let snapshot = sidecarSnapshot {
                     let mismatches = sidecarTimestampMismatches(
                         snapshot: snapshot,
@@ -2331,13 +2559,37 @@ struct ContentView: View {
             throw error
         }
 
+        if context.allowOverwrite {
+            let suffixArtifacts = Self.outputSuffixArtifacts(
+                baseName: baseName,
+                variants: plan.variants,
+                wantsMarkdown: context.wantsMD,
+                wantsSidecar: context.wantsSidecar,
+                in: exportDir
+            )
+            if !suffixArtifacts.isEmpty {
+                log("INFO: Cleaning suffix artifacts: \(suffixArtifacts.joined(separator: ", "))")
+                if debugEnabled {
+                    debugLog("OVERWRITE: cleaning suffix artifacts count=\(suffixArtifacts.count)")
+                }
+            }
+            for name in suffixArtifacts {
+                let target = exportDir.appendingPathComponent(name).standardizedFileURL
+                guard Self.isSafeReplaceDeleteTarget(target, exportDir: exportDir) else {
+                    continue
+                }
+                guard fm.fileExists(atPath: target.path) else { continue }
+                try? fm.removeItem(at: target)
+            }
+        }
+
         try? fm.removeItem(at: stagingDir)
         didRemoveStaging = true
 
         let htmls: [URL] = plan.variants.compactMap { htmlByVariant[$0] }
         let primaryHTML: URL? = htmlByVariant[.embedAll] ?? htmls.first
 
-        let suffixArtifacts = outputSuffixArtifacts(
+        let suffixArtifacts = Self.outputSuffixArtifacts(
             baseName: baseName,
             variants: plan.variants,
             wantsMarkdown: context.wantsMD,
@@ -2419,6 +2671,7 @@ struct ContentView: View {
         exportMarkdown = snapshot.exportMarkdown
         exportSortedAttachments = snapshot.exportSortedAttachments
         deleteOriginalsAfterSidecar = snapshot.deleteOriginalsAfterSidecar
+        wetDebugLoggingEnabled = snapshot.wetDebugLoggingEnabled
 
         if let chatBookmark = snapshot.chatBookmark {
             if let url = resolveBookmark(chatBookmark, expectDirectory: false) {
@@ -2450,7 +2703,8 @@ struct ContentView: View {
             exportHTMLMin: exportHTMLMin,
             exportMarkdown: exportMarkdown,
             exportSortedAttachments: exportSortedAttachments,
-            deleteOriginalsAfterSidecar: deleteOriginalsAfterSidecar
+            deleteOriginalsAfterSidecar: deleteOriginalsAfterSidecar,
+            wetDebugLoggingEnabled: wetDebugLoggingEnabled
         )
         WETExportSettingsStorage.shared.save(snapshot)
     }
@@ -2587,7 +2841,7 @@ private final class SecurityScopedURL {
 }
 
 private struct WETExportSettingsSnapshot: Codable {
-    static let currentVersion = 1
+    static let currentVersion = 2
 
     let schemaVersion: Int
     let chatBookmark: Data?
@@ -2598,6 +2852,58 @@ private struct WETExportSettingsSnapshot: Codable {
     let exportMarkdown: Bool
     let exportSortedAttachments: Bool
     let deleteOriginalsAfterSidecar: Bool
+    let wetDebugLoggingEnabled: Bool
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion
+        case chatBookmark
+        case outputBookmark
+        case exportHTMLMax
+        case exportHTMLMid
+        case exportHTMLMin
+        case exportMarkdown
+        case exportSortedAttachments
+        case deleteOriginalsAfterSidecar
+        case wetDebugLoggingEnabled
+    }
+
+    init(
+        schemaVersion: Int,
+        chatBookmark: Data?,
+        outputBookmark: Data?,
+        exportHTMLMax: Bool,
+        exportHTMLMid: Bool,
+        exportHTMLMin: Bool,
+        exportMarkdown: Bool,
+        exportSortedAttachments: Bool,
+        deleteOriginalsAfterSidecar: Bool,
+        wetDebugLoggingEnabled: Bool = false
+    ) {
+        self.schemaVersion = schemaVersion
+        self.chatBookmark = chatBookmark
+        self.outputBookmark = outputBookmark
+        self.exportHTMLMax = exportHTMLMax
+        self.exportHTMLMid = exportHTMLMid
+        self.exportHTMLMin = exportHTMLMin
+        self.exportMarkdown = exportMarkdown
+        self.exportSortedAttachments = exportSortedAttachments
+        self.deleteOriginalsAfterSidecar = deleteOriginalsAfterSidecar
+        self.wetDebugLoggingEnabled = wetDebugLoggingEnabled
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = (try? container.decode(Int.self, forKey: .schemaVersion)) ?? 1
+        chatBookmark = try? container.decode(Data.self, forKey: .chatBookmark)
+        outputBookmark = try? container.decode(Data.self, forKey: .outputBookmark)
+        exportHTMLMax = (try? container.decode(Bool.self, forKey: .exportHTMLMax)) ?? true
+        exportHTMLMid = (try? container.decode(Bool.self, forKey: .exportHTMLMid)) ?? true
+        exportHTMLMin = (try? container.decode(Bool.self, forKey: .exportHTMLMin)) ?? true
+        exportMarkdown = (try? container.decode(Bool.self, forKey: .exportMarkdown)) ?? true
+        exportSortedAttachments = (try? container.decode(Bool.self, forKey: .exportSortedAttachments)) ?? true
+        deleteOriginalsAfterSidecar = (try? container.decode(Bool.self, forKey: .deleteOriginalsAfterSidecar)) ?? false
+        wetDebugLoggingEnabled = (try? container.decode(Bool.self, forKey: .wetDebugLoggingEnabled)) ?? false
+    }
 }
 
 private final class WETExportSettingsStorage {

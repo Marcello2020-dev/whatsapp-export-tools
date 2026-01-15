@@ -92,10 +92,11 @@ public enum WAExportError: Error, LocalizedError {
 }
 
 struct SidecarValidationError: Error, LocalizedError, Sendable {
-    let duplicateFolders: [String]
+    let suffixArtifacts: [String]
 
     var errorDescription: String? {
-        "Sidecar enthält doppelte Ordner: \(duplicateFolders.joined(separator: ", "))"
+        let joined = suffixArtifacts.joined(separator: ", ")
+        return "Sidecar contains forbidden suffix artifacts: \(joined)"
     }
 }
 
@@ -1057,6 +1058,22 @@ public enum WhatsAppExportService {
         return PreparedExport(messages: msgs, meName: meName, baseName: base, chatURL: chatPath)
     }
 
+    nonisolated static func expectedAttachmentCount(prepared: PreparedExport) -> Int {
+        let sourceDir = prepared.chatURL.deletingLastPathComponent()
+        var seen: Set<String> = []
+        var count = 0
+        for m in prepared.messages {
+            let fns = findAttachments(m.text)
+            if fns.isEmpty { continue }
+            for fn in fns where seen.insert(fn).inserted {
+                if resolveAttachmentURL(fileName: fn, sourceDir: sourceDir) != nil {
+                    count += 1
+                }
+            }
+        }
+        return count
+    }
+
     nonisolated static func renderHTMLPrepared(
         prepared: PreparedExport,
         outDir: URL,
@@ -1109,21 +1126,47 @@ public enum WhatsAppExportService {
 
     nonisolated static func renderSidecar(
         prepared: PreparedExport,
-        outDir: URL
-    ) async throws -> URL {
+        outDir: URL,
+        allowStagingOverwrite: Bool = false
+    ) async throws -> (sidecarBaseDir: URL?, sidecarHTML: URL, expectedAttachments: Int) {
         resetStagedAttachmentCache()
 
+        let fm = FileManager.default
+        let sidecarDebugEnabled = ProcessInfo.processInfo.environment["WET_SIDECAR_DEBUG"] == "1"
+        let expectedAttachments = expectedAttachmentCount(prepared: prepared)
         let outPath = outDir.standardizedFileURL
+        let sidecarHTML = outPath.appendingPathComponent("\(prepared.baseName)-sdc.html")
+
+        if expectedAttachments == 0 {
+            try await renderHTML(
+                msgs: prepared.messages,
+                chatURL: prepared.chatURL,
+                outHTML: sidecarHTML,
+                meName: prepared.meName,
+                enablePreviews: true,
+                embedAttachments: false,
+                embedAttachmentThumbnailsOnly: false,
+                perfLabel: "Sidecar"
+            )
+            return (sidecarBaseDir: nil, sidecarHTML: sidecarHTML, expectedAttachments: expectedAttachments)
+        }
+
+        let stagingBaseDir = outPath.appendingPathComponent(prepared.baseName, isDirectory: true)
+        if allowStagingOverwrite && expectedAttachments > 0, fm.fileExists(atPath: stagingBaseDir.path) {
+            if sidecarDebugEnabled {
+                print("DEBUG: SIDE: removing staged sidecar dir before render: \(stagingBaseDir.path)")
+            }
+            try? fm.removeItem(at: stagingBaseDir)
+        }
+
         let sidecarOriginalDir = try exportSortedAttachmentsFolder(
             chatURL: prepared.chatURL,
             messages: prepared.messages,
             outDir: outPath,
             folderName: prepared.baseName
         )
-        let sidecarBaseDir = sidecarOriginalDir.deletingLastPathComponent()
-
+        var sidecarBaseDir = sidecarOriginalDir.deletingLastPathComponent()
         let sidecarChatURL = sidecarOriginalDir.appendingPathComponent(prepared.chatURL.lastPathComponent)
-        let sidecarHTML = outPath.appendingPathComponent("\(prepared.baseName)-sdc.html")
 
         try await renderHTML(
             msgs: prepared.messages,
@@ -1141,7 +1184,21 @@ public enum WhatsAppExportService {
             perfLabel: "Sidecar"
         )
 
-        return sidecarHTML
+        if isDirectoryEmpty(sidecarBaseDir) {
+            if sidecarDebugEnabled {
+                print("DEBUG: SIDE: sidecar base dir empty after render; rebuilding staging root")
+            }
+            try? fm.removeItem(at: sidecarBaseDir)
+            let rebuiltOriginalDir = try exportSortedAttachmentsFolder(
+                chatURL: prepared.chatURL,
+                messages: prepared.messages,
+                outDir: outPath,
+                folderName: prepared.baseName
+            )
+            sidecarBaseDir = rebuiltOriginalDir.deletingLastPathComponent()
+        }
+
+        return (sidecarBaseDir: sidecarBaseDir, sidecarHTML: sidecarHTML, expectedAttachments: expectedAttachments)
     }
     
     /// Multi-Export: erzeugt alle HTML-Varianten (-max/-mid/-min) + eine MD-Datei.
@@ -2245,12 +2302,42 @@ public enum WhatsAppExportService {
         folderName: String
     ) throws -> URL {
         let fm = FileManager.default
+        let sidecarDebugEnabled = ProcessInfo.processInfo.environment["WET_SIDECAR_DEBUG"] == "1"
+
+        struct SidecarMediaCounts {
+            var images: Int = 0
+            var videos: Int = 0
+            var audios: Int = 0
+            var documents: Int = 0
+        }
 
         let baseFolderURL = outDir.appendingPathComponent(folderName, isDirectory: true)
         if fm.fileExists(atPath: baseFolderURL.path) {
             throw OutputCollisionError(url: baseFolderURL)
         }
         try fm.createDirectory(at: baseFolderURL, withIntermediateDirectories: true)
+        if sidecarDebugEnabled {
+            print("DEBUG: SIDE: created sidecar base dir: \(baseFolderURL.path)")
+        }
+
+        let sentinelURL = baseFolderURL.appendingPathComponent("media-index.json")
+        func writeSidecarSentinel(_ counts: SidecarMediaCounts) throws {
+            let json = """
+            {
+              "schemaVersion": 1,
+              "mediaCounts": {
+                "images": \(counts.images),
+                "videos": \(counts.videos),
+                "audios": \(counts.audios),
+                "documents": \(counts.documents)
+              }
+            }
+            """
+            try json.write(to: sentinelURL, atomically: true, encoding: .utf8)
+        }
+
+        var mediaCounts = SidecarMediaCounts()
+        try writeSidecarSentinel(mediaCounts)
 
         // Additionally copy the original WhatsApp export folder (the folder that contains chat.txt)
         // into the sorted attachments folder, preserving the original folder name.
@@ -2349,6 +2436,16 @@ public enum WhatsAppExportService {
                 try fm.copyItem(at: src, to: dst)
                 syncFileSystemTimestamps(from: src, to: dst)
                 bucketsWithContent.insert(bucket)
+                switch bucket {
+                case .images:
+                    mediaCounts.images += 1
+                case .videos:
+                    mediaCounts.videos += 1
+                case .audios:
+                    mediaCounts.audios += 1
+                case .documents:
+                    mediaCounts.documents += 1
+                }
             } catch {
                 // keep export resilient
             }
@@ -2363,6 +2460,23 @@ public enum WhatsAppExportService {
         for bucket in ensuredBuckets where !bucketsWithContent.contains(bucket) {
             if let dir = bucketDirs[bucket], isDirectoryEmpty(dir) {
                 try? fm.removeItem(at: dir)
+            }
+        }
+
+        try writeSidecarSentinel(mediaCounts)
+
+        if isDirectoryEmpty(baseFolderURL) {
+            if sidecarDebugEnabled {
+                print("DEBUG: SIDE: base dir empty after staging; re-seeding sentinel/original copy")
+            }
+            if !fm.fileExists(atPath: baseFolderURL.path) {
+                try fm.createDirectory(at: baseFolderURL, withIntermediateDirectories: true)
+            }
+            if !fm.fileExists(atPath: sentinelURL.path) {
+                try writeSidecarSentinel(mediaCounts)
+            }
+            if !fm.fileExists(atPath: originalCopyDir.path) {
+                try fm.createDirectory(at: originalCopyDir, withIntermediateDirectories: true)
             }
         }
 
@@ -4497,13 +4611,33 @@ nonisolated private static func stageThumbnailForExport(
         throw StagingDirectoryCreationError(url: fallback, underlying: CocoaError(.fileWriteFileExists))
     }
 
-    nonisolated private static func duplicateBaseNameIfNeeded(_ name: String) -> String? {
+    nonisolated private static func suffixBaseNameIfPresent(_ name: String) -> String? {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let lastSpace = trimmed.lastIndex(of: " ") else { return nil }
-        let suffix = trimmed[trimmed.index(after: lastSpace)...]
-        guard let num = Int(suffix), num >= 2 else { return nil }
-        let base = String(trimmed[..<lastSpace])
-        return base.isEmpty ? nil : base
+        guard !trimmed.isEmpty else { return nil }
+
+        func parseSuffixNumber(_ s: Substring) -> Int? {
+            let digits = s.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let num = Int(digits), num >= 2 else { return nil }
+            return num
+        }
+
+        if trimmed.hasSuffix(")"), let open = trimmed.lastIndex(of: "(") {
+            let base = trimmed[..<open].trimmingCharacters(in: .whitespacesAndNewlines)
+            let inner = trimmed[trimmed.index(after: open)..<trimmed.index(before: trimmed.endIndex)]
+            if !base.isEmpty, parseSuffixNumber(inner) != nil {
+                return String(base)
+            }
+        }
+
+        if let lastSpace = trimmed.lastIndex(of: " ") {
+            let base = trimmed[..<lastSpace].trimmingCharacters(in: .whitespacesAndNewlines)
+            let suffix = trimmed[trimmed.index(after: lastSpace)...]
+            if !base.isEmpty, parseSuffixNumber(suffix) != nil {
+                return String(base)
+            }
+        }
+
+        return nil
     }
 
     nonisolated static func validateSidecarLayout(sidecarBaseDir: URL) throws {
@@ -4535,16 +4669,23 @@ nonisolated private static func stageThumbnailForExport(
             }
         }
 
-        let dirNames = Set(dirURLs.keys)
-        var duplicates: [String] = []
-        for name in dirNames {
-            guard let baseName = duplicateBaseNameIfNeeded(name) else { continue }
-            guard dirNames.contains(baseName) else { continue }
-            duplicates.append(name)
+        let transcriptCandidates = ["Chat.txt", "_chat.txt"]
+        let originalFolderName: String? = dirURLs.first(where: { element in
+            transcriptCandidates.contains { candidate in
+                fm.fileExists(atPath: element.value.appendingPathComponent(candidate).path)
+            }
+        })?.key
+
+        var suffixArtifacts: [String] = []
+        for name in dirURLs.keys {
+            if name == originalFolderName { continue }
+            if suffixBaseNameIfPresent(name) != nil {
+                suffixArtifacts.append(name)
+            }
         }
 
-        if !duplicates.isEmpty {
-            throw SidecarValidationError(duplicateFolders: duplicates.sorted())
+        if !suffixArtifacts.isEmpty {
+            throw SidecarValidationError(suffixArtifacts: suffixArtifacts.sorted())
         }
     }
 
