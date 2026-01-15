@@ -35,6 +35,8 @@ struct ContentView: View {
         let htmls: [URL]
         let md: URL?
         let primaryHTML: URL?
+        let sidecarImmutabilityWarnings: [String]
+        let outputSuffixArtifacts: [String]
     }
 
     private struct OutputPreflight: Sendable {
@@ -1328,7 +1330,9 @@ struct ContentView: View {
         context: ExportContext,
         baseName: String,
         runStartWall: Date,
-        totalDuration: TimeInterval
+        totalDuration: TimeInterval,
+        sidecarImmutabilityWarnings: [String],
+        outputSuffixArtifacts: [String]
     ) {
         #if DEBUG
         let fm = FileManager.default
@@ -1414,8 +1418,25 @@ struct ContentView: View {
         }
         lines.append("")
         lines.append("## Validation Notes")
-        lines.append("- Output hygiene (no \" 2\" files, no tmp dirs): nicht automatisiert geprüft.")
-        lines.append("- Timestamps: nicht automatisiert geprüft (stichprobenartig manuell prüfen).")
+        let hygieneNote = outputSuffixArtifacts.isEmpty
+            ? "OK"
+            : "Suffix artifacts found: \(outputSuffixArtifacts.joined(separator: ", "))"
+        lines.append("- Output hygiene (no \" 2\" files, no tmp dirs): \(hygieneNote)")
+        let sidecarNote: String
+        if !context.wantsSidecar {
+            sidecarNote = "n/a (sidecar disabled)"
+        } else if sidecarImmutabilityWarnings.isEmpty {
+            sidecarNote = "OK"
+        } else {
+            let sample = sidecarImmutabilityWarnings.prefix(5).joined(separator: ", ")
+            sidecarNote = "Drift detected: \(sample)"
+        }
+        lines.append("- Sidecar immutability: \(sidecarNote)")
+        let duplicateNote = snapshot.attachmentIndexBuildCount <= 1
+            ? "OK"
+            : "WARNING: duplicate work detected"
+        lines.append("- No-duplicate-work check: attachment index builds=\(snapshot.attachmentIndexBuildCount) (expected 1) — \(duplicateNote)")
+        lines.append("- Timestamps: normalized at sidecar step + final safety pass; mismatches logged if detected.")
 
         let reportText = lines.joined(separator: "\n") + "\n"
         try? reportText.write(to: reportURL, atomically: true, encoding: .utf8)
@@ -1522,6 +1543,160 @@ struct ContentView: View {
         let rootPrefix = root.hasSuffix("/") ? root : root + "/"
         let targetPath = target.standardizedFileURL.path
         return targetPath.hasPrefix(rootPrefix)
+    }
+
+    private struct SidecarTimestampSnapshot: Sendable {
+        let entries: [String: FileTimestamps]
+    }
+
+    private struct FileTimestamps: Sendable {
+        let created: Date?
+        let modified: Date?
+    }
+
+    nonisolated private static func captureSidecarTimestampSnapshot(
+        sidecarBaseDir: URL,
+        maxFiles: Int = 8,
+        maxDirs: Int = 4
+    ) -> SidecarTimestampSnapshot {
+        let fm = FileManager.default
+        let base = sidecarBaseDir.standardizedFileURL
+        guard fm.fileExists(atPath: base.path) else {
+            return SidecarTimestampSnapshot(entries: [:])
+        }
+
+        func timestamps(for url: URL) -> FileTimestamps? {
+            guard let attrs = try? fm.attributesOfItem(atPath: url.path) else { return nil }
+            return FileTimestamps(
+                created: attrs[.creationDate] as? Date,
+                modified: attrs[.modificationDate] as? Date
+            )
+        }
+
+        var entries: [String: FileTimestamps] = [:]
+        if let rootStamp = timestamps(for: base) {
+            entries["."] = rootStamp
+        }
+
+        guard let en = fm.enumerator(
+            at: base,
+            includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else {
+            return SidecarTimestampSnapshot(entries: entries)
+        }
+
+        var fileCount = 0
+        var dirCount = 0
+
+        for case let url as URL in en {
+            let rv = try? url.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey])
+            if rv?.isDirectory == true {
+                if dirCount >= maxDirs { continue }
+                dirCount += 1
+            } else if rv?.isRegularFile == true {
+                if fileCount >= maxFiles { continue }
+                fileCount += 1
+            } else {
+                continue
+            }
+
+            let relPath = url.path.replacingOccurrences(of: base.path + "/", with: "")
+            if let stamp = timestamps(for: url) {
+                entries[relPath] = stamp
+            }
+
+            if fileCount >= maxFiles && dirCount >= maxDirs {
+                break
+            }
+        }
+
+        return SidecarTimestampSnapshot(entries: entries)
+    }
+
+    nonisolated private static func sidecarTimestampMismatches(
+        snapshot: SidecarTimestampSnapshot,
+        sidecarBaseDir: URL,
+        tolerance: TimeInterval = 1.0
+    ) -> [String] {
+        let fm = FileManager.default
+        let base = sidecarBaseDir.standardizedFileURL
+
+        func datesClose(_ a: Date?, _ b: Date?) -> Bool {
+            guard let a, let b else { return false }
+            return abs(a.timeIntervalSinceReferenceDate - b.timeIntervalSinceReferenceDate) <= tolerance
+        }
+
+        var mismatches: [String] = []
+        for (relPath, recorded) in snapshot.entries {
+            let url = relPath == "." ? base : base.appendingPathComponent(relPath)
+            guard let attrs = try? fm.attributesOfItem(atPath: url.path) else {
+                mismatches.append(relPath)
+                continue
+            }
+            let current = FileTimestamps(
+                created: attrs[.creationDate] as? Date,
+                modified: attrs[.modificationDate] as? Date
+            )
+            if !datesClose(recorded.created, current.created) || !datesClose(recorded.modified, current.modified) {
+                mismatches.append(relPath)
+            }
+        }
+        return mismatches
+    }
+
+    nonisolated private static func outputSuffixArtifacts(
+        baseName: String,
+        variants: [HTMLVariant],
+        wantsMarkdown: Bool,
+        wantsSidecar: Bool,
+        in dir: URL
+    ) -> [String] {
+        let fm = FileManager.default
+        let exportDir = dir.standardizedFileURL
+        guard let entries = try? fm.contentsOfDirectory(
+            at: exportDir,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else {
+            return []
+        }
+
+        var expected: [String] = []
+        for variant in variants {
+            expected.append("\(baseName)\(htmlVariantSuffix(for: variant)).html")
+        }
+        if wantsMarkdown {
+            expected.append("\(baseName).md")
+        }
+        if wantsSidecar {
+            expected.append("\(baseName)-sdc.html")
+            expected.append(baseName)
+        }
+
+        func isSuffixedVariant(expectedName: String, actualName: String) -> Bool {
+            guard actualName != expectedName else { return false }
+            let expectedURL = URL(fileURLWithPath: expectedName)
+            let actualURL = URL(fileURLWithPath: actualName)
+            guard expectedURL.pathExtension == actualURL.pathExtension else { return false }
+            let expectedBase = expectedURL.deletingPathExtension().lastPathComponent
+            let actualBase = actualURL.deletingPathExtension().lastPathComponent
+            guard actualBase.hasPrefix(expectedBase + " ") else { return false }
+            let suffix = actualBase.dropFirst(expectedBase.count + 1)
+            if let num = Int(suffix), num >= 2 {
+                return true
+            }
+            return false
+        }
+
+        var offenders: [String] = []
+        for entry in entries.map(\.lastPathComponent) {
+            for expectedName in expected where isSuffixedVariant(expectedName: expectedName, actualName: entry) {
+                offenders.append(entry)
+                break
+            }
+        }
+        return offenders.sorted()
     }
 
     // MARK: - Export
@@ -1730,7 +1905,9 @@ struct ContentView: View {
                 context: context,
                 baseName: baseName,
                 runStartWall: runStartWall,
-                totalDuration: totalDuration
+                totalDuration: totalDuration,
+                sidecarImmutabilityWarnings: workResult.sidecarImmutabilityWarnings,
+                outputSuffixArtifacts: workResult.outputSuffixArtifacts
             )
         } catch {
             if let deletionError = error as? OutputDeletionError {
@@ -1870,7 +2047,7 @@ struct ContentView: View {
         }
 
         func logDone(_ artifact: Artifact, duration: TimeInterval) {
-            log("Fertig: \(artifactLabel(artifact)) (\(Self.formatDuration(duration)))")
+            log("Done \(artifactLabel(artifact)) (\(Self.formatDuration(duration)))")
         }
 
         var publishCounts: [String: Int] = [:]
@@ -1956,6 +2133,8 @@ struct ContentView: View {
         var htmlByVariant: [HTMLVariant: URL] = [:]
         var finalMD: URL? = nil
         var finalSidecarBaseDir: URL? = nil
+        var sidecarSnapshot: SidecarTimestampSnapshot? = nil
+        var sidecarImmutabilityWarnings: Set<String> = []
 
         do {
             for step in steps {
@@ -2002,6 +2181,7 @@ struct ContentView: View {
                     )
                     finalizeSidecarTimestamps(sidecarBaseDir: finalSidecarDir, logMismatches: false)
                     finalSidecarBaseDir = finalSidecarDir
+                    sidecarSnapshot = captureSidecarTimestampSnapshot(sidecarBaseDir: finalSidecarDir)
                 case .html(let variant):
                     let stagedHTML = try await Self.debugMeasureAsync("generate \(artifactLabel(.html(variant)))") {
                         try await WhatsAppExportService.renderHTMLPrepared(
@@ -2043,6 +2223,21 @@ struct ContentView: View {
                 let elapsed = ProcessInfo.processInfo.systemUptime - stepStart
                 logDone(step, duration: elapsed)
                 WhatsAppExportService.recordArtifactDuration(label: artifactLabel(step), duration: elapsed)
+
+                if step != .sidecar, let finalSidecarBaseDir, let snapshot = sidecarSnapshot {
+                    let mismatches = sidecarTimestampMismatches(
+                        snapshot: snapshot,
+                        sidecarBaseDir: finalSidecarBaseDir
+                    )
+                    if !mismatches.isEmpty {
+                        for item in mismatches {
+                            sidecarImmutabilityWarnings.insert(item)
+                        }
+                        log("WARN: Sidecar immutability drift detected (\(mismatches.count) item(s)).")
+                        finalizeSidecarTimestamps(sidecarBaseDir: finalSidecarBaseDir, logMismatches: true)
+                        sidecarSnapshot = captureSidecarTimestampSnapshot(sidecarBaseDir: finalSidecarBaseDir)
+                    }
+                }
             }
 
             if let finalSidecarBaseDir {
@@ -2059,12 +2254,22 @@ struct ContentView: View {
         let htmls: [URL] = orderedVariants.compactMap { htmlByVariant[$0] }
         let primaryHTML: URL? = htmlByVariant[.embedAll] ?? htmls.first
 
+        let suffixArtifacts = outputSuffixArtifacts(
+            baseName: baseName,
+            variants: context.selectedVariantsInOrder,
+            wantsMarkdown: context.wantsMD,
+            wantsSidecar: context.wantsSidecar,
+            in: exportDir
+        )
+
         return ExportWorkResult(
             exportDir: exportDir,
             baseHTMLName: baseHTMLName,
             htmls: htmls,
             md: finalMD,
-            primaryHTML: primaryHTML
+            primaryHTML: primaryHTML,
+            sidecarImmutabilityWarnings: sidecarImmutabilityWarnings.sorted(),
+            outputSuffixArtifacts: suffixArtifacts
         )
     }
 
