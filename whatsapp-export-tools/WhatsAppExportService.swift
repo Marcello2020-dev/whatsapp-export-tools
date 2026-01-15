@@ -751,7 +751,6 @@ public enum WhatsAppExportService {
             msgs[i].author = applyParticipantOverride(a, lookup: participantLookup)
         }
 
-        let authors = msgs.map { $0.author }.filter { !_normSpace($0).isEmpty }
         let meName = {
             let oRaw = _normSpace(meNameOverride ?? "")
             if !oRaw.isEmpty {
@@ -762,50 +761,11 @@ public enum WhatsAppExportService {
             return chooseMeName(messages: msgs)
         }()
 
-        // Use the chat export file's creation date/time for the filename stamp.
-        // (The HTML header continues to use the file mtime as the export timestamp.)
-        let chatFileAttrs = (try? FileManager.default.attributesOfItem(atPath: chatPath.path)) ?? [:]
-        let chatCreatedAt = (chatFileAttrs[.creationDate] as? Date)
-            ?? (chatFileAttrs[.modificationDate] as? Date)
-            ?? Date()
-
-        // Output filename parts (Finder-friendly, human-readable)
-        let uniqAuthors = Array(Set(authors.map { _normSpace($0) }))
-            .filter { !$0.isEmpty && !isSystemAuthor($0) }
-            .sorted()
-
-        let meNorm = _normSpace(meName).lowercased()
-        let partners = uniqAuthors.filter { _normSpace($0).lowercased() != meNorm }
-
-        // File-name conversation label should include BOTH chat partners (me + others).
-        // For group chats, include up to 3 others and append a “+N weitere” suffix.
-        let convoPart: String = {
-            if partners.isEmpty {
-                return "\(meName) ↔ Unbekannt"
-            }
-            if partners.count == 1 {
-                return "\(meName) ↔ \(partners[0])"
-            }
-            if partners.count <= 3 {
-                return "\(meName) ↔ \(partners.joined(separator: ", "))"
-            }
-            return "\(meName) ↔ \(partners.prefix(3).joined(separator: ", ")) +\(partners.count - 3) weitere"
-        }()
-
-        let periodPart: String = {
-            guard let minD = msgs.min(by: { $0.ts < $1.ts })?.ts,
-                  let maxD = msgs.max(by: { $0.ts < $1.ts })?.ts else {
-                return "Keine Nachrichten"
-            }
-            let start = fileDateOnlyFormatter.string(from: minD)
-            let end = fileDateOnlyFormatter.string(from: maxD)
-            return "\(start) bis \(end)"
-        }()
-
-        let createdStamp = fileStampFormatter.string(from: chatCreatedAt)
-
-        let baseRaw = "WhatsApp Chat · \(convoPart) · \(periodPart) · Chat.txt erstellt \(createdStamp)"
-        let base = safeFinderFilename(baseRaw)
+        let base = composeExportBaseName(
+            messages: msgs,
+            chatURL: chatPath,
+            meName: meName
+        )
 
         let fm = FileManager.default
         try fm.createDirectory(at: outPath, withIntermediateDirectories: true)
@@ -983,7 +943,6 @@ public enum WhatsAppExportService {
             msgs[i].author = applyParticipantOverride(a, lookup: participantLookup)
         }
 
-        let authors = msgs.map { $0.author }.filter { !_normSpace($0).isEmpty }
         let meName = {
             let oRaw = _normSpace(meNameOverride ?? "")
             if !oRaw.isEmpty {
@@ -992,44 +951,8 @@ public enum WhatsAppExportService {
             return chooseMeName(messages: msgs)
         }()
 
-        let chatFileAttrs = (try? FileManager.default.attributesOfItem(atPath: chatPath.path)) ?? [:]
-        let chatCreatedAt = (chatFileAttrs[.creationDate] as? Date)
-            ?? (chatFileAttrs[.modificationDate] as? Date)
-            ?? Date()
-
-        let uniqAuthors = Array(Set(authors.map { _normSpace($0) }))
-            .filter { !$0.isEmpty && !isSystemAuthor($0) }
-            .sorted()
-
-        let meNorm = _normSpace(meName).lowercased()
-        let partners = uniqAuthors.filter { _normSpace($0).lowercased() != meNorm }
-
-        let convoPart: String = {
-            if partners.isEmpty {
-                return "\(meName) ↔ Unbekannt"
-            }
-            if partners.count == 1 {
-                return "\(meName) ↔ \(partners[0])"
-            }
-            if partners.count <= 3 {
-                return "\(meName) ↔ \(partners.joined(separator: ", "))"
-            }
-            return "\(meName) ↔ \(partners.prefix(3).joined(separator: ", ")) +\(partners.count - 3) weitere"
-        }()
-
-        let periodPart: String = {
-            guard let minD = msgs.min(by: { $0.ts < $1.ts })?.ts,
-                  let maxD = msgs.max(by: { $0.ts < $1.ts })?.ts else {
-                return "Keine Nachrichten"
-            }
-            let start = fileDateOnlyFormatter.string(from: minD)
-            let end = fileDateOnlyFormatter.string(from: maxD)
-            return "\(start) bis \(end)"
-        }()
-
-        let createdStamp = fileStampFormatter.string(from: chatCreatedAt)
-        let baseRaw = "WhatsApp Chat · \(convoPart) · \(periodPart) · Chat.txt erstellt \(createdStamp)"
-        return safeFinderFilename(baseRaw)
+        let base = composeExportBaseName(messages: msgs, chatURL: chatPath, meName: meName)
+        return base
     }
 
     nonisolated static func prepareExport(
@@ -1048,7 +971,6 @@ public enum WhatsAppExportService {
             msgs[i].author = applyParticipantOverride(a, lookup: participantLookup)
         }
 
-        let authors = msgs.map { $0.author }.filter { !_normSpace($0).isEmpty }
         let meName = {
             let oRaw = _normSpace(meNameOverride ?? "")
             if !oRaw.isEmpty {
@@ -1057,44 +979,7 @@ public enum WhatsAppExportService {
             return chooseMeName(messages: msgs)
         }()
 
-        let chatFileAttrs = (try? FileManager.default.attributesOfItem(atPath: chatPath.path)) ?? [:]
-        let chatCreatedAt = (chatFileAttrs[.creationDate] as? Date)
-            ?? (chatFileAttrs[.modificationDate] as? Date)
-            ?? Date()
-
-        let uniqAuthors = Array(Set(authors.map { _normSpace($0) }))
-            .filter { !$0.isEmpty && !isSystemAuthor($0) }
-            .sorted()
-
-        let meNorm = _normSpace(meName).lowercased()
-        let partners = uniqAuthors.filter { _normSpace($0).lowercased() != meNorm }
-
-        let convoPart: String = {
-            if partners.isEmpty {
-                return "\(meName) ↔ Unbekannt"
-            }
-            if partners.count == 1 {
-                return "\(meName) ↔ \(partners[0])"
-            }
-            if partners.count <= 3 {
-                return "\(meName) ↔ \(partners.joined(separator: ", "))"
-            }
-            return "\(meName) ↔ \(partners.prefix(3).joined(separator: ", ")) +\(partners.count - 3) weitere"
-        }()
-
-        let periodPart: String = {
-            guard let minD = msgs.min(by: { $0.ts < $1.ts })?.ts,
-                  let maxD = msgs.max(by: { $0.ts < $1.ts })?.ts else {
-                return "Keine Nachrichten"
-            }
-            let start = fileDateOnlyFormatter.string(from: minD)
-            let end = fileDateOnlyFormatter.string(from: maxD)
-            return "\(start) bis \(end)"
-        }()
-
-        let createdStamp = fileStampFormatter.string(from: chatCreatedAt)
-        let baseRaw = "WhatsApp Chat · \(convoPart) · \(periodPart) · Chat.txt erstellt \(createdStamp)"
-        let base = safeFinderFilename(baseRaw)
+        let base = composeExportBaseName(messages: msgs, chatURL: chatPath, meName: meName)
 
         return PreparedExport(messages: msgs, meName: meName, baseName: base, chatURL: chatPath)
     }
@@ -1216,8 +1101,6 @@ public enum WhatsAppExportService {
             msgs[i].author = applyParticipantOverride(a, lookup: participantLookup)
         }
 
-        let authors = msgs.map { $0.author }.filter { !_normSpace($0).isEmpty }
-
         let meName = {
             let oRaw = _normSpace(meNameOverride ?? "")
             if !oRaw.isEmpty {
@@ -1226,47 +1109,7 @@ public enum WhatsAppExportService {
             return chooseMeName(messages: msgs)
         }()
 
-        // Use creation date for filename stamp
-        let chatFileAttrs = (try? FileManager.default.attributesOfItem(atPath: chatPath.path)) ?? [:]
-        let chatCreatedAt = (chatFileAttrs[.creationDate] as? Date)
-            ?? (chatFileAttrs[.modificationDate] as? Date)
-            ?? Date()
-
-        // Build filename parts (wie in export(...))
-        let uniqAuthors = Array(Set(authors.map { _normSpace($0) }))
-            .filter { !$0.isEmpty && !isSystemAuthor($0) }
-            .sorted()
-
-        let meNorm = _normSpace(meName).lowercased()
-        let partners = uniqAuthors.filter { _normSpace($0).lowercased() != meNorm }
-
-        let convoPart: String = {
-            if partners.isEmpty {
-                return "\(meName) ↔ Unbekannt"
-            }
-            if partners.count == 1 {
-                return "\(meName) ↔ \(partners[0])"
-            }
-            if partners.count <= 3 {
-                return "\(meName) ↔ \(partners.joined(separator: ", "))"
-            }
-            return "\(meName) ↔ \(partners.prefix(3).joined(separator: ", ")) +\(partners.count - 3) weitere"
-        }()
-
-        let periodPart: String = {
-            guard let minD = msgs.min(by: { $0.ts < $1.ts })?.ts,
-                  let maxD = msgs.max(by: { $0.ts < $1.ts })?.ts else {
-                return "Keine Nachrichten"
-            }
-            let start = fileDateOnlyFormatter.string(from: minD)
-            let end = fileDateOnlyFormatter.string(from: maxD)
-            return "\(start) bis \(end)"
-        }()
-
-        let createdStamp = fileStampFormatter.string(from: chatCreatedAt)
-
-        let baseRaw = "WhatsApp Chat · \(convoPart) · \(periodPart) · Chat.txt erstellt \(createdStamp)"
-        let base = safeFinderFilename(baseRaw)
+        let base = composeExportBaseName(messages: msgs, chatURL: chatPath, meName: meName)
 
         let fm = FileManager.default
         try fm.createDirectory(at: outPath, withIntermediateDirectories: true)
@@ -1768,9 +1611,10 @@ public enum WhatsAppExportService {
     // Produces a human-readable, Finder-friendly filename (keeps spaces and Unicode),
     // while removing characters that are problematic in paths.
     nonisolated private static func safeFinderFilename(_ s: String, maxLen: Int = 200) -> String {
+        var x = s.precomposedStringWithCanonicalMapping
+
         // Disallowed on macOS: "/" and ":".
-        var x = s
-            .replacingOccurrences(of: "/", with: " ")
+        x = x.replacingOccurrences(of: "/", with: " ")
             .replacingOccurrences(of: ":", with: " ")
 
         // Remove control characters
@@ -1791,6 +1635,100 @@ public enum WhatsAppExportService {
         }
 
         return x
+    }
+
+    // Normalize participant labels for filenames (NFC + space collapse).
+    nonisolated private static func normalizedParticipantLabel(_ s: String) -> String {
+        _normSpace(s.precomposedStringWithCanonicalMapping)
+    }
+
+    // Prefer export folder/zip stem as a fallback chat identifier.
+    nonisolated private static func fallbackChatIdentifier(from chatURL: URL) -> String {
+        let folderName = normalizedParticipantLabel(chatURL.deletingLastPathComponent().lastPathComponent)
+        if folderName.isEmpty { return "WhatsApp Chat" }
+
+        let prefixes = [
+            "WhatsApp Chat - ",
+            "WhatsApp Chat – ",
+            "WhatsApp Chat — ",
+            "WhatsApp Chat with ",
+            "WhatsApp Chat mit ",
+            "WhatsApp-Chat - ",
+            "WhatsApp-Chat – ",
+            "WhatsApp-Chat — ",
+            "WhatsApp-Chat with ",
+            "WhatsApp-Chat mit "
+        ]
+
+        for prefix in prefixes {
+            if folderName.lowercased().hasPrefix(prefix.lowercased()) {
+                let trimmed = normalizedParticipantLabel(String(folderName.dropFirst(prefix.count)))
+                if !trimmed.isEmpty { return trimmed }
+            }
+        }
+
+        return folderName
+    }
+
+    nonisolated private static func exportDateRangeLabel(messages: [WAMessage]) -> String {
+        guard let minD = messages.min(by: { $0.ts < $1.ts })?.ts,
+              let maxD = messages.max(by: { $0.ts < $1.ts })?.ts else {
+            return "No messages"
+        }
+        let start = fileDateOnlyFormatter.string(from: minD)
+        let end = fileDateOnlyFormatter.string(from: maxD)
+        return "\(start) to \(end)"
+    }
+
+    nonisolated private static func exportCreatedStamp(for chatURL: URL) -> String {
+        let chatFileAttrs = (try? FileManager.default.attributesOfItem(atPath: chatURL.path)) ?? [:]
+        let createdAt = (chatFileAttrs[.creationDate] as? Date)
+            ?? (chatFileAttrs[.modificationDate] as? Date)
+            ?? Date()
+        return fileStampFormatter.string(from: createdAt)
+    }
+
+    nonisolated private static func exportParticipantsLabel(
+        messages: [WAMessage],
+        meName: String,
+        chatURL: URL
+    ) -> String {
+        let authors = messages.map { $0.author }.filter { !normalizedParticipantLabel($0).isEmpty }
+        let uniqAuthors = Array(Set(authors.map { normalizedParticipantLabel($0) }))
+            .filter { !$0.isEmpty && !isSystemAuthor($0) }
+            .sorted()
+
+        let meNorm = normalizedParticipantLabel(meName)
+        let partners = uniqAuthors.filter { normalizedParticipantLabel($0).lowercased() != meNorm.lowercased() }
+        let fallback = fallbackChatIdentifier(from: chatURL)
+
+        if partners.isEmpty {
+            if meNorm.isEmpty { return fallback }
+            return fallback.isEmpty ? meNorm : "\(meNorm) ↔ \(fallback)"
+        }
+
+        if partners.count == 1 {
+            let other = partners[0]
+            if meNorm.isEmpty { return other }
+            return "\(meNorm) ↔ \(other)"
+        }
+
+        // Group-style label: prefer folder/group identifier over enumerating everyone.
+        let groupLabel = fallback.isEmpty ? partners.joined(separator: ", ") : fallback
+        if meNorm.isEmpty { return groupLabel }
+        return "\(meNorm) ↔ \(groupLabel)"
+    }
+
+    nonisolated private static func composeExportBaseName(
+        messages: [WAMessage],
+        chatURL: URL,
+        meName: String
+    ) -> String {
+        let convoPart = exportParticipantsLabel(messages: messages, meName: meName, chatURL: chatURL)
+        let periodPart = exportDateRangeLabel(messages: messages)
+        let createdStamp = exportCreatedStamp(for: chatURL)
+        let baseRaw = "WhatsApp Chat · \(convoPart) · \(periodPart) · Chat.txt created \(createdStamp)"
+        return safeFinderFilename(baseRaw)
     }
 
     nonisolated private static func isoDateOnly(_ d: Date) -> String {
