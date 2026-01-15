@@ -2140,16 +2140,19 @@ struct ContentView: View {
                 return
             }
 
+            // Ensure parent exists before attempting to move/replace.
+            try fm.createDirectory(at: final.deletingLastPathComponent(), withIntermediateDirectories: true)
+
+            let moveStart = ProcessInfo.processInfo.systemUptime
             if fm.fileExists(atPath: final.path) {
                 if context.allowOverwrite {
-                    try fm.removeItem(at: final)
+                    _ = try fm.replaceItemAt(final, withItemAt: staged, backupItemName: nil, options: [.usingNewMetadataOnly])
                 } else {
                     throw OutputCollisionError(url: final)
                 }
+            } else {
+                try fm.moveItem(at: staged, to: final)
             }
-
-            let moveStart = ProcessInfo.processInfo.systemUptime
-            try fm.moveItem(at: staged, to: final)
             let moveDuration = ProcessInfo.processInfo.systemUptime - moveStart
             WhatsAppExportService.recordPublishDuration(label: recordLabel, duration: moveDuration)
             movedOutputs.append(final)
