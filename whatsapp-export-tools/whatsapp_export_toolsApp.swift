@@ -13,6 +13,7 @@ struct whatsapp_export_toolsApp: App {
         Task { @MainActor in
             WETBareDomainPreviewCheck.runIfNeeded()
             WETBareDomainLinkifyCheck.runIfNeeded()
+            WETSystemMessageCheck.runIfNeeded()
             WETReplaceSelectionCheck.runIfNeeded()
             AIGlowSnapshotRunner.runIfNeeded()
         }
@@ -31,6 +32,11 @@ struct whatsapp_export_toolsApp: App {
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                         .padding()
+                } else if WETSystemMessageCheck.isEnabled {
+                    Text("Running WET system message check…")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .padding()
                 } else if WETReplaceSelectionCheck.isEnabled {
                     Text("Running WET replace selection check…")
                         .font(.system(size: 12))
@@ -45,6 +51,7 @@ struct whatsapp_export_toolsApp: App {
             .onAppear {
                 WETBareDomainPreviewCheck.runIfNeeded()
                 WETBareDomainLinkifyCheck.runIfNeeded()
+                WETSystemMessageCheck.runIfNeeded()
                 WETReplaceSelectionCheck.runIfNeeded()
                 AIGlowSnapshotRunner.runIfNeeded()
             }

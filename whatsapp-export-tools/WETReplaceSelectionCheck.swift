@@ -308,6 +308,18 @@ struct WETBareDomainLinkifyCheck {
                 linkifyHTTP: true
             ),
             Case(
+                name: "invalid dot word",
+                input: "auch.nur",
+                expected: "auch.nur",
+                linkifyHTTP: true
+            ),
+            Case(
+                name: "ccTLD bare domain",
+                input: "example.de",
+                expected: "<a href='https://example.de' target='_blank' rel='noopener'>example.de</a>",
+                linkifyHTTP: true
+            ),
+            Case(
                 name: "bare domain with previews enabled",
                 input: "www.kama.info",
                 expected: "<a href='https://www.kama.info' target='_blank' rel='noopener'>www.kama.info</a>",
@@ -377,6 +389,16 @@ struct WETBareDomainPreviewCheck {
                 expected: []
             ),
             Case(
+                name: "invalid dot word",
+                input: "auch.nur",
+                expected: []
+            ),
+            Case(
+                name: "ccTLD bare domain",
+                input: "example.de",
+                expected: ["https://example.de"]
+            ),
+            Case(
                 name: "already schemed URL",
                 input: "https://www.kama.info",
                 expected: ["https://www.kama.info"]
@@ -412,5 +434,85 @@ struct WETBareDomainPreviewCheck {
         }
 
         NSApp.terminate(nil)
+    }
+}
+
+@MainActor
+struct WETSystemMessageCheck {
+    static let isEnabled: Bool = ProcessInfo.processInfo.environment["WET_SYSTEM_CHECK"] == "1"
+    private static var didRun = false
+
+    static func runIfNeeded() {
+        guard isEnabled, !didRun else { return }
+        didRun = true
+        run()
+    }
+
+    private static func run() {
+        let chatURL = URL(fileURLWithPath: "/Users/Marcel/Git/github.com/Marcello2020-dev/whatsapp-export-tools/_local/fixtures/private/WA_Test_Export/_chat.txt")
+        let outDir = URL(fileURLWithPath: "/Users/Marcel/Git/github.com/Marcello2020-dev/whatsapp-export-tools/_local/fixtures/private/WA_Test_Export/_system_test_out", isDirectory: true)
+        let fm = FileManager.default
+
+        do {
+            if fm.fileExists(atPath: outDir.path) {
+                try fm.removeItem(at: outDir)
+            }
+            try fm.createDirectory(at: outDir, withIntermediateDirectories: true)
+        } catch {
+            print("WET_SYSTEM_CHECK: setup failed: \(error)")
+            NSApp.terminate(nil)
+            return
+        }
+
+        Task {
+            do {
+                let result = try await WhatsAppExportService.exportMulti(
+                    chatURL: chatURL,
+                    outDir: outDir,
+                    meNameOverride: nil,
+                    participantNameOverrides: [:],
+                    variants: [.embedAll],
+                    exportSortedAttachments: false,
+                    allowOverwrite: true
+                )
+
+                guard let htmlURL = result.htmlByVariant[.embedAll],
+                      let html = try? String(contentsOf: htmlURL, encoding: .utf8) else {
+                    print("WET_SYSTEM_CHECK: export missing HTML")
+                    NSApp.terminate(nil)
+                    return
+                }
+
+                var failures: [String] = []
+                let required = [
+                    "Ende-zu-Ende-verschlüsselt",
+                    "Du hast diesen Kontakt blockiert",
+                    "Du hast diesen Kontakt freigegeben",
+                    "Dein Sicherheitscode"
+                ]
+
+                if !html.contains("class='sys'") {
+                    failures.append("system markup missing")
+                }
+                for phrase in required where !html.contains(phrase) {
+                    failures.append("missing system phrase: \(phrase)")
+                }
+                if html.contains("href='https://auch.nur'") || html.contains("href=\"https://auch.nur\"") {
+                    failures.append("invalid dot word linkified: auch.nur")
+                }
+
+                if failures.isEmpty {
+                    print("WET_SYSTEM_CHECK: PASS")
+                } else {
+                    print("WET_SYSTEM_CHECK: FAIL")
+                    for failure in failures {
+                        print(" - \(failure)")
+                    }
+                }
+            } catch {
+                print("WET_SYSTEM_CHECK: export failed: \(error)")
+            }
+            NSApp.terminate(nil)
+        }
     }
 }

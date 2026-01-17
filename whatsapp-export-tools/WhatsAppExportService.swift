@@ -236,6 +236,9 @@ public enum WhatsAppExportService {
         try! NSRegularExpression(pattern: #"^du hast diesen kontakt (blockiert|freigegeben)\.?$"#),
         try! NSRegularExpression(pattern: #"^you (blocked|unblocked) this contact\.?$"#),
 
+        // Security code changed (DE)
+        try! NSRegularExpression(pattern: #"^dein sicherheitscode für .+ hat sich geändert\.?$"#),
+
         // Contact cards
         try! NSRegularExpression(pattern: #"^.+ (ist ein kontakt|ist ein neuer kontakt|is a contact|is a new contact)\.?$"#),
 
@@ -372,6 +375,35 @@ public enum WhatsAppExportService {
         pattern: #"<a\s[^>]*>.*?</a>"#,
         options: [.caseInsensitive]
     )
+
+    nonisolated private static let bareDomainAllowedTLDs: Set<String> = [
+        "com", "net", "org", "info", "io", "app", "dev", "edu", "gov", "biz", "xyz", "me", "co"
+    ]
+
+    nonisolated private static func isValidBareDomain(_ token: String) -> Bool {
+        let t = token.lowercased()
+        guard t.contains(".") else { return false }
+        if t.hasPrefix(".") || t.hasSuffix(".") { return false }
+        if t.hasPrefix("-") || t.hasSuffix("-") { return false }
+        if t.contains("..") { return false }
+
+        let labels = t.split(separator: ".", omittingEmptySubsequences: true)
+        guard labels.count >= 2 else { return false }
+
+        for label in labels {
+            guard !label.isEmpty, label.count <= 63 else { return false }
+            if label.hasPrefix("-") || label.hasSuffix("-") { return false }
+            for ch in label {
+                guard ch.isASCII else { return false }
+                if !(ch.isLetter || ch.isNumber || ch == "-") { return false }
+            }
+        }
+
+        let tld = String(labels.last ?? "")
+        if tld.hasPrefix("xn--") { return true }
+        if tld.count == 2 { return true }
+        return bareDomainAllowedTLDs.contains(tld)
+    }
 
     // Attachments
     // Attachment markers like "<Anhang: filename>".
@@ -1608,7 +1640,7 @@ public enum WhatsAppExportService {
             if intersects(r, protectedRanges) || intersects(r, httpRanges) { continue }
             let raw = ns.substring(with: r)
             let trimmed = raw.trimmingCharacters(in: rstripSet)
-            if !trimmed.isEmpty {
+            if !trimmed.isEmpty, isValidBareDomain(trimmed) {
                 let target = "https://" + trimmed
                 candidates.append(PreviewMatch(range: r, target: target))
             }
@@ -1647,7 +1679,8 @@ public enum WhatsAppExportService {
                 return false
             }
             let r = match.range(at: 1)
-            return r.location == 0 && r.length == ns.length
+            guard r.location == 0 && r.length == ns.length else { return false }
+            return isValidBareDomain(token)
         }
 
         for t0 in tokens {
@@ -3519,7 +3552,11 @@ nonisolated private static func stageThumbnailForExport(
                 let r = match.range(at: 1)
                 if r.location == NSNotFound || r.length == 0 { continue }
                 if intersects(r, protectedRanges) || intersects(r, httpRanges) { continue }
-                linkMatches.append(LinkMatch(range: r, kind: .bare))
+                let raw = ns.substring(with: r)
+                let (core, _) = splitURLTrailingPunct(raw)
+                if !core.isEmpty, isValidBareDomain(core) {
+                    linkMatches.append(LinkMatch(range: r, kind: .bare))
+                }
             }
 
             if linkMatches.isEmpty {
@@ -3699,6 +3736,21 @@ nonisolated private static func stageThumbnailForExport(
         .row.me{justify-content:flex-end;}
         .row.other{justify-content:flex-start;}
         .row.system{justify-content:center;}
+        .sys{
+          display:flex;
+          justify-content:center;
+          margin: 10px 0;
+        }
+        .sys-line{
+          background: rgba(0,0,0,.10);
+          color: #333;
+          border-radius: 999px;
+          padding: 6px 10px;
+          font-size: 12px;
+          line-height: 1.25;
+          text-align: center;
+          max-width: 90%;
+        }
         .bubble{
           max-width: 78%;
           min-width: 220px;
@@ -3977,6 +4029,13 @@ nonisolated private static func stageThumbnailForExport(
             let attachmentsAll = findAttachments(textRaw)
 
             let isSystemMsg = isSystemMessage(authorRaw: authorRaw, text: textWoAttach)
+
+            if isSystemMsg {
+                let sysText = stripBOMAndBidi(textWoAttach).trimmingCharacters(in: .whitespacesAndNewlines)
+                let sysHTML = htmlEscapeKeepNewlines(sysText)
+                parts.append("<div class='sys'><span class='sys-line'>\(sysHTML)</span></div>")
+                continue
+            }
 
             let isMe = (!isSystemMsg) && (authorRaw.lowercased() == _normSpace(meName).lowercased())
             let rowCls: String = isSystemMsg ? "system" : (isMe ? "me" : "other")
@@ -4463,6 +4522,12 @@ nonisolated private static func stageThumbnailForExport(
             let isMe = (!isSystemMsg) && (authorRaw.lowercased() == _normSpace(meName).lowercased())
 
             let trimmedText = textWoAttach.trimmingCharacters(in: .whitespacesAndNewlines)
+            if isSystemMsg {
+                let sysText = stripBOMAndBidi(trimmedText)
+                out.append("— \(sysText) —")
+                out.append("")
+                continue
+            }
 
             // URLs: nur als extra Link-Liste, wenn enablePreviews=true (analog HTML)
             let urls = enablePreviews ? extractURLs(trimmedText) : []
