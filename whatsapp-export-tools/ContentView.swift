@@ -91,7 +91,6 @@ struct ContentView: View {
     private static let designMaxHeight: CGFloat = 900
     private static let optionsColumnMaxWidth: CGFloat = 480
     private static let aiMenuBadgeImage: NSImage = AIGlowPalette.menuBadgeImage
-    static let logGlowSpeedScale: Double = 0.7
     private static let logLineHeight: CGFloat = 17
     private static let logPadLinesPerSide: Int = 1
     private static let logSectionVerticalPadding: CGFloat = 16
@@ -783,7 +782,7 @@ struct ContentView: View {
         .waCard()
         .aiGlow(
             active: isRunning,
-            isRunning: isRunning,
+            isRunning: false,
             cornerRadius: 14,
             style: logGlowStyle,
             debugTag: "log"
@@ -792,7 +791,7 @@ struct ContentView: View {
     }
 
     private var logGlowStyle: AIGlowStyle {
-        WETAIGlowStyle.logStyle(speedScale: Self.logGlowSpeedScale)
+        WETAIGlowStyle.logStyle()
     }
 
     private var header: some View {

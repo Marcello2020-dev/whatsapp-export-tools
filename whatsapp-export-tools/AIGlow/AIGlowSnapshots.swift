@@ -120,7 +120,7 @@ struct AIGlowSnapshotView: View {
     let isRunning: Bool
 
     private var logGlowStyle: AIGlowStyle {
-        WETAIGlowStyle.logStyle(speedScale: 0.7)
+        WETAIGlowStyle.logStyle()
     }
 
     private var sampleLog: String {

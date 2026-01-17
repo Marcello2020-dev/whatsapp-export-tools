@@ -1,11 +1,13 @@
 import SwiftUI
 
 enum WETAIGlowStyle {
-    static func defaultStyle() -> AIGlowStyle {
+    public static func defaultStyle() -> AIGlowStyle {
         AIGlowStyle.wetDefault
     }
 
-    static func logStyle(speedScale: Double) -> AIGlowStyle {
-        AIGlowStyle.wetDefault.withSpeedScale(speedScale)
+    public static func logStyle() -> AIGlowStyle {
+        Self.defaultStyle()
+            .withMotionMode(.turbulence)
+            .withTurbulenceMotionScale(0.35)
     }
 }

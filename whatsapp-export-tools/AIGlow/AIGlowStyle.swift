@@ -18,6 +18,11 @@ public enum AIGlowFillMode: String, Sendable {
     case innerGlow
 }
 
+public enum AIGlowMotionMode: String, Sendable {
+    case rotation
+    case turbulence
+}
+
 public enum AIGlowAuraOuterContour: Equatable, Sendable {
     case matchTarget
     case roundedRect(cornerRadius: CGFloat, outset: CGFloat)
@@ -48,6 +53,8 @@ public struct AIGlowStyle: Equatable, @unchecked Sendable {
     public var palette: AIGlowPalette?
     public let components: AIGlowComponents
     public let fillMode: AIGlowFillMode
+    public var motionMode: AIGlowMotionMode
+    public var turbulenceMotionScale: Double
     public let auraOuterContour: AIGlowAuraOuterContour
     public let ringLineWidthCore: CGFloat
     public let ringLineWidthSoft: CGFloat
@@ -123,6 +130,8 @@ public struct AIGlowStyle: Equatable, @unchecked Sendable {
         palette: AIGlowPalette? = nil,
         components: AIGlowComponents,
         fillMode: AIGlowFillMode,
+        motionMode: AIGlowMotionMode,
+        turbulenceMotionScale: Double,
         auraOuterContour: AIGlowAuraOuterContour,
         ringLineWidthCore: CGFloat,
         ringLineWidthSoft: CGFloat,
@@ -197,6 +206,8 @@ public struct AIGlowStyle: Equatable, @unchecked Sendable {
         self.palette = palette
         self.components = components
         self.fillMode = fillMode
+        self.motionMode = motionMode
+        self.turbulenceMotionScale = turbulenceMotionScale
         self.auraOuterContour = auraOuterContour
         self.ringLineWidthCore = ringLineWidthCore
         self.ringLineWidthSoft = ringLineWidthSoft
@@ -273,6 +284,8 @@ public struct AIGlowStyle: Equatable, @unchecked Sendable {
         palette: nil,
         components: .all,
         fillMode: .innerGlow,
+        motionMode: .rotation,
+        turbulenceMotionScale: 1.0,
         auraOuterContour: .matchTarget,
         ringLineWidthCore: 3.4,
         ringLineWidthSoft: 5.4,
@@ -355,6 +368,8 @@ public struct AIGlowStyle: Equatable, @unchecked Sendable {
             palette: palette?.normalized(),
             components: components.intersection(.all),
             fillMode: fillMode,
+            motionMode: motionMode,
+            turbulenceMotionScale: Self.positiveFinite(turbulenceMotionScale, fallback: baseline.turbulenceMotionScale),
             auraOuterContour: auraOuterContour.normalized(fallback: baseline.auraOuterContour),
             ringLineWidthCore: Self.nonNegativeFinite(ringLineWidthCore, fallback: baseline.ringLineWidthCore),
             ringLineWidthSoft: Self.nonNegativeFinite(ringLineWidthSoft, fallback: baseline.ringLineWidthSoft),
@@ -461,6 +476,18 @@ public struct AIGlowStyle: Equatable, @unchecked Sendable {
     public func withPhaseOffset(_ offset: Double) -> AIGlowStyle {
         var copy = self
         copy.phaseOffset = offset
+        return copy
+    }
+
+    public func withMotionMode(_ mode: AIGlowMotionMode) -> AIGlowStyle {
+        var copy = self
+        copy.motionMode = mode
+        return copy
+    }
+
+    public func withTurbulenceMotionScale(_ scale: Double) -> AIGlowStyle {
+        var copy = self
+        copy.turbulenceMotionScale = scale
         return copy
     }
 

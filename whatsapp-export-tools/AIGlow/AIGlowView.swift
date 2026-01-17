@@ -74,6 +74,7 @@ struct AIGlowOverlay: View {
         let shouldReduceMotion = reduceMotionOverride ?? reduceMotion
         let isHighContrast = increasedContrastOverride ?? (colorSchemeContrast == .increased)
         let shouldReduceTransparency = reduceTransparencyOverride ?? accessibilityReduceTransparency
+        let baseMotionScale = shouldReduceMotion ? 0.35 : 1
         let baseSize = targetSize
         let phase = currentPhase
         let phaseDegrees = phase * 360
@@ -82,6 +83,8 @@ struct AIGlowOverlay: View {
         let showRing = components.contains(.ring)
         let showShimmer = components.contains(.shimmer)
         let showInnerAura = showAura && style.fillMode == .innerGlow
+        let useTurbulence = style.motionMode == .turbulence
+        let motionScale = baseMotionScale * (useTurbulence ? style.turbulenceMotionScale : 1)
         let ringStops = style.ringGradientStops(for: colorScheme)
         let auraStops = style.auraGradientStops(for: colorScheme)
         let ringGradient = AngularGradient(
@@ -94,6 +97,15 @@ struct AIGlowOverlay: View {
             center: .center,
             angle: .degrees(phaseDegrees)
         )
+        let turbulenceAuraLayers = useTurbulence
+            ? buildTurbulenceLayers(phase: phase, angleOffset: 0, motionScale: motionScale, minDimensionReference: 160)
+            : []
+        let turbulenceRingLayers = useTurbulence
+            ? buildTurbulenceLayers(phase: phase, angleOffset: 0, motionScale: motionScale, minDimensionReference: 44)
+            : []
+        let turbulenceShimmerLayers = useTurbulence
+            ? buildTurbulenceLayers(phase: phase, angleOffset: style.ringShimmerAngleOffset, motionScale: motionScale, minDimensionReference: 44)
+            : []
         let ringBlend = isLight ? style.ringBlendModeLight : style.ringBlendModeDark
         let auraBlend = isLight ? style.auraBlendModeLight : style.auraBlendModeDark
         let innerAuraOpacityBase = isLight ? style.innerAuraOpacityLight : style.innerAuraOpacityDark
@@ -191,39 +203,103 @@ struct AIGlowOverlay: View {
             contrast = max(contrast, 1.1)
         }
 
+        // Large turbulence surfaces (e.g., Log) can read slightly washed out due to broader blur/bloom coverage.
+        // Apply a gentle size-based saturation/contrast lift so the Log matches the smaller input-field glow.
+        if useTurbulence {
+            let minDim = max(1, min(baseSize.width, baseSize.height))
+            let start: CGFloat = 140
+            if minDim > start {
+                let t = Double(min(1, (minDim - start) / 260))
+                let satBoost = 1 + 0.12 * t
+                let conBoost = 1 + 0.04 * t
+                saturation = min(saturation * satBoost, isLight ? 2.2 : 1.6)
+                contrast = max(contrast * conBoost, isLight ? 1.05 : 1.0)
+            }
+        }
+
         return ZStack {
             if showInnerAura {
                 ZStack {
-                    shape
-                        .fill(auraGradient)
-                        .frame(width: baseSize.width, height: baseSize.height)
-                        .opacity(innerAuraOpacity)
-                        .blur(radius: innerAuraBlur)
-                        .mask(
+                    if useTurbulence {
+                        ForEach(turbulenceAuraLayers) { layer in
                             shape
+                                .fill(AngularGradient(
+                                    gradient: Gradient(stops: auraStops),
+                                    center: layer.center,
+                                    angle: layer.angle
+                                ))
                                 .frame(width: baseSize.width, height: baseSize.height)
-                        )
-                        .blendMode(auraBlend)
+                                .opacity(innerAuraOpacity * layer.weight)
+                                .blur(radius: innerAuraBlur)
+                                .mask(
+                                    shape
+                                        .frame(width: baseSize.width, height: baseSize.height)
+                                )
+                                .blendMode(auraBlend)
+                        }
+                    } else {
+                        shape
+                            .fill(auraGradient)
+                            .frame(width: baseSize.width, height: baseSize.height)
+                            .opacity(innerAuraOpacity)
+                            .blur(radius: innerAuraBlur)
+                            .mask(
+                                shape
+                                    .frame(width: baseSize.width, height: baseSize.height)
+                            )
+                            .blendMode(auraBlend)
+                    }
                 }
                 .compositingGroup()
             }
 
             if showAura {
                 ZStack {
-                    shape
-                        .stroke(auraGradient, lineWidth: style.outerAuraLineWidth)
-                        .frame(width: baseSize.width, height: baseSize.height)
-                        .opacity(outerAuraOpacity)
-                        .blur(radius: outerAuraBlur)
-                        .blendMode(auraBlend)
+                    if useTurbulence {
+                        ForEach(turbulenceAuraLayers) { layer in
+                            shape
+                                .stroke(AngularGradient(
+                                    gradient: Gradient(stops: auraStops),
+                                    center: layer.center,
+                                    angle: layer.angle
+                                ), lineWidth: style.outerAuraLineWidth)
+                                .frame(width: baseSize.width, height: baseSize.height)
+                                .opacity(outerAuraOpacity * layer.weight)
+                                .blur(radius: outerAuraBlur)
+                                .blendMode(auraBlend)
+                        }
+                    } else {
+                        shape
+                            .stroke(auraGradient, lineWidth: style.outerAuraLineWidth)
+                            .frame(width: baseSize.width, height: baseSize.height)
+                            .opacity(outerAuraOpacity)
+                            .blur(radius: outerAuraBlur)
+                            .blendMode(auraBlend)
+                    }
 
-                    shape
-                        .stroke(auraGradient, lineWidth: style.outerAuraSecondaryLineWidth)
-                        .frame(width: baseSize.width, height: baseSize.height)
-                        .opacity(outerAuraSecondaryOpacity)
-                        .blur(radius: outerAuraSecondaryBlur)
-                        .offset(style.outerAuraSecondaryOffset)
-                        .blendMode(auraBlend)
+                    if useTurbulence {
+                        ForEach(turbulenceAuraLayers) { layer in
+                            shape
+                                .stroke(AngularGradient(
+                                    gradient: Gradient(stops: auraStops),
+                                    center: layer.center,
+                                    angle: layer.angle
+                                ), lineWidth: style.outerAuraSecondaryLineWidth)
+                                .frame(width: baseSize.width, height: baseSize.height)
+                                .opacity(outerAuraSecondaryOpacity * layer.weight)
+                                .blur(radius: outerAuraSecondaryBlur)
+                                .offset(style.outerAuraSecondaryOffset)
+                                .blendMode(auraBlend)
+                        }
+                    } else {
+                        shape
+                            .stroke(auraGradient, lineWidth: style.outerAuraSecondaryLineWidth)
+                            .frame(width: baseSize.width, height: baseSize.height)
+                            .opacity(outerAuraSecondaryOpacity)
+                            .blur(radius: outerAuraSecondaryBlur)
+                            .offset(style.outerAuraSecondaryOffset)
+                            .blendMode(auraBlend)
+                    }
                 }
                 .compositingGroup()
                 .modifier(AIGlowOptionalMask(mask: auraMaskInfo?.mask))
@@ -232,35 +308,95 @@ struct AIGlowOverlay: View {
             if showRing || showShimmer {
                 ZStack {
                     if showRing {
-                        shape
-                            .stroke(ringGradient, lineWidth: style.ringLineWidthCore)
-                            .frame(width: baseSize.width, height: baseSize.height)
-                            .blur(radius: ringBlurCore)
-                            .opacity(ringOpacityCore)
-                            .blendMode(ringBlend)
+                        if useTurbulence {
+                            ForEach(turbulenceRingLayers) { layer in
+                                shape
+                                    .stroke(AngularGradient(
+                                        gradient: Gradient(stops: ringStops),
+                                        center: layer.center,
+                                        angle: layer.angle
+                                    ), lineWidth: style.ringLineWidthCore)
+                                    .frame(width: baseSize.width, height: baseSize.height)
+                                    .blur(radius: ringBlurCore)
+                                    .opacity(ringOpacityCore * layer.weight)
+                                    .blendMode(ringBlend)
+                            }
+                        } else {
+                            shape
+                                .stroke(ringGradient, lineWidth: style.ringLineWidthCore)
+                                .frame(width: baseSize.width, height: baseSize.height)
+                                .blur(radius: ringBlurCore)
+                                .opacity(ringOpacityCore)
+                                .blendMode(ringBlend)
+                        }
 
-                        shape
-                            .stroke(ringGradient, lineWidth: style.ringLineWidthSoft)
-                            .frame(width: baseSize.width, height: baseSize.height)
-                            .blur(radius: ringBlurSoft)
-                            .opacity(ringOpacitySoft)
-                            .blendMode(ringBlend)
+                        if useTurbulence {
+                            ForEach(turbulenceRingLayers) { layer in
+                                shape
+                                    .stroke(AngularGradient(
+                                        gradient: Gradient(stops: ringStops),
+                                        center: layer.center,
+                                        angle: layer.angle
+                                    ), lineWidth: style.ringLineWidthSoft)
+                                    .frame(width: baseSize.width, height: baseSize.height)
+                                    .blur(radius: ringBlurSoft)
+                                    .opacity(ringOpacitySoft * layer.weight)
+                                    .blendMode(ringBlend)
+                            }
+                        } else {
+                            shape
+                                .stroke(ringGradient, lineWidth: style.ringLineWidthSoft)
+                                .frame(width: baseSize.width, height: baseSize.height)
+                                .blur(radius: ringBlurSoft)
+                                .opacity(ringOpacitySoft)
+                                .blendMode(ringBlend)
+                        }
 
-                        shape
-                            .stroke(ringGradient, lineWidth: style.ringLineWidthBloom)
-                            .frame(width: baseSize.width, height: baseSize.height)
-                            .blur(radius: ringBlurBloom)
-                            .opacity(ringOpacityBloom)
-                            .blendMode(ringBlend)
+                        if useTurbulence {
+                            ForEach(turbulenceRingLayers) { layer in
+                                shape
+                                    .stroke(AngularGradient(
+                                        gradient: Gradient(stops: ringStops),
+                                        center: layer.center,
+                                        angle: layer.angle
+                                    ), lineWidth: style.ringLineWidthBloom)
+                                    .frame(width: baseSize.width, height: baseSize.height)
+                                    .blur(radius: ringBlurBloom)
+                                    .opacity(ringOpacityBloom * layer.weight)
+                                    .blendMode(ringBlend)
+                            }
+                        } else {
+                            shape
+                                .stroke(ringGradient, lineWidth: style.ringLineWidthBloom)
+                                .frame(width: baseSize.width, height: baseSize.height)
+                                .blur(radius: ringBlurBloom)
+                                .opacity(ringOpacityBloom)
+                                .blendMode(ringBlend)
+                        }
                     }
 
                     if showShimmer {
-                        shape
-                            .stroke(shimmerGradient, lineWidth: style.ringLineWidthShimmer)
-                            .frame(width: baseSize.width, height: baseSize.height)
-                            .blur(radius: ringBlurShimmer)
-                            .opacity(ringOpacityShimmer)
-                            .blendMode(ringBlend)
+                        if useTurbulence {
+                            ForEach(turbulenceShimmerLayers) { layer in
+                                shape
+                                    .stroke(AngularGradient(
+                                        gradient: Gradient(stops: ringStops),
+                                        center: layer.center,
+                                        angle: layer.angle
+                                    ), lineWidth: style.ringLineWidthShimmer)
+                                    .frame(width: baseSize.width, height: baseSize.height)
+                                    .blur(radius: ringBlurShimmer)
+                                    .opacity(ringOpacityShimmer * layer.weight)
+                                    .blendMode(ringBlend)
+                            }
+                        } else {
+                            shape
+                                .stroke(shimmerGradient, lineWidth: style.ringLineWidthShimmer)
+                                .frame(width: baseSize.width, height: baseSize.height)
+                                .blur(radius: ringBlurShimmer)
+                                .opacity(ringOpacityShimmer)
+                                .blendMode(ringBlend)
+                        }
                     }
                 }
                 .compositingGroup()
@@ -278,6 +414,89 @@ struct AIGlowOverlay: View {
     private struct AuraMaskInfo {
         let mask: AnyView
         let attenuation: Double
+    }
+
+    private struct TurbulenceSpec {
+        let baseX: Double
+        let baseY: Double
+        let driftX: Double
+        let driftY: Double
+        let driftPhase: Double
+        let anglePhase: Double
+        let angleJitter: Double
+        let weight: Double
+    }
+
+    private struct TurbulenceLayer: Identifiable {
+        let id: Int
+        let center: UnitPoint
+        let angle: Angle
+        let weight: Double
+    }
+
+    private static let turbulenceSpecs: [TurbulenceSpec] = [
+        TurbulenceSpec(baseX: 0.22, baseY: 0.28, driftX: 0.14, driftY: 0.11, driftPhase: 0.10, anglePhase: 18, angleJitter: 70, weight: 0.34),
+        TurbulenceSpec(baseX: 0.78, baseY: 0.26, driftX: 0.12, driftY: 0.13, driftPhase: 0.35, anglePhase: 142, angleJitter: 55, weight: 0.26),
+        TurbulenceSpec(baseX: 0.30, baseY: 0.78, driftX: 0.13, driftY: 0.09, driftPhase: 0.65, anglePhase: 264, angleJitter: 60, weight: 0.22),
+        TurbulenceSpec(baseX: 0.76, baseY: 0.78, driftX: 0.10, driftY: 0.12, driftPhase: 0.25, anglePhase: 92, angleJitter: 50, weight: 0.18)
+    ]
+
+    private func buildTurbulenceLayers(
+        phase: Double,
+        angleOffset: Double,
+        motionScale: Double,
+        minDimensionReference: CGFloat
+    ) -> [TurbulenceLayer] {
+        let minDim = max(1, min(targetSize.width, targetSize.height))
+        let ref = max(1, minDimensionReference)
+
+        // Size compensation:
+        // Drift is defined in UnitPoint space. On large surfaces, the same UnitPoint drift becomes huge in pixels,
+        // which (a) makes the motion feel faster and (b) shifts color distribution on the ring (blue drops out earlier).
+        // Use a sqrt falloff so small controls are unchanged while large areas are damped smoothly.
+        let sizeComp: Double = {
+            let ratio = Double(ref / minDim)
+            if ratio >= 1 { return 1 }
+            return sqrt(ratio)
+        }()
+
+        let scaledMotion = max(motionScale, 0) * sizeComp
+
+        return Self.turbulenceSpecs.enumerated().map { index, spec in
+            let driftTime = phase + spec.driftPhase
+            let driftTime2 = driftTime + 0.37
+
+            let x = clamp(
+                spec.baseX
+                    + (spec.driftX * scaledMotion) * cos(driftTime * 2 * .pi)
+                    + (spec.driftX * 0.4 * scaledMotion) * cos(driftTime2 * 2 * .pi),
+                min: 0.08,
+                max: 0.92
+            )
+
+            let y = clamp(
+                spec.baseY
+                    + (spec.driftY * scaledMotion) * sin(driftTime * 2 * .pi)
+                    + (spec.driftY * 0.4 * scaledMotion) * sin(driftTime2 * 2 * .pi),
+                min: 0.08,
+                max: 0.92
+            )
+
+            // Macro rotation remains tied to `phase` (same period as input fields),
+            // turbulence adds non-centered motion without changing the underlying phase speed.
+            let baseAngle = phase * 360 + angleOffset + spec.anglePhase
+
+            // Keep jitter small; it is also size-compensated via scaledMotion.
+            let jitter = (Double.random(in: -1...1) * spec.angleJitter) * scaledMotion
+            let angle = Angle(degrees: baseAngle + jitter)
+
+            return TurbulenceLayer(
+                id: index,
+                center: UnitPoint(x: x, y: y),
+                angle: angle,
+                weight: spec.weight
+            )
+        }
     }
 
     private func auraMaskInfo(
