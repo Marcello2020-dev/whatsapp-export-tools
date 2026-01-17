@@ -630,7 +630,12 @@ struct ContentView: View {
                                 .stroke(.white.opacity(0.10), lineWidth: 1)
                         )
                         .contentShape(Rectangle())
-                        .aiGlow(active: shouldShowAIGlow, isRunning: false, cornerRadius: 6)
+                        .aiGlow(
+                            active: shouldShowAIGlow,
+                            isRunning: false,
+                            cornerRadius: 6,
+                            style: WETAIGlowStyle.defaultStyle()
+                        )
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Chat-Partner")
@@ -697,7 +702,12 @@ struct ContentView: View {
 
                         TextField("Name (z. B. Max Mustermann)", text: overrideBinding)
                             .textFieldStyle(.roundedBorder)
-                            .aiGlow(active: shouldShowPhoneSuggestionGlow(for: num), isRunning: false, cornerRadius: 6)
+                            .aiGlow(
+                                active: shouldShowPhoneSuggestionGlow(for: num),
+                                isRunning: false,
+                                cornerRadius: 6,
+                                style: WETAIGlowStyle.defaultStyle()
+                            )
 
                         Spacer(minLength: 0)
                     }
@@ -766,7 +776,7 @@ struct ContentView: View {
     }
 
     private var logGlowStyle: AIGlowStyle {
-        AIGlowStyle.default.withSpeedScale(Self.logGlowSpeedScale)
+        WETAIGlowStyle.logStyle(speedScale: Self.logGlowSpeedScale)
     }
 
     private var header: some View {

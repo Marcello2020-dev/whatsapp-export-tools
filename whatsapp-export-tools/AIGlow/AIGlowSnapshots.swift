@@ -120,7 +120,7 @@ struct AIGlowSnapshotView: View {
     let isRunning: Bool
 
     private var logGlowStyle: AIGlowStyle {
-        AIGlowStyle.wetDefault.withSpeedScale(0.7)
+        WETAIGlowStyle.logStyle(speedScale: 0.7)
     }
 
     private var sampleLog: String {
@@ -149,7 +149,7 @@ struct AIGlowSnapshotView: View {
                         .frame(width: 180, alignment: .leading)
                     TextField("", text: .constant(suggestedName))
                         .textFieldStyle(.roundedBorder)
-                        .aiGlow(active: true, isRunning: isRunning, cornerRadius: 6)
+                        .aiGlow(active: true, isRunning: isRunning, cornerRadius: 6, style: WETAIGlowStyle.defaultStyle())
                 }
 
                 HStack(spacing: 12) {
@@ -157,7 +157,7 @@ struct AIGlowSnapshotView: View {
                         .frame(width: 180, alignment: .leading)
                     TextField("", text: .constant(userName))
                         .textFieldStyle(.roundedBorder)
-                        .aiGlow(active: false, isRunning: isRunning, cornerRadius: 6)
+                        .aiGlow(active: false, isRunning: isRunning, cornerRadius: 6, style: WETAIGlowStyle.defaultStyle())
                 }
 
                 HStack(spacing: 12) {
@@ -165,7 +165,7 @@ struct AIGlowSnapshotView: View {
                         .frame(width: 180, alignment: .leading)
                     TextField("", text: .constant(suggestedName))
                         .textFieldStyle(.roundedBorder)
-                        .aiGlow(active: true, isRunning: isRunning, cornerRadius: 6)
+                        .aiGlow(active: true, isRunning: isRunning, cornerRadius: 6, style: WETAIGlowStyle.defaultStyle())
                 }
 
                 HStack(spacing: 12) {
@@ -174,7 +174,7 @@ struct AIGlowSnapshotView: View {
                         .frame(width: 180, alignment: .leading)
                     TextField("", text: .constant(suggestedName))
                         .textFieldStyle(.roundedBorder)
-                        .aiGlow(active: true, isRunning: isRunning, cornerRadius: 6)
+                        .aiGlow(active: true, isRunning: isRunning, cornerRadius: 6, style: WETAIGlowStyle.defaultStyle())
                 }
 
                 HStack(spacing: 12) {
@@ -183,7 +183,7 @@ struct AIGlowSnapshotView: View {
                         .frame(width: 180, alignment: .leading)
                     TextField("", text: .constant(userName))
                         .textFieldStyle(.roundedBorder)
-                        .aiGlow(active: false, isRunning: isRunning, cornerRadius: 6)
+                        .aiGlow(active: false, isRunning: isRunning, cornerRadius: 6, style: WETAIGlowStyle.defaultStyle())
                 }
             }
 
