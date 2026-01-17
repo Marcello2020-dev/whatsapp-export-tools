@@ -15,6 +15,7 @@ struct whatsapp_export_toolsApp: App {
             WETBareDomainLinkifyCheck.runIfNeeded()
             WETSystemMessageCheck.runIfNeeded()
             WETReplaceSelectionCheck.runIfNeeded()
+            WETExternalAssetsCheck.runIfNeeded()
             AIGlowSnapshotRunner.runIfNeeded()
         }
     }
@@ -42,6 +43,11 @@ struct whatsapp_export_toolsApp: App {
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                         .padding()
+                } else if WETExternalAssetsCheck.isEnabled {
+                    Text("Running WET external assets check…")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .padding()
                 } else if AIGlowSnapshotRunner.isEnabled {
                     AIGlowSnapshotView(isRunning: false)
                 } else {
@@ -53,6 +59,7 @@ struct whatsapp_export_toolsApp: App {
                 WETBareDomainLinkifyCheck.runIfNeeded()
                 WETSystemMessageCheck.runIfNeeded()
                 WETReplaceSelectionCheck.runIfNeeded()
+                WETExternalAssetsCheck.runIfNeeded()
                 AIGlowSnapshotRunner.runIfNeeded()
             }
         }

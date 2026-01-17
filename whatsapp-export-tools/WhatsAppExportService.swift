@@ -49,6 +49,20 @@ public struct WAInputSnapshot: Sendable {
     public let chatURL: URL
     public let exportDir: URL
     public let tempWorkspaceURL: URL?
+    public let provenance: WETSourceProvenance
+}
+
+public enum WETInputKind: Sendable {
+    case folder
+    case zip
+}
+
+public struct WETSourceProvenance: Sendable {
+    public let inputKind: WETInputKind
+    public let detectedFolderURL: URL
+    public let originalZipURL: URL?
+    public let detectedPartnerRaw: String
+    public let overridePartnerRaw: String?
 }
 
 public enum WAInputError: Error, LocalizedError {
@@ -722,13 +736,31 @@ public enum WhatsAppExportService {
     // ---------------------------
 
     /// Resolve a user-selected input (folder, ZIP, or Chat.txt) into a transcript URL.
-    public static func resolveInputSnapshot(inputURL: URL) throws -> WAInputSnapshot {
+    public static func resolveInputSnapshot(
+        inputURL: URL,
+        detectedPartnerRaw: String? = nil,
+        overridePartnerRaw: String? = nil
+    ) throws -> WAInputSnapshot {
         let fm = FileManager.default
         let input = inputURL.standardizedFileURL
+        let detectedRaw = detectedPartnerRaw ?? ""
         let values = try input.resourceValues(forKeys: [.isDirectoryKey])
         if values.isDirectory == true {
             let (chatURL, exportDir) = try resolveTranscript(in: input)
-            return WAInputSnapshot(inputURL: input, chatURL: chatURL, exportDir: exportDir, tempWorkspaceURL: nil)
+            let provenance = WETSourceProvenance(
+                inputKind: .folder,
+                detectedFolderURL: exportDir,
+                originalZipURL: pickSiblingZipURL(sourceDir: exportDir),
+                detectedPartnerRaw: detectedRaw,
+                overridePartnerRaw: overridePartnerRaw
+            )
+            return WAInputSnapshot(
+                inputURL: input,
+                chatURL: chatURL,
+                exportDir: exportDir,
+                tempWorkspaceURL: nil,
+                provenance: provenance
+            )
         }
 
         if input.pathExtension.lowercased() == "zip" {
@@ -740,8 +772,27 @@ public enum WhatsAppExportService {
             }
             do {
                 try extractZip(at: input, to: workspace)
-                let (chatURL, exportDir) = try resolveTranscript(in: workspace)
-                return WAInputSnapshot(inputURL: input, chatURL: chatURL, exportDir: exportDir, tempWorkspaceURL: workspace)
+                let effectiveRoot = try effectiveZipExtractionRoot(
+                    workspace: workspace,
+                    zipURL: input,
+                    detectedPartnerRaw: detectedRaw,
+                    overridePartnerRaw: overridePartnerRaw
+                )
+                let (chatURL, exportDir) = try resolveTranscript(in: effectiveRoot)
+                let provenance = WETSourceProvenance(
+                    inputKind: .zip,
+                    detectedFolderURL: exportDir,
+                    originalZipURL: input,
+                    detectedPartnerRaw: detectedRaw,
+                    overridePartnerRaw: overridePartnerRaw
+                )
+                return WAInputSnapshot(
+                    inputURL: input,
+                    chatURL: chatURL,
+                    exportDir: exportDir,
+                    tempWorkspaceURL: workspace,
+                    provenance: provenance
+                )
             } catch let error as WAInputError {
                 try? fm.removeItem(at: workspace)
                 throw error
@@ -754,7 +805,20 @@ public enum WhatsAppExportService {
         let lowerName = input.lastPathComponent.lowercased()
         if lowerName == "chat.txt" || lowerName == "_chat.txt" {
             let exportDir = input.deletingLastPathComponent()
-            return WAInputSnapshot(inputURL: input, chatURL: input, exportDir: exportDir, tempWorkspaceURL: nil)
+            let provenance = WETSourceProvenance(
+                inputKind: .folder,
+                detectedFolderURL: exportDir,
+                originalZipURL: pickSiblingZipURL(sourceDir: exportDir),
+                detectedPartnerRaw: detectedRaw,
+                overridePartnerRaw: overridePartnerRaw
+            )
+            return WAInputSnapshot(
+                inputURL: input,
+                chatURL: input,
+                exportDir: exportDir,
+                tempWorkspaceURL: nil,
+                provenance: provenance
+            )
         }
 
         throw WAInputError.unsupportedInput(url: input)
@@ -792,15 +856,29 @@ public enum WhatsAppExportService {
     /// Returns which originals are byte-identical and can be safely deleted.
     public nonisolated static func verifySidecarCopies(
         originalExportDir: URL,
-        sidecarBaseDir: URL
+        sidecarBaseDir: URL,
+        detectedPartnerRaw: String,
+        overridePartnerRaw: String? = nil,
+        originalZipURL: URL? = nil
     ) -> SidecarVerificationResult {
         let originalDir = originalExportDir.standardizedFileURL
         let baseDir = sidecarBaseDir.standardizedFileURL
-        let copiedDir = baseDir.appendingPathComponent(originalDir.lastPathComponent, isDirectory: true)
+        let originalNameBefore: String
+        if let originalZipURL {
+            originalNameBefore = originalZipURL.deletingPathExtension().lastPathComponent
+        } else {
+            originalNameBefore = originalDir.lastPathComponent
+        }
+        let originalNameAfter = applyPartnerOverrideToName(
+            originalName: originalNameBefore,
+            detectedPartnerRaw: detectedPartnerRaw,
+            overridePartnerRaw: overridePartnerRaw
+        )
+        let copiedDir = baseDir.appendingPathComponent(originalNameAfter, isDirectory: true)
 
         let exportDirMatches = directoriesEqual(src: originalDir, dst: copiedDir)
 
-        let originalZip = pickSiblingZipURL(sourceDir: originalDir)
+        let originalZip = originalZipURL ?? pickSiblingZipURL(sourceDir: originalDir)
         var copiedZip: URL? = nil
         var zipMatches: Bool? = nil
 
@@ -945,7 +1023,10 @@ public enum WhatsAppExportService {
                 chatURL: chatPath,
                 messages: msgs,
                 outDir: stagingDir,
-                folderName: base
+                folderName: base,
+                detectedPartnerRaw: "",
+                overridePartnerRaw: nil,
+                originalZipURL: nil
             )
             let sidecarBaseDir = sidecarOriginalDir.deletingLastPathComponent()
 
@@ -1159,7 +1240,10 @@ public enum WhatsAppExportService {
     nonisolated static func renderSidecar(
         prepared: PreparedExport,
         outDir: URL,
-        allowStagingOverwrite: Bool = false
+        allowStagingOverwrite: Bool = false,
+        detectedPartnerRaw: String,
+        overridePartnerRaw: String? = nil,
+        originalZipURL: URL? = nil
     ) async throws -> (sidecarBaseDir: URL?, sidecarHTML: URL, expectedAttachments: Int) {
         resetStagedAttachmentCache()
 
@@ -1195,9 +1279,12 @@ public enum WhatsAppExportService {
             chatURL: prepared.chatURL,
             messages: prepared.messages,
             outDir: outPath,
-            folderName: prepared.baseName
+            folderName: prepared.baseName,
+            detectedPartnerRaw: detectedPartnerRaw,
+            overridePartnerRaw: overridePartnerRaw,
+            originalZipURL: originalZipURL
         )
-        var sidecarBaseDir = sidecarOriginalDir.deletingLastPathComponent()
+        let sidecarBaseDir = sidecarOriginalDir.deletingLastPathComponent()
         let sidecarChatURL = sidecarOriginalDir.appendingPathComponent(prepared.chatURL.lastPathComponent)
 
         try await renderHTML(
@@ -1216,18 +1303,8 @@ public enum WhatsAppExportService {
             perfLabel: "Sidecar"
         )
 
-        if isDirectoryEmpty(sidecarBaseDir) {
-            if sidecarDebugEnabled {
-                print("DEBUG: SIDE: sidecar base dir empty after render; rebuilding staging root")
-            }
-            try? fm.removeItem(at: sidecarBaseDir)
-            let rebuiltOriginalDir = try exportSortedAttachmentsFolder(
-                chatURL: prepared.chatURL,
-                messages: prepared.messages,
-                outDir: outPath,
-                folderName: prepared.baseName
-            )
-            sidecarBaseDir = rebuiltOriginalDir.deletingLastPathComponent()
+        if isDirectoryEmptyFirstLevel(sidecarBaseDir), sidecarDebugEnabled {
+            print("DEBUG: SIDE: sidecar base dir empty after render; keeping for validation")
         }
 
         return (sidecarBaseDir: sidecarBaseDir, sidecarHTML: sidecarHTML, expectedAttachments: expectedAttachments)
@@ -1362,7 +1439,9 @@ public enum WhatsAppExportService {
                 chatURL: chatPath,
                 messages: msgs,
                 outDir: stagingDir,
-                folderName: base
+                folderName: base,
+                detectedPartnerRaw: "",
+                overridePartnerRaw: nil
             )
             let sidecarBaseDir = sidecarOriginalDir.deletingLastPathComponent()
 
@@ -1558,6 +1637,15 @@ public enum WhatsAppExportService {
         }
 
         return map
+    }
+
+    /// Resolves a participant display name using the provided overrides and phone normalization rules.
+    nonisolated public static func resolvedParticipantDisplayName(
+        _ name: String,
+        overrides: [String: String]
+    ) -> String {
+        let lookup = buildParticipantOverrideLookup(overrides)
+        return applyParticipantOverride(name, lookup: lookup)
     }
 
     /// Applies participant overrides to an author label.
@@ -1800,6 +1888,113 @@ public enum WhatsAppExportService {
         return x
     }
 
+    nonisolated static func applyPartnerOverrideToName(
+        originalName: String,
+        detectedPartnerRaw: String,
+        overridePartnerRaw: String?
+    ) -> String {
+        let overrideTrimmed = _normSpace(overridePartnerRaw ?? "")
+        if overrideTrimmed.isEmpty { return safeFinderFilename(originalName) }
+
+        if let replaced = replaceTokenIfPresent(
+            originalName: originalName,
+            tokenDetectedRaw: detectedPartnerRaw,
+            tokenOverrideRaw: overrideTrimmed
+        ) {
+            return replaced
+        }
+
+        if let phoneToken = firstPhoneCandidate(in: originalName),
+           let replaced = replaceTokenIfPresent(
+               originalName: originalName,
+               tokenDetectedRaw: phoneToken,
+               tokenOverrideRaw: overrideTrimmed
+           ) {
+            return replaced
+        }
+
+        return safeFinderFilename(originalName)
+    }
+
+    nonisolated private static func replaceTokenIfPresent(
+        originalName: String,
+        tokenDetectedRaw: String,
+        tokenOverrideRaw: String
+    ) -> String? {
+        let detectedTrimmed = _normSpace(tokenDetectedRaw)
+        if detectedTrimmed.isEmpty { return nil }
+
+        let tokenDetected = safeFinderFilename(detectedTrimmed)
+        let tokenOverride = safeFinderFilename(_normSpace(tokenOverrideRaw))
+        if tokenDetected.isEmpty || tokenOverride.isEmpty { return nil }
+        if tokenDetected == tokenOverride { return nil }
+
+        if originalName == tokenDetected { return safeFinderFilename(tokenOverride) }
+
+        func isBoundaryChar(_ ch: Character) -> Bool {
+            if ch == "·" { return true }
+            for scalar in ch.unicodeScalars {
+                if CharacterSet.whitespacesAndNewlines.contains(scalar) { return true }
+            }
+            return false
+        }
+
+        var ranges: [Range<String.Index>] = []
+        var searchRange = originalName.startIndex..<originalName.endIndex
+        while let r = originalName.range(of: tokenDetected, options: [], range: searchRange) {
+            let leftOK: Bool = {
+                if r.lowerBound == originalName.startIndex { return true }
+                let ch = originalName[originalName.index(before: r.lowerBound)]
+                return isBoundaryChar(ch)
+            }()
+            let rightOK: Bool = {
+                if r.upperBound == originalName.endIndex { return true }
+                let ch = originalName[r.upperBound]
+                return isBoundaryChar(ch)
+            }()
+            if leftOK && rightOK {
+                ranges.append(r)
+            }
+            searchRange = r.upperBound..<originalName.endIndex
+        }
+
+        guard !ranges.isEmpty else { return nil }
+
+        var result = originalName
+        for r in ranges.reversed() {
+            result.replaceSubrange(r, with: tokenOverride)
+        }
+        return safeFinderFilename(result)
+    }
+
+    nonisolated private static func firstPhoneCandidate(in name: String) -> String? {
+        var best: String? = nil
+        var current = ""
+
+        func flushCurrent() {
+            guard !current.isEmpty else { return }
+            var trimmed = _normSpace(current)
+            trimmed = trimmed.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+            if isPhoneCandidate(trimmed) {
+                if best == nil || trimmed.count > (best?.count ?? 0) {
+                    best = trimmed
+                }
+            }
+            current = ""
+        }
+
+        for ch in name {
+            if ch.isNumber || ch == "+" || ch == " " || ch == "-" || ch == "(" || ch == ")" {
+                current.append(ch)
+            } else {
+                flushCurrent()
+            }
+        }
+        flushCurrent()
+
+        return best
+    }
+
     nonisolated private static func stableHashHex(_ s: String) -> String {
         var hash: UInt64 = 14695981039346656037
         for b in s.utf8 {
@@ -1818,6 +2013,58 @@ public enum WhatsAppExportService {
         let key = "\(zipURL.path)|\(size)|\(mtime)"
         let hash = stableHashHex(key)
         return base.appendingPathComponent(".wa_zip_\(hash)", isDirectory: true)
+    }
+
+    nonisolated private static func effectiveZipExtractionRoot(
+        workspace: URL,
+        zipURL: URL,
+        detectedPartnerRaw: String?,
+        overridePartnerRaw: String?
+    ) throws -> URL {
+        let fm = FileManager.default
+        let entries = try fm.contentsOfDirectory(
+            at: workspace,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        )
+
+        let filtered = entries.filter { url in
+            let name = url.lastPathComponent
+            if name == "__MACOSX" || name == ".DS_Store" { return false }
+            if name.hasPrefix(".") { return false }
+            return true
+        }
+
+        var directories: [URL] = []
+        var others: [URL] = []
+        for url in filtered {
+            let rv = try? url.resourceValues(forKeys: [.isDirectoryKey])
+            if rv?.isDirectory == true {
+                directories.append(url)
+            } else {
+                others.append(url)
+            }
+        }
+
+        if directories.count == 1 && others.isEmpty {
+            return directories[0]
+        }
+
+        let wrapperName = safeFinderFilename(zipURL.deletingPathExtension().lastPathComponent)
+        let wrapperDir = workspace.appendingPathComponent(wrapperName, isDirectory: true)
+        if !fm.fileExists(atPath: wrapperDir.path) {
+            try fm.createDirectory(at: wrapperDir, withIntermediateDirectories: true)
+        }
+
+        for url in filtered {
+            if url.standardizedFileURL == wrapperDir.standardizedFileURL {
+                continue
+            }
+            let dest = wrapperDir.appendingPathComponent(url.lastPathComponent)
+            try fm.moveItem(at: url, to: dest)
+        }
+
+        return wrapperDir
     }
 
     nonisolated private static func recreateDirectory(_ url: URL) throws {
@@ -2332,7 +2579,10 @@ public enum WhatsAppExportService {
         chatURL: URL,
         messages: [WAMessage],
         outDir: URL,
-        folderName: String
+        folderName: String,
+        detectedPartnerRaw: String,
+        overridePartnerRaw: String? = nil,
+        originalZipURL: URL? = nil
     ) throws -> URL {
         let fm = FileManager.default
         let sidecarDebugEnabled = ProcessInfo.processInfo.environment["WET_SIDECAR_DEBUG"] == "1"
@@ -2376,7 +2626,17 @@ public enum WhatsAppExportService {
         // into the sorted attachments folder, preserving the original folder name.
         // Example: <out>/<folderName>/<OriginalExportFolderName>/chat.txt
         let sourceDir = chatURL.deletingLastPathComponent().standardizedFileURL
-        let originalFolderName = sourceDir.lastPathComponent
+        let originalNameBefore: String
+        if let originalZipURL {
+            originalNameBefore = originalZipURL.deletingPathExtension().lastPathComponent
+        } else {
+            originalNameBefore = sourceDir.lastPathComponent
+        }
+        let originalFolderName = applyPartnerOverrideToName(
+            originalName: originalNameBefore,
+            detectedPartnerRaw: detectedPartnerRaw,
+            overridePartnerRaw: overridePartnerRaw
+        )
         let originalCopyDir = baseFolderURL.appendingPathComponent(originalFolderName, isDirectory: true)
         if fm.fileExists(atPath: originalCopyDir.path) {
             throw OutputCollisionError(url: originalCopyDir)
@@ -2400,7 +2660,10 @@ public enum WhatsAppExportService {
         
         try copySiblingZipIfPresent(
             sourceDir: sourceDir,
-            destParentDir: baseFolderURL
+            destParentDir: baseFolderURL,
+            detectedPartnerRaw: detectedPartnerRaw,
+            overridePartnerRaw: overridePartnerRaw,
+            originalZipURL: originalZipURL
         )
 
         let imagesDir = baseFolderURL.appendingPathComponent(SortedAttachmentBucket.images.rawValue, isDirectory: true)
@@ -2494,14 +2757,17 @@ public enum WhatsAppExportService {
             .documents: docsDir
         ]
         for bucket in ensuredBuckets where !bucketsWithContent.contains(bucket) {
-            if let dir = bucketDirs[bucket], isDirectoryEmpty(dir) {
+            if let dir = bucketDirs[bucket], isDirectoryEmptyRecursive(dir) {
+                if sidecarDebugEnabled {
+                    print("WET-DBG: removeItem: \(dir.path)")
+                }
                 try? fm.removeItem(at: dir)
             }
         }
 
         try writeSidecarSentinel(mediaCounts)
 
-        if isDirectoryEmpty(baseFolderURL) {
+        if isDirectoryEmptyFirstLevel(baseFolderURL) {
             if sidecarDebugEnabled {
                 print("DEBUG: SIDE: base dir empty after staging; re-seeding sentinel/original copy")
             }
@@ -2514,6 +2780,14 @@ public enum WhatsAppExportService {
             if !fm.fileExists(atPath: originalCopyDir.path) {
                 try fm.createDirectory(at: originalCopyDir, withIntermediateDirectories: true)
             }
+        }
+
+        let thumbsDir = baseFolderURL.appendingPathComponent("_thumbs", isDirectory: true)
+        if fm.fileExists(atPath: thumbsDir.path), isDirectoryEmptyRecursive(thumbsDir) {
+            if sidecarDebugEnabled {
+                print("WET-DBG: removeItem: \(thumbsDir.path)")
+            }
+            try? fm.removeItem(at: thumbsDir)
         }
 
         return originalCopyDir
@@ -2676,6 +2950,9 @@ public enum WhatsAppExportService {
             do {
                 try ensureDirectory(previewsDir)
                 try decoded.data.write(to: dest, options: .atomic)
+                if ProcessInfo.processInfo.environment["WET_SIDECAR_DEBUG"] == "1" {
+                    print("WET-DBG: stage preview -> \(dest.path)")
+                }
             } catch {
                 return nil
             }
@@ -2887,6 +3164,9 @@ nonisolated private static func stageThumbnailForExport(
         if let jpg = await thumbnailJPEGData(for: src, maxPixel: 900, quality: 0.72) {
             try ensureDirectory(thumbsDir)
             try jpg.write(to: dest, options: .atomic)
+            if ProcessInfo.processInfo.environment["WET_SIDECAR_DEBUG"] == "1" {
+                print("WET-DBG: stage thumb -> \(dest.path)")
+            }
             return relativeHref(for: dest, relativeTo: baseDir)
         }
         #endif
@@ -4006,6 +4286,11 @@ nonisolated private static func stageThumbnailForExport(
         let externalAssetsRoot = externalAssetsDir?.standardizedFileURL
         let externalThumbsDir = externalAssetsRoot?.appendingPathComponent("_thumbs", isDirectory: true)
         let externalPreviewsDir = externalAssetsRoot?.appendingPathComponent("_previews", isDirectory: true)
+        if ProcessInfo.processInfo.environment["WET_SIDECAR_DEBUG"] == "1", let externalAssetsRoot {
+            print("WET-DBG: externalAssetsRoot: \(externalAssetsRoot.path)")
+            if let externalThumbsDir { print("WET-DBG: externalThumbsDir: \(externalThumbsDir.path)") }
+            if let externalPreviewsDir { print("WET-DBG: externalPreviewsDir: \(externalPreviewsDir.path)") }
+        }
 
         var embedCounter = 0
         for m in msgs {
@@ -4628,21 +4913,123 @@ nonisolated private static func stageThumbnailForExport(
         }
     }
 
-    nonisolated private static func isDirectoryEmpty(_ url: URL) -> Bool {
+    nonisolated private static func isDirectoryEmptyFirstLevel(_ url: URL) -> Bool {
         let fm = FileManager.default
-        guard let contents = try? fm.contentsOfDirectory(
-            at: url,
-            includingPropertiesForKeys: nil,
-            options: [.skipsHiddenFiles]
-        ) else {
-            return true
+        do {
+            let contents = try fm.contentsOfDirectory(
+                at: url,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            )
+            return contents.isEmpty
+        } catch {
+            if ProcessInfo.processInfo.environment["WET_SIDECAR_DEBUG"] == "1" {
+                print("WET-DBG: isDirectoryEmptyFirstLevel failed for \(url.path): \(error)")
+            }
+            return false
         }
-        return contents.isEmpty
+    }
+
+    nonisolated private static func isDirectoryEmptyRecursive(_ url: URL) -> Bool {
+        let fm = FileManager.default
+        guard let en = fm.enumerator(
+            at: url,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsPackageDescendants]
+        ) else {
+            if ProcessInfo.processInfo.environment["WET_SIDECAR_DEBUG"] == "1" {
+                print("WET-DBG: isDirectoryEmptyRecursive failed for \(url.path)")
+            }
+            return false
+        }
+        for case let entry as URL in en {
+            // If we cannot query resource values for any entry, err on the side of "not empty".
+            // This prevents accidental deletion of directories that are actually populated.
+            guard let rv = try? entry.resourceValues(forKeys: [.isRegularFileKey]) else {
+                if ProcessInfo.processInfo.environment["WET_SIDECAR_DEBUG"] == "1" {
+                    print("WET-DBG: isDirectoryEmptyRecursive: could not read resourceValues for \(entry.path)")
+                }
+                return false
+            }
+            if rv.isRegularFile == true {
+                return false
+            }
+        }
+        return true
+    }
+
+    nonisolated static func publishExternalAssetsIfPresent(
+        stagingRoot: URL,
+        exportDir: URL,
+        allowOverwrite: Bool,
+        debugEnabled: Bool = false,
+        debugLog: @Sendable (String) -> Void
+    ) throws -> [URL] {
+        let fm = FileManager.default
+        let staging = stagingRoot.standardizedFileURL
+        let finalRoot = exportDir.standardizedFileURL
+
+        func log(_ msg: String) {
+            guard debugEnabled else { return }
+            debugLog(msg)
+        }
+
+        func fileCount(_ dir: URL) -> Int {
+            guard let en = fm.enumerator(
+                at: dir,
+                includingPropertiesForKeys: [.isRegularFileKey],
+                options: [.skipsPackageDescendants]
+            ) else {
+                return 0
+            }
+            var count = 0
+            for case let entry as URL in en {
+                let rv = try? entry.resourceValues(forKeys: [.isRegularFileKey])
+                if rv?.isRegularFile == true {
+                    count += 1
+                }
+            }
+            return count
+        }
+
+        let candidates = ["_thumbs", "_previews"]
+        var published: [URL] = []
+
+        for name in candidates {
+            let src = staging.appendingPathComponent(name, isDirectory: true)
+            var isDir = ObjCBool(false)
+            guard fm.fileExists(atPath: src.path, isDirectory: &isDir), isDir.boolValue else { continue }
+            if isDirectoryEmptyRecursive(src) {
+                log("EXTERNAL ASSETS: skip empty \(src.path)")
+                continue
+            }
+
+            let dst = finalRoot.appendingPathComponent(name, isDirectory: true)
+            if fm.fileExists(atPath: dst.path) {
+                if allowOverwrite {
+                    log("EXTERNAL ASSETS: replace \(src.path) -> \(dst.path)")
+                    _ = try fm.replaceItemAt(dst, withItemAt: src, backupItemName: nil, options: [])
+                } else {
+                    log("EXTERNAL ASSETS: already exists, skip \(dst.path)")
+                    continue
+                }
+            } else {
+                log("EXTERNAL ASSETS: move \(src.path) -> \(dst.path)")
+                try fm.moveItem(at: src, to: dst)
+            }
+
+            let count = fileCount(dst)
+            log("EXTERNAL ASSETS FINAL: \(dst.lastPathComponent) fileCount=\(count) path=\(dst.path)")
+            published.append(dst)
+        }
+
+        return published
     }
 
     nonisolated static func cleanupTemporaryExportFolders(in dir: URL) throws {
         let fm = FileManager.default
         let base = dir.standardizedFileURL
+        let debugEnabled = ProcessInfo.processInfo.environment["WET_SIDECAR_DEBUG"] == "1"
         guard let contents = try? fm.contentsOfDirectory(
             at: base,
             includingPropertiesForKeys: [.isDirectoryKey],
@@ -4654,6 +5041,9 @@ nonisolated private static func stageThumbnailForExport(
         var failed: [String] = []
         for u in contents where u.lastPathComponent.hasPrefix(".wa_export_tmp_") {
             do {
+                if debugEnabled {
+                    print("WET-DBG: removeItem: \(u.path)")
+                }
                 try fm.removeItem(at: u)
             } catch {
                 failed.append(u.lastPathComponent)
@@ -4716,6 +5106,7 @@ nonisolated private static func stageThumbnailForExport(
     nonisolated static func validateSidecarLayout(sidecarBaseDir: URL) throws {
         let fm = FileManager.default
         let base = sidecarBaseDir.standardizedFileURL
+        let debugEnabled = ProcessInfo.processInfo.environment["WET_SIDECAR_DEBUG"] == "1"
         guard let contents = try? fm.contentsOfDirectory(
             at: base,
             includingPropertiesForKeys: [.isDirectoryKey],
@@ -4734,9 +5125,13 @@ nonisolated private static func stageThumbnailForExport(
             }
         }
 
-        let knownBuckets = ["images", "videos", "audios", "documents", "_thumbs", "_previews"]
+        // Do not auto-delete _thumbs/_previews: they may be populated during rendering and must be published when present.
+        let knownBuckets = ["images", "videos", "audios", "documents"]
         for name in knownBuckets {
-            if let url = dirURLs[name], isDirectoryEmpty(url) {
+            if let url = dirURLs[name], isDirectoryEmptyRecursive(url) {
+                if debugEnabled {
+                    print("WET-DBG: removeItem: \(url.path)")
+                }
                 try? fm.removeItem(at: url)
                 dirURLs.removeValue(forKey: name)
             }
@@ -5027,15 +5422,32 @@ nonisolated private static func stageThumbnailForExport(
     /// Best-effort: if no reasonable zip is found, this is a no-op.
     nonisolated private static func copySiblingZipIfPresent(
         sourceDir: URL,
-        destParentDir: URL
+        destParentDir: URL,
+        detectedPartnerRaw: String,
+        overridePartnerRaw: String?,
+        originalZipURL: URL? = nil
     ) throws {
         let fm = FileManager.default
+        let debugEnabled = ProcessInfo.processInfo.environment["WET_SIDECAR_DEBUG"] == "1"
 
-        guard let zipURL = pickSiblingZipURL(sourceDir: sourceDir) else { return }
+        let zipURL = originalZipURL ?? pickSiblingZipURL(sourceDir: sourceDir)
+        guard let zipURL else { return }
 
         try ensureDirectory(destParentDir)
 
-        let dest = destParentDir.appendingPathComponent(zipURL.lastPathComponent)
+        let beforeBase = zipURL.deletingPathExtension().lastPathComponent
+        let afterBase = applyPartnerOverrideToName(
+            originalName: beforeBase,
+            detectedPartnerRaw: detectedPartnerRaw,
+            overridePartnerRaw: overridePartnerRaw
+        )
+        let destName = "\(afterBase).zip"
+        if debugEnabled {
+            print("WET-DBG: SIDECAR ZIP NAME BEFORE: \"\(zipURL.lastPathComponent)\"")
+            print("WET-DBG: SIDECAR ZIP NAME AFTER: \"\(destName)\"")
+        }
+
+        let dest = destParentDir.appendingPathComponent(destName)
         if fm.fileExists(atPath: dest.path) {
             throw OutputCollisionError(url: dest)
         }
@@ -5046,6 +5458,26 @@ nonisolated private static func stageThumbnailForExport(
         } catch {
             // best-effort: ignore copy errors
         }
+    }
+
+    nonisolated static func resolvedSidecarZipName(
+        sourceDir: URL,
+        detectedPartnerRaw: String,
+        overridePartnerRaw: String?,
+        originalZipURL: URL? = nil
+    ) -> (before: String, after: String)? {
+        let zipURL = originalZipURL ?? pickSiblingZipURL(sourceDir: sourceDir)
+        guard let zipURL else { return nil }
+        let before = zipURL.lastPathComponent
+        let base = zipURL.deletingPathExtension().lastPathComponent
+        let afterBase = applyPartnerOverrideToName(
+            originalName: base,
+            detectedPartnerRaw: detectedPartnerRaw,
+            overridePartnerRaw: overridePartnerRaw
+        )
+        let ext = zipURL.pathExtension
+        let after = ext.isEmpty ? afterBase : "\(afterBase).\(ext)"
+        return (before, after)
     }
 
     private nonisolated static func pickSiblingZipURL(sourceDir: URL) -> URL? {

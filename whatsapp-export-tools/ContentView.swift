@@ -21,6 +21,11 @@ struct ContentView: View {
         let prepared: WhatsAppExportService.PreparedExport?
         let exporter: String
         let chatPartner: String
+        let chatPartnerSource: String
+        let chatPartnerFolderOverride: String?
+        let detectedPartnerRaw: String
+        let overridePartnerRaw: String?
+        let provenance: WETSourceProvenance
         let participantNameOverrides: [String: String]
         let selectedVariantsInOrder: [HTMLVariant]
         let plan: RunPlan
@@ -847,16 +852,27 @@ struct ContentView: View {
         return url.path
     }
 
-    private func suggestedChatSubfolderName(chatURL: URL, chatPartner: String) -> String {
+    private func suggestedChatSubfolderName(
+        chatURL: URL,
+        chatPartner: String,
+        detectedPartnerRaw: String,
+        overridePartnerRaw: String?
+    ) -> String {
         let trimmed = normalizedDisplayName(chatPartner)
+        let base: String
         if !trimmed.isEmpty {
-            return safeFolderName(trimmed)
+            base = safeFolderName(trimmed)
+        } else if let fromExportFolder = chatNameFromExportFolder(chatURL: chatURL) {
+            base = safeFolderName(fromExportFolder)
+        } else {
+            let raw = chatPartnerCandidates.first ?? detectedParticipants.first ?? "WhatsApp Chat"
+            base = safeFolderName(raw)
         }
-        if let fromExportFolder = chatNameFromExportFolder(chatURL: chatURL) {
-            return safeFolderName(fromExportFolder)
-        }
-        let raw = chatPartnerCandidates.first ?? detectedParticipants.first ?? "WhatsApp Chat"
-        return safeFolderName(raw)
+        return WhatsAppExportService.applyPartnerOverrideToName(
+            originalName: base,
+            detectedPartnerRaw: detectedPartnerRaw,
+            overridePartnerRaw: overridePartnerRaw
+        )
     }
 
     private func chatNameFromExportFolder(chatURL: URL) -> String? {
@@ -899,7 +915,8 @@ struct ContentView: View {
     private func normalizedDisplayName(_ s: String) -> String {
         let filteredScalars = s.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }
         let cleaned = String(String.UnicodeScalarView(filteredScalars))
-        return cleaned.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+        let normalized = cleaned.precomposedStringWithCanonicalMapping
+        return normalized.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
     }
 
     private func normalizedKey(_ s: String) -> String {
@@ -966,7 +983,7 @@ struct ContentView: View {
     }
 
     private func safeFolderName(_ s: String, maxLen: Int = 120) -> String {
-        var x = s
+        var x = s.precomposedStringWithCanonicalMapping
             .replacingOccurrences(of: "/", with: " ")
             .replacingOccurrences(of: ":", with: " ")
 
@@ -1855,9 +1872,74 @@ struct ContentView: View {
             refreshParticipants(for: chatURL)
         }
 
+        let chatPartnerSelectionTrimmed = chatPartnerSelection.trimmingCharacters(in: .whitespacesAndNewlines)
+        let chatPartnerCustomTrimmed = chatPartnerCustomName.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let uiChatPartnerRaw: String
+        let uiChatPartnerSource: String
+        if chatPartnerSelection == Self.customChatPartnerTag, !chatPartnerCustomTrimmed.isEmpty {
+            uiChatPartnerRaw = chatPartnerCustomTrimmed
+            uiChatPartnerSource = "ui_override"
+        } else if !chatPartnerSelectionTrimmed.isEmpty {
+            uiChatPartnerRaw = chatPartnerSelectionTrimmed
+            uiChatPartnerSource = "ui_selection"
+        } else if let auto = autoDetectedChatPartnerName, !auto.isEmpty {
+            uiChatPartnerRaw = auto
+            uiChatPartnerSource = "auto"
+        } else if let fallback = chatPartnerCandidates.first {
+            uiChatPartnerRaw = fallback
+            uiChatPartnerSource = "fallback"
+        } else {
+            uiChatPartnerRaw = ""
+            uiChatPartnerSource = "fallback"
+        }
+
+        let detectedPartnerRaw: String = {
+            let auto = autoDetectedChatPartnerName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !auto.isEmpty { return auto }
+            let first = chatPartnerCandidates.first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return first
+        }()
+
+        var participantNameOverrides: [String: String] = phoneParticipantOverrides.reduce(into: [:]) { acc, kv in
+            let key = kv.key.trimmingCharacters(in: .whitespacesAndNewlines)
+            let val = kv.value.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !key.isEmpty && !val.isEmpty {
+                acc[key] = val
+            }
+        }
+        if chatPartnerSelection == Self.customChatPartnerTag {
+            let custom = chatPartnerCustomName.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !custom.isEmpty, let raw = rawChatPartnerOverrideCandidate() {
+                participantNameOverrides[raw] = custom
+            }
+        }
+
+        let outputChatPartner = WhatsAppExportService.resolvedParticipantDisplayName(
+            uiChatPartnerRaw,
+            overrides: participantNameOverrides
+        )
+        let normalizedDetected = normalizedDisplayName(detectedPartnerRaw)
+        let normalizedOutput = normalizedDisplayName(outputChatPartner)
+        let overridePartnerEffective: String? = {
+            let trimmedOutput = outputChatPartner.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmedOutput.isEmpty { return nil }
+            if uiChatPartnerSource == "ui_override" || uiChatPartnerSource == "ui_selection" {
+                return trimmedOutput
+            }
+            if !normalizedOutput.isEmpty && normalizedOutput != normalizedDetected {
+                return trimmedOutput
+            }
+            return nil
+        }()
+
         let snapshot: WAInputSnapshot
         do {
-            snapshot = try WhatsAppExportService.resolveInputSnapshot(inputURL: chatURL)
+            snapshot = try WhatsAppExportService.resolveInputSnapshot(
+                inputURL: chatURL,
+                detectedPartnerRaw: detectedPartnerRaw,
+                overridePartnerRaw: overridePartnerEffective
+            )
         } catch {
             appendLog("ERROR: \(error.localizedDescription)")
             isRunning = false
@@ -1871,6 +1953,7 @@ struct ContentView: View {
         }
 
         let resolvedChatURL = snapshot.chatURL
+        let provenance = snapshot.provenance
 
         let exporter = resolvedExporterName()
         if exporter.isEmpty {
@@ -1879,8 +1962,7 @@ struct ContentView: View {
             return
         }
 
-        let chatPartner = resolvedChatPartnerName()
-        if chatPartner.isEmpty {
+        if uiChatPartnerRaw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             appendLog("ERROR: Bitte einen Chat-Partner auswählen.")
             isRunning = false
             return
@@ -1904,19 +1986,12 @@ struct ContentView: View {
             return parts.isEmpty ? "AUS" : parts.joined(separator: ", ")
         }()
 
-        var participantNameOverrides: [String: String] = phoneParticipantOverrides.reduce(into: [:]) { acc, kv in
-            let key = kv.key.trimmingCharacters(in: .whitespacesAndNewlines)
-            let val = kv.value.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !key.isEmpty && !val.isEmpty {
-                acc[key] = val
-            }
-        }
-        if chatPartnerSelection == Self.customChatPartnerTag {
-            let custom = chatPartnerCustomName.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !custom.isEmpty, let raw = rawChatPartnerOverrideCandidate() {
-                participantNameOverrides[raw] = custom
-            }
-        }
+        let partnerForNamingRaw = overridePartnerEffective ?? detectedPartnerRaw
+        let partnerForNamingNormalized = normalizedDisplayName(partnerForNamingRaw)
+        let partnerForNamingFolderName = partnerForNamingNormalized.isEmpty
+            ? nil
+            : safeFolderName(partnerForNamingNormalized)
+        let outputChatPartnerFolderOverride = partnerForNamingFolderName
 
         if selectedVariantsInOrder.isEmpty && !wantsMD && !wantsSidecar {
             appendLog("ERROR: Bitte mindestens eine Ausgabe aktivieren (HTML, Markdown oder Sidecar).")
@@ -1930,7 +2005,33 @@ struct ContentView: View {
             wantsSidecar: wantsSidecar
         )
 
-        let subfolderName = suggestedChatSubfolderName(chatURL: resolvedChatURL, chatPartner: chatPartner)
+        let debugEnabled = wetDebugLoggingEnabled || ProcessInfo.processInfo.environment["WET_SIDECAR_DEBUG"] == "1"
+        let debugLog: (String) -> Void = { [appendLog] message in
+            guard debugEnabled else { return }
+            appendLog("WET-DBG: \(message)")
+        }
+
+        debugLog("UI PARTNER OVERRIDE RAW: \"\(overridePartnerEffective ?? "")\"")
+        debugLog("DETECTED PARTNER RAW: \"\(detectedPartnerRaw)\"")
+        debugLog("EFFECTIVE PARTNER SANITIZED: \"\(partnerForNamingFolderName ?? "")\"")
+        let inputKindLabel: String = {
+            switch provenance.inputKind {
+            case .folder:
+                return "folder"
+            case .zip:
+                return "zip"
+            }
+        }()
+        let zipName = provenance.originalZipURL?.lastPathComponent ?? ""
+        debugLog("PROVENANCE: inputKind=\(inputKindLabel) detectedFolder=\"\(provenance.detectedFolderURL.path)\" originalZip=\"\(zipName)\"")
+
+        let subfolderName = suggestedChatSubfolderName(
+            chatURL: resolvedChatURL,
+            chatPartner: partnerForNamingRaw,
+            detectedPartnerRaw: detectedPartnerRaw,
+            overridePartnerRaw: overridePartnerEffective
+        )
+        debugLog("TARGET DIR NAME: \"\(subfolderName)\" detected=\"\(detectedPartnerRaw)\" override=\"\(overridePartnerEffective ?? "")\" effective=\"\(partnerForNamingRaw)\"")
         let exportDir = outDir.appendingPathComponent(subfolderName, isDirectory: true)
 
         let isOverwriteRetry = overwriteConfirmed
@@ -1951,7 +2052,12 @@ struct ContentView: View {
             preflight: preflight,
             prepared: prepared,
             exporter: exporter,
-            chatPartner: chatPartner,
+            chatPartner: outputChatPartner,
+            chatPartnerSource: uiChatPartnerSource,
+            chatPartnerFolderOverride: outputChatPartnerFolderOverride,
+            detectedPartnerRaw: detectedPartnerRaw,
+            overridePartnerRaw: overridePartnerEffective,
+            provenance: provenance,
             participantNameOverrides: participantNameOverrides,
             selectedVariantsInOrder: selectedVariantsInOrder,
             plan: plan,
@@ -2033,6 +2139,8 @@ struct ContentView: View {
             "Originale löschen=\(onOff(context.wantsDeleteOriginals))"
         )
         debugLog("RUN START: \(Self.formatClockTime(runStartWall))")
+        debugLog("PARTNER NAME SOURCE: \(context.chatPartnerSource)")
+        debugLog("PARTNER NAME EFFECTIVE: \(context.chatPartner)")
         debugLog("TARGET DIR: \(context.exportDir.path)")
         debugLog("EXPORT NAME: \(baseName)")
         debugLog("OPTIONS: Max=\(onOff(context.selectedVariantsInOrder.contains(.embedAll))) " +
@@ -2091,7 +2199,10 @@ struct ContentView: View {
                 await offerSidecarDeletionIfPossible(
                     chatURL: context.chatURL,
                     outDir: workResult.exportDir,
-                    baseHTMLName: workResult.baseHTMLName
+                    baseHTMLName: workResult.baseHTMLName,
+                    detectedPartnerRaw: context.detectedPartnerRaw,
+                    overridePartnerRaw: context.overridePartnerRaw,
+                    originalZipURL: context.provenance.originalZipURL
                 )
             }
 
@@ -2223,6 +2334,9 @@ struct ContentView: View {
         var didRemoveStaging = false
         defer {
             if !didRemoveStaging {
+                if debugEnabled {
+                    debugLog("REMOVE: \(stagingDir.path)")
+                }
                 try? fm.removeItem(at: stagingDir)
             }
             do {
@@ -2277,12 +2391,36 @@ struct ContentView: View {
             do {
                 let rv = try url.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey, .fileSizeKey])
                 if rv.isDirectory == true {
+                    func hasVisibleEntry(_ dir: URL) -> Bool {
+                        let direct = (try? fm.contentsOfDirectory(
+                            at: dir,
+                            includingPropertiesForKeys: nil,
+                            options: []
+                        )) ?? []
+                        if direct.contains(where: { !$0.lastPathComponent.hasPrefix(".") }) {
+                            return true
+                        }
+                        guard let en = fm.enumerator(
+                            at: dir,
+                            includingPropertiesForKeys: nil,
+                            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+                        ) else {
+                            return true
+                        }
+                        for case let entry as URL in en where !entry.lastPathComponent.hasPrefix(".") {
+                            return true
+                        }
+                        return false
+                    }
                     let contents = try fm.contentsOfDirectory(
                         at: url,
                         includingPropertiesForKeys: nil,
-                        options: [.skipsHiddenFiles]
+                        options: []
                     )
-                    if contents.isEmpty {
+                    let visibleCount = contents.filter { entry in
+                        !entry.lastPathComponent.hasPrefix(".")
+                    }.count
+                    if visibleCount == 0 && !hasVisibleEntry(url) {
                         throw EmptyArtifactError(url: url, reason: "directory is empty")
                     }
                 } else if rv.isRegularFile == true {
@@ -2298,6 +2436,25 @@ struct ContentView: View {
             } catch {
                 throw EmptyArtifactError(url: url, reason: "unreadable output")
             }
+        }
+
+        func recursiveFileCount(at url: URL) -> Int {
+            let fm = FileManager.default
+            guard let en = fm.enumerator(
+                at: url,
+                includingPropertiesForKeys: [.isRegularFileKey],
+                options: [.skipsPackageDescendants]
+            ) else {
+                return 0
+            }
+            var count = 0
+            for case let entry as URL in en {
+                let rv = try? entry.resourceValues(forKeys: [.isRegularFileKey])
+                if rv?.isRegularFile == true {
+                    count += 1
+                }
+            }
+            return count
         }
 
         let sidecarDebugEnabled = debugEnabled || ProcessInfo.processInfo.environment["WET_SIDECAR_DEBUG"] == "1"
@@ -2341,10 +2498,28 @@ struct ContentView: View {
                 let contents = (try? fm.contentsOfDirectory(
                     at: url,
                     includingPropertiesForKeys: [.isDirectoryKey],
-                    options: [.skipsHiddenFiles]
+                    options: []
                 )) ?? []
-                debugLog("childCount=\(contents.count)")
-                for child in contents.prefix(10) {
+                let visible = contents.filter { entry in
+                    !entry.lastPathComponent.hasPrefix(".")
+                }
+                var fallbackCount: Int = 0
+                if visible.isEmpty, let en = fm.enumerator(
+                    at: url,
+                    includingPropertiesForKeys: nil,
+                    options: [.skipsHiddenFiles, .skipsPackageDescendants]
+                ) {
+                    for case let entry as URL in en where !entry.lastPathComponent.hasPrefix(".") {
+                        fallbackCount += 1
+                        if fallbackCount >= 10 { break }
+                    }
+                }
+                if fallbackCount > 0 {
+                    debugLog("childCount=\(visible.count) fallbackCount=\(fallbackCount)")
+                } else {
+                    debugLog("childCount=\(visible.count)")
+                }
+                for child in visible.prefix(10) {
                     let isChildDir = (try? child.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
                     debugLog("child \(isChildDir ? "dir" : "file"): \(child.lastPathComponent)")
                 }
@@ -2354,9 +2529,34 @@ struct ContentView: View {
             }
         }
 
+        func logFirstLevelEntries(_ url: URL, label: String, skipHidden: Bool) {
+            guard sidecarDebugEnabled else { return }
+            let fm = FileManager.default
+            let options: FileManager.DirectoryEnumerationOptions = skipHidden ? [.skipsHiddenFiles] : []
+            let contents = (try? fm.contentsOfDirectory(
+                at: url,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: options
+            )) ?? []
+            debugLog("\(label): \(url.path)")
+            if contents.isEmpty {
+                debugLog("(empty)")
+                return
+            }
+            for entry in contents {
+                let isDir = (try? entry.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+                debugLog("entry \(isDir ? "dir" : "file"): \(entry.lastPathComponent)")
+            }
+        }
+
         func finalizeSidecarTimestamps(sidecarBaseDir: URL, logMismatches: Bool) {
             let sourceDir = prepared.chatURL.deletingLastPathComponent()
-            let finalSidecarOriginalDir = sidecarBaseDir.appendingPathComponent(sourceDir.lastPathComponent, isDirectory: true)
+            let originalFolderName = WhatsAppExportService.applyPartnerOverrideToName(
+                originalName: sourceDir.lastPathComponent,
+                detectedPartnerRaw: context.detectedPartnerRaw,
+                overridePartnerRaw: context.overridePartnerRaw
+            )
+            let finalSidecarOriginalDir = sidecarBaseDir.appendingPathComponent(originalFolderName, isDirectory: true)
             WhatsAppExportService.normalizeOriginalCopyTimestamps(
                 sourceDir: sourceDir,
                 destDir: finalSidecarOriginalDir,
@@ -2393,6 +2593,9 @@ struct ContentView: View {
                 debugLog("PUBLISH START: \(staged.path) -> \(final.path)")
             }
             guard recordPublishAttempt(final, artifact: artifact) else {
+                if debugEnabled {
+                    debugLog("REMOVE: \(staged.path)")
+                }
                 try? fm.removeItem(at: staged)
                 return
             }
@@ -2450,6 +2653,7 @@ struct ContentView: View {
         var stagedSidecarHTML: URL? = nil
         var stagedSidecarBaseDir: URL? = nil
         var expectedSidecarAttachments = 0
+        var didPublishExternalAssets = false
 
         do {
             for step in steps {
@@ -2461,18 +2665,47 @@ struct ContentView: View {
                 let stepStart = ProcessInfo.processInfo.systemUptime
                 switch step {
                 case .sidecar:
+                    let sourceDir = prepared.chatURL.deletingLastPathComponent()
+                    if debugEnabled {
+                        let originalNameBefore: String
+                        if let originalZipURL = context.provenance.originalZipURL {
+                            originalNameBefore = originalZipURL.deletingPathExtension().lastPathComponent
+                        } else {
+                            originalNameBefore = sourceDir.lastPathComponent
+                        }
+                        let originalNameAfter = WhatsAppExportService.applyPartnerOverrideToName(
+                            originalName: originalNameBefore,
+                            detectedPartnerRaw: context.detectedPartnerRaw,
+                            overridePartnerRaw: context.overridePartnerRaw
+                        )
+                        debugLog("SIDECAR ORIGINAL NAME BEFORE: \"\(originalNameBefore)\"")
+                        debugLog("SIDECAR ORIGINAL NAME AFTER: \"\(originalNameAfter)\"")
+                    }
                     let sidecarResult = try await Self.debugMeasureAsync("generate sidecar") {
                         try await WhatsAppExportService.renderSidecar(
                             prepared: prepared,
                             outDir: stagingDir,
-                            allowStagingOverwrite: true
+                            allowStagingOverwrite: true,
+                            detectedPartnerRaw: context.detectedPartnerRaw,
+                            overridePartnerRaw: context.overridePartnerRaw,
+                            originalZipURL: context.provenance.originalZipURL
                         )
+                    }
+                    if debugEnabled {
+                        let kind: String
+                        switch context.provenance.inputKind {
+                        case .zip:
+                            kind = "zip"
+                        case .folder:
+                            kind = "folder"
+                        }
+                        let zipName = context.provenance.originalZipURL?.lastPathComponent ?? ""
+                        debugLog("SIDE: provenance inputKind=\(kind) detectedFolder=\"\(context.provenance.detectedFolderURL.path)\" originalZip=\"\(zipName)\"")
                     }
                     expectedSidecarAttachments = sidecarResult.expectedAttachments
                     if debugEnabled {
                         debugLog("SIDE: expected attachments: \(expectedSidecarAttachments)")
                     }
-                    let sourceDir = prepared.chatURL.deletingLastPathComponent()
                     stagedSidecarHTML = sidecarResult.sidecarHTML
                     stagedSidecarBaseDir = sidecarResult.sidecarBaseDir
                     if debugEnabled, let stagedSidecarHTML {
@@ -2493,15 +2726,40 @@ struct ContentView: View {
                         if debugEnabled {
                             debugLog("STAGE PATH: \(stagedSidecarBaseDir.path)")
                         }
+                        let stagedSidecarOriginalName = WhatsAppExportService.applyPartnerOverrideToName(
+                            originalName: sourceDir.lastPathComponent,
+                            detectedPartnerRaw: context.detectedPartnerRaw,
+                            overridePartnerRaw: context.overridePartnerRaw
+                        )
                         let stagedSidecarOriginalDir = stagedSidecarBaseDir.appendingPathComponent(
-                            sourceDir.lastPathComponent,
+                            stagedSidecarOriginalName,
                             isDirectory: true
                         )
                         if debugEnabled {
                             debugLog("SIDE: create assets dir: \(stagedSidecarBaseDir.path)")
+                            let fm = FileManager.default
+                            let htmlExists = fm.fileExists(atPath: stagedSidecarHTML?.path ?? "")
+                            debugLog("SIDE: staged HTML exists=\(htmlExists) path=\(stagedSidecarHTML?.path ?? "")")
+                            var isDir = ObjCBool(false)
+                            let assetsExists = fm.fileExists(atPath: stagedSidecarBaseDir.path, isDirectory: &isDir)
+                            debugLog("SIDE: staged assets dir exists=\(assetsExists && isDir.boolValue) path=\(stagedSidecarBaseDir.path)")
+                            let firstLevel = (try? fm.contentsOfDirectory(
+                                at: stagedSidecarBaseDir,
+                                includingPropertiesForKeys: [.isDirectoryKey],
+                                options: [.skipsHiddenFiles]
+                            )) ?? []
+                            if firstLevel.isEmpty {
+                                debugLog("SIDE: staging root first-level entries: (empty)")
+                            } else {
+                                for entry in firstLevel {
+                                    debugLog("SIDE: staging entry: \(entry.lastPathComponent)")
+                                }
+                            }
                         }
                         logSidecarTree(root: stagedSidecarBaseDir, label: "Sidecar staging root before validation")
                         logSidecarDiagnostics(stagedSidecarBaseDir, label: "Sidecar staging dir before validation")
+                        logFirstLevelEntries(stagingDir, label: "Sidecar staging root entries (all)", skipHidden: false)
+                        logFirstLevelEntries(stagedSidecarBaseDir, label: "Sidecar staging dir entries (all)", skipHidden: false)
                         try ensureNonEmptyArtifact(stagedSidecarBaseDir, artifact: .sidecar)
                         try WhatsAppExportService.validateSidecarLayout(sidecarBaseDir: stagedSidecarBaseDir)
                         WhatsAppExportService.normalizeOriginalCopyTimestamps(
@@ -2598,6 +2856,22 @@ struct ContentView: View {
                     if debugEnabled {
                         debugLog("CLEANUP: staged HTML moved")
                     }
+                    if !didPublishExternalAssets {
+                        let publishedAssets = try WhatsAppExportService.publishExternalAssetsIfPresent(
+                            stagingRoot: stagingDir,
+                            exportDir: exportDir,
+                            allowOverwrite: context.allowOverwrite,
+                            debugEnabled: debugEnabled,
+                            debugLog: debugLog
+                        )
+                        if !publishedAssets.isEmpty {
+                            didPublishExternalAssets = true
+                            if debugEnabled {
+                                let publishedNames = publishedAssets.map { $0.lastPathComponent }
+                                debugLog("EXTERNAL ASSETS: published \(publishedNames.joined(separator: ", "))")
+                            }
+                        }
+                    }
                     htmlByVariant[variant] = finalHTML
                 case .markdown:
                     let stagedMDURL = try Self.debugMeasure("generate Markdown") {
@@ -2657,7 +2931,12 @@ struct ContentView: View {
             }
         } catch {
             if !(error is CancellationError) {
-                for u in movedOutputs.reversed() { try? fm.removeItem(at: u) }
+                for u in movedOutputs.reversed() {
+                    if debugEnabled {
+                        debugLog("REMOVE: \(u.path)")
+                    }
+                    try? fm.removeItem(at: u)
+                }
             }
             throw error
         }
@@ -2682,10 +2961,16 @@ struct ContentView: View {
                     continue
                 }
                 guard fm.fileExists(atPath: target.path) else { continue }
+                if debugEnabled {
+                    debugLog("REMOVE: \(target.path)")
+                }
                 try? fm.removeItem(at: target)
             }
         }
 
+        if debugEnabled {
+            debugLog("REMOVE: \(stagingDir.path)")
+        }
         try? fm.removeItem(at: stagingDir)
         didRemoveStaging = true
 
@@ -2703,6 +2988,39 @@ struct ContentView: View {
             throw WAExportError.suffixArtifactsFound(names: suffixArtifacts)
         }
 
+        if debugEnabled, let finalSidecarBaseDir {
+            let sourceDir = prepared.chatURL.deletingLastPathComponent()
+            let originalNameBefore: String
+            if let originalZipURL = context.provenance.originalZipURL {
+                originalNameBefore = originalZipURL.deletingPathExtension().lastPathComponent
+            } else {
+                originalNameBefore = sourceDir.lastPathComponent
+            }
+            let originalNameAfter = WhatsAppExportService.applyPartnerOverrideToName(
+                originalName: originalNameBefore,
+                detectedPartnerRaw: context.detectedPartnerRaw,
+                overridePartnerRaw: context.overridePartnerRaw
+            )
+            debugLog("SIDECAR ORIGINAL NAME BEFORE: \"\(originalNameBefore)\"")
+            debugLog("SIDECAR ORIGINAL NAME AFTER: \"\(originalNameAfter)\"")
+
+            if let (zipBefore, zipAfter) = WhatsAppExportService.resolvedSidecarZipName(
+                sourceDir: sourceDir,
+                detectedPartnerRaw: context.detectedPartnerRaw,
+                overridePartnerRaw: context.overridePartnerRaw,
+                originalZipURL: context.provenance.originalZipURL
+            ) {
+                debugLog("SIDECAR ZIP NAME BEFORE: \"\(zipBefore)\"")
+                debugLog("SIDECAR ZIP NAME AFTER: \"\(zipAfter)\"")
+            }
+
+            let thumbsDir = finalSidecarBaseDir.appendingPathComponent("_thumbs", isDirectory: true)
+            var isDir = ObjCBool(false)
+            let exists = fm.fileExists(atPath: thumbsDir.path, isDirectory: &isDir)
+            let count = (exists && isDir.boolValue) ? recursiveFileCount(at: thumbsDir) : 0
+            debugLog("SIDECAR THUMBS FINAL: exists=\(exists && isDir.boolValue) fileCount=\(count) path=\(thumbsDir.path)")
+        }
+
         return ExportWorkResult(
             exportDir: exportDir,
             baseHTMLName: baseHTMLName,
@@ -2715,7 +3033,14 @@ struct ContentView: View {
     }
 
     @MainActor
-    private func offerSidecarDeletionIfPossible(chatURL: URL, outDir: URL, baseHTMLName: String) async {
+    private func offerSidecarDeletionIfPossible(
+        chatURL: URL,
+        outDir: URL,
+        baseHTMLName: String,
+        detectedPartnerRaw: String,
+        overridePartnerRaw: String?,
+        originalZipURL: URL?
+    ) async {
         let baseStem = (baseHTMLName as NSString).deletingPathExtension
         let sidecarBaseDir = outDir.appendingPathComponent(baseStem, isDirectory: true)
         let originalDir = chatURL.deletingLastPathComponent()
@@ -2723,7 +3048,10 @@ struct ContentView: View {
         let verification = await Task.detached(priority: .utility) {
             WhatsAppExportService.verifySidecarCopies(
                 originalExportDir: originalDir,
-                sidecarBaseDir: sidecarBaseDir
+                sidecarBaseDir: sidecarBaseDir,
+                detectedPartnerRaw: detectedPartnerRaw,
+                overridePartnerRaw: overridePartnerRaw,
+                originalZipURL: originalZipURL
             )
         }.value
 
