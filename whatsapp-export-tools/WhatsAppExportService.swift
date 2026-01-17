@@ -2380,10 +2380,12 @@ public enum WhatsAppExportService {
         earliestDateByFile.reserveCapacity(64)
 
         for m in messages {
+            try Task.checkCancellation()
             let fns = findAttachments(m.text)
             if fns.isEmpty { continue }
 
             for fn in fns {
+                try Task.checkCancellation()
                 if let existing = earliestDateByFile[fn] {
                     if m.ts < existing { earliestDateByFile[fn] = m.ts }
                 } else {
@@ -2407,6 +2409,7 @@ public enum WhatsAppExportService {
         let chatSourceDir = chatURL.deletingLastPathComponent()
 
         for (fn, ts) in earliestDateByFile.sorted(by: { $0.key < $1.key }) {
+            try Task.checkCancellation()
             guard let src = resolveAttachmentURL(fileName: fn, sourceDir: chatSourceDir) else {
                 continue
             }
@@ -3954,6 +3957,7 @@ nonisolated private static func stageThumbnailForExport(
 
         var embedCounter = 0
         for m in msgs {
+            try Task.checkCancellation()
             let dayKey = isoDateOnly(m.ts)
             if lastDayKey != dayKey {
                 let wd = weekdayDE[weekdayIndexMonday0(m.ts)] ?? ""
@@ -4004,6 +4008,7 @@ nonisolated private static func stageThumbnailForExport(
                 blocks.reserveCapacity(previewTargets.count)
 
                 for u in previewTargets {
+                    try Task.checkCancellation()
                     if let prev = await buildPreview(u) {
                         var imgBlock = ""
                         if let img = prev.imageDataURL {
@@ -4037,6 +4042,7 @@ nonisolated private static func stageThumbnailForExport(
             // Make previews + filenames clickable to the local file (file://...) when it exists.
             var mediaBlocks: [String] = []
             for fn in attachments {
+                try Task.checkCancellation()
                 let direct = chatDir.appendingPathComponent(fn).standardizedFileURL
                 let p = FileManager.default.fileExists(atPath: direct.path)
                     ? direct
@@ -4437,6 +4443,7 @@ nonisolated private static func stageThumbnailForExport(
         var lastDayKey: String? = nil
         let sourceDir = chatURL.deletingLastPathComponent().standardizedFileURL
         for m in msgs {
+            try Task.checkCancellation()
             let dayKey = isoDateOnly(m.ts)
             if lastDayKey != dayKey {
                 let wd = weekdayDE[weekdayIndexMonday0(m.ts)] ?? ""
@@ -4492,6 +4499,7 @@ nonisolated private static func stageThumbnailForExport(
             if !attachmentsAll.isEmpty {
                 out.append("")
                 for fn in attachmentsAll {
+                    try Task.checkCancellation()
                     let ext = (fn as NSString).pathExtension.lowercased()
                     let emoji = attachmentEmoji(forExtension: ext)
 
@@ -4896,6 +4904,7 @@ nonisolated private static func stageThumbnailForExport(
         }
 
         for case let u as URL in en {
+            try Task.checkCancellation()
             if shouldSkip(u) {
                 // If this is a directory, skip its descendants to prevent deep recursion.
                 if (try? u.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
@@ -4934,6 +4943,7 @@ nonisolated private static func stageThumbnailForExport(
 
         // Re-apply file timestamps at the end to avoid any later touches.
         for pair in filePairs {
+            try Task.checkCancellation()
             syncFileSystemTimestamps(from: pair.src, to: pair.dst)
         }
 
@@ -4942,6 +4952,7 @@ nonisolated private static func stageThumbnailForExport(
             $0.dst.standardizedFileURL.path.count > $1.dst.standardizedFileURL.path.count
         }
         for pair in sorted {
+            try Task.checkCancellation()
             syncFileSystemTimestamps(from: pair.src, to: pair.dst)
         }
     }

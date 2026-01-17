@@ -291,6 +291,8 @@ struct ContentView: View {
     @State private var showDeleteOriginalsAlert: Bool = false
     @State private var deleteOriginalCandidates: [URL] = []
     @State private var didSetInitialWindowSize: Bool = false
+    @State private var exportTask: Task<Void, Never>? = nil
+    @State private var cancelRequested: Bool = false
 
     // MARK: - View
 
@@ -746,6 +748,20 @@ struct ContentView: View {
             }
             .buttonStyle(.bordered)
             .disabled(isRunning)
+
+            let cancelButton = Button("Abbrechen") {
+                guard isRunning, !cancelRequested else { return }
+                cancelRequested = true
+                exportTask?.cancel()
+                appendLog("Abbruch angefordert…")
+            }
+            .disabled(!isRunning || cancelRequested)
+
+            if isRunning && !cancelRequested {
+                cancelButton.buttonStyle(.borderedProminent)
+            } else {
+                cancelButton.buttonStyle(.bordered)
+            }
 
             Spacer()
         }
@@ -1612,6 +1628,52 @@ struct ContentView: View {
         return urls
     }
 
+    nonisolated static func replaceDialogLabels(existingNames: [String], baseName: String) -> [String] {
+        var labels: Set<String> = []
+
+        func isSidecarHTML(_ name: String) -> Bool {
+            name.hasPrefix("\(baseName)-sdc") && name.hasSuffix(".html")
+        }
+
+        func isVariantHTML(_ name: String, suffix: String) -> Bool {
+            guard name.hasSuffix(".html") else { return false }
+            let stem = (name as NSString).deletingPathExtension
+            return stem.hasPrefix("\(baseName)\(suffix)")
+        }
+
+        func isMarkdown(_ name: String) -> Bool {
+            guard name.hasSuffix(".md") else { return false }
+            let stem = (name as NSString).deletingPathExtension
+            return stem.hasPrefix(baseName)
+        }
+
+        func isSidecarDir(_ name: String) -> Bool {
+            guard !name.hasSuffix(".html"), !name.hasSuffix(".md") else { return false }
+            return name.hasPrefix(baseName)
+        }
+
+        for name in existingNames {
+            if isSidecarHTML(name) || isSidecarDir(name) {
+                labels.insert("Sidecar")
+            }
+            if isVariantHTML(name, suffix: "-max") {
+                labels.insert("Max")
+            }
+            if isVariantHTML(name, suffix: "-mid") {
+                labels.insert("Kompakt")
+            }
+            if isVariantHTML(name, suffix: "-min") {
+                labels.insert("E-Mail")
+            }
+            if isMarkdown(name) {
+                labels.insert("Markdown")
+            }
+        }
+
+        let ordered = ["Sidecar", "Max", "Kompakt", "E-Mail", "Markdown"]
+        return ordered.filter { labels.contains($0) }
+    }
+
     nonisolated static func isSafeReplaceDeleteTarget(_ target: URL, exportDir: URL) -> Bool {
         let root = exportDir.standardizedFileURL.path
         let rootPrefix = root.hasSuffix("/") ? root : root + "/"
@@ -1787,6 +1849,7 @@ struct ContentView: View {
         let t0 = ProcessInfo.processInfo.systemUptime
         logExportTiming("T0 tap", startUptime: t0)
         isRunning = true
+        cancelRequested = false
         logExportTiming("T1 running-state set", startUptime: t0)
 
         if detectedParticipants.isEmpty {
@@ -1900,16 +1963,21 @@ struct ContentView: View {
         )
 
         cleanupOnExit = false
-        Task {
+        let tempWorkspaceURL = snapshot.tempWorkspaceURL
+        exportTask = Task {
             logExportTiming("T2 export task enqueued", startUptime: t0)
             await runExportFlow(context: context, startUptime: t0)
-            cleanupTempWorkspace(snapshot.tempWorkspaceURL, label: "InputPipeline")
+            cleanupTempWorkspace(tempWorkspaceURL, label: "InputPipeline")
         }
     }
 
     @MainActor
     private func runExportFlow(context: ExportContext, startUptime: TimeInterval) async {
-        defer { isRunning = false }
+        defer {
+            isRunning = false
+            exportTask = nil
+            cancelRequested = false
+        }
 
         await Task.yield()
         logExportTiming("T3 pre-processing begin", startUptime: startUptime)
@@ -1930,13 +1998,18 @@ struct ContentView: View {
                 prepared = provided
             } else {
                 prepared = try await Self.debugMeasureAsync("parse chat") {
-                    try await Task.detached(priority: .userInitiated) {
+                    let parseTask = Task.detached(priority: .userInitiated) {
                         try WhatsAppExportService.prepareExport(
                             chatURL: context.chatURL,
                             meNameOverride: context.exporter,
                             participantNameOverrides: context.participantNameOverrides
                         )
-                    }.value
+                    }
+                    return try await withTaskCancellationHandler {
+                        try await parseTask.value
+                    } onCancel: {
+                        parseTask.cancel()
+                    }
                 }
             }
         } catch {
@@ -1976,9 +2049,14 @@ struct ContentView: View {
                 preflight = provided
             } else {
                 preflight = try await Self.debugMeasureAsync("preflight") {
-                    try await Task.detached(priority: .userInitiated) {
+                    let preflightTask = Task.detached(priority: .userInitiated) {
                         try Self.performOutputPreflight(context: context, baseName: baseName)
-                    }.value
+                    }
+                    return try await withTaskCancellationHandler {
+                        try await preflightTask.value
+                    } onCancel: {
+                        preflightTask.cancel()
+                    }
                 }
 
                 if !preflight.existing.isEmpty, !context.allowOverwrite {
@@ -1988,7 +2066,7 @@ struct ContentView: View {
                 }
             }
 
-            let workResult = try await Task.detached(priority: .userInitiated) {
+            let workTask = Task.detached(priority: .userInitiated) {
                 try await Self.performExportWork(
                     context: context,
                     baseName: preflight.baseName,
@@ -1997,7 +2075,12 @@ struct ContentView: View {
                     debugEnabled: debugEnabled,
                     debugLog: debugLog
                 )
-            }.value
+            }
+            let workResult = try await withTaskCancellationHandler {
+                try await workTask.value
+            } onCancel: {
+                workTask.cancel()
+            }
 
             lastResult = ExportResult(
                 primaryHTML: workResult.primaryHTML,
@@ -2029,6 +2112,10 @@ struct ContentView: View {
                 outputSuffixArtifacts: workResult.outputSuffixArtifacts
             )
         } catch {
+            if error is CancellationError {
+                logger.log("Abgebrochen.")
+                return
+            }
             if let deletionError = error as? OutputDeletionError {
                 logger.log("ERROR: \(deletionError.errorDescription ?? "Konnte vorhandene Ausgaben nicht löschen.")")
                 return
@@ -2053,10 +2140,11 @@ struct ContentView: View {
                         in: exportDir
                     )
                     let fm = FileManager.default
-                    replaceExistingNames = replaceTargets
+                    let existingNames = replaceTargets
                         .filter { fm.fileExists(atPath: $0.path) }
                         .map { $0.lastPathComponent }
                         + suffixArtifacts.filter { fm.fileExists(atPath: exportDir.appendingPathComponent($0).path) }
+                    replaceExistingNames = Self.replaceDialogLabels(existingNames: existingNames, baseName: baseName)
                     showReplaceAlert = true
                     let count = replaceExistingNames.count
                     logger.log("Vorhandene Ausgaben gefunden: \(count) Datei(en). Warte auf Bestätigung zum Ersetzen…")
@@ -2366,6 +2454,7 @@ struct ContentView: View {
 
         do {
             for step in steps {
+                try Task.checkCancellation()
                 if debugEnabled {
                     debugLog("VARIANT START: \(artifactLabel(step))")
                 }
@@ -2430,6 +2519,7 @@ struct ContentView: View {
                     }
                     logSidecarDiagnostics(stagedSidecarHTML, label: "Sidecar HTML before validation")
                     try ensureNonEmptyArtifact(stagedSidecarHTML, artifact: .sidecar)
+                    try Task.checkCancellation()
 
                     if debugEnabled {
                         debugLog("VALIDATE OK: Sidecar")
@@ -2491,6 +2581,7 @@ struct ContentView: View {
                         debugLog("STAGE PATH: \(stagedHTML.path)")
                     }
                     try ensureNonEmptyArtifact(stagedHTML, artifact: .html(variant))
+                    try Task.checkCancellation()
                     if debugEnabled {
                         debugLog("VALIDATE OK: \(stagedHTML.path)")
                     }
@@ -2520,6 +2611,7 @@ struct ContentView: View {
                         debugLog("STAGE PATH: \(stagedMDURL.path)")
                     }
                     try ensureNonEmptyArtifact(stagedMDURL, artifact: .markdown)
+                    try Task.checkCancellation()
                     if debugEnabled {
                         debugLog("VALIDATE OK: \(stagedMDURL.path)")
                     }
@@ -2565,7 +2657,9 @@ struct ContentView: View {
                 finalizeSidecarTimestamps(sidecarBaseDir: finalSidecarBaseDir, logMismatches: true)
             }
         } catch {
-            for u in movedOutputs.reversed() { try? fm.removeItem(at: u) }
+            if !(error is CancellationError) {
+                for u in movedOutputs.reversed() { try? fm.removeItem(at: u) }
+            }
             throw error
         }
 
