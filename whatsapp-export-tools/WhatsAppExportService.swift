@@ -1019,7 +1019,7 @@ public enum WhatsAppExportService {
 
         var didSidecar = false
         if exportSortedAttachments {
-            let sidecarOriginalDir = try exportSortedAttachmentsFolder(
+            let sidecarOriginalDir = try await exportSortedAttachmentsFolder(
                 chatURL: chatPath,
                 messages: msgs,
                 outDir: stagingDir,
@@ -1275,7 +1275,7 @@ public enum WhatsAppExportService {
             try? fm.removeItem(at: stagingBaseDir)
         }
 
-        let sidecarOriginalDir = try exportSortedAttachmentsFolder(
+        let sidecarOriginalDir = try await exportSortedAttachmentsFolder(
             chatURL: prepared.chatURL,
             messages: prepared.messages,
             outDir: outPath,
@@ -1435,7 +1435,7 @@ public enum WhatsAppExportService {
 
         var didSidecar = false
         if exportSortedAttachments {
-            let sidecarOriginalDir = try exportSortedAttachmentsFolder(
+            let sidecarOriginalDir = try await exportSortedAttachmentsFolder(
                 chatURL: chatPath,
                 messages: msgs,
                 outDir: stagingDir,
@@ -2583,7 +2583,7 @@ public enum WhatsAppExportService {
         detectedPartnerRaw: String,
         overridePartnerRaw: String? = nil,
         originalZipURL: URL? = nil
-    ) throws -> URL {
+    ) async throws -> URL {
         let fm = FileManager.default
         let sidecarDebugEnabled = ProcessInfo.processInfo.environment["WET_SIDECAR_DEBUG"] == "1"
 
@@ -2693,7 +2693,6 @@ public enum WhatsAppExportService {
         // If there are no attachments, keep the bucket folders absent.
         if earliestDateByFile.isEmpty { return originalCopyDir }
 
-        var ensuredBuckets = Set<SortedAttachmentBucket>()
         var bucketsWithContent = Set<SortedAttachmentBucket>()
 
         let df = DateFormatter()
@@ -2704,7 +2703,18 @@ public enum WhatsAppExportService {
 
         let chatSourceDir = chatURL.deletingLastPathComponent()
 
-        for (fn, ts) in earliestDateByFile.sorted(by: { $0.key < $1.key }) {
+        struct SidecarAttachmentJob {
+            let src: URL
+            let dst: URL
+            let bucket: SortedAttachmentBucket
+        }
+
+        let ordered = earliestDateByFile.sorted(by: { $0.key < $1.key })
+        var jobs: [SidecarAttachmentJob] = []
+        jobs.reserveCapacity(ordered.count)
+        var dstSeen = Set<String>()
+
+        for (fn, ts) in ordered {
             try Task.checkCancellation()
             guard let src = resolveAttachmentURL(fileName: fn, sourceDir: chatSourceDir) else {
                 continue
@@ -2720,33 +2730,73 @@ public enum WhatsAppExportService {
                 }
             }()
 
-            if ensuredBuckets.insert(bucket).inserted {
-                try fm.createDirectory(at: dstFolder, withIntermediateDirectories: true)
-            }
-
             let prefix = df.string(from: ts)
             let dstName = "\(prefix) \(fn)"
             let dst = dstFolder.appendingPathComponent(dstName)
-            if fm.fileExists(atPath: dst.path) {
+            if !dstSeen.insert(dst.path).inserted {
                 throw OutputCollisionError(url: dst)
             }
 
-            do {
-                try fm.copyItem(at: src, to: dst)
-                syncFileSystemTimestamps(from: src, to: dst)
-                bucketsWithContent.insert(bucket)
+            jobs.append(SidecarAttachmentJob(src: src, dst: dst, bucket: bucket))
+        }
+
+        let bucketsToCreate = Set(jobs.map(\.bucket))
+        for bucket in bucketsToCreate {
+            let dstFolder: URL = {
                 switch bucket {
-                case .images:
-                    mediaCounts.images += 1
-                case .videos:
-                    mediaCounts.videos += 1
-                case .audios:
-                    mediaCounts.audios += 1
-                case .documents:
-                    mediaCounts.documents += 1
+                case .images: return imagesDir
+                case .videos: return videosDir
+                case .audios: return audiosDir
+                case .documents: return docsDir
                 }
-            } catch {
-                // keep export resilient
+            }()
+            try fm.createDirectory(at: dstFolder, withIntermediateDirectories: true)
+        }
+
+        let caps = wetConcurrencyCaps
+        if sidecarDebugEnabled {
+            print("WET-DBG: CONCURRENCY: sidecar attachments cap=\(caps.io) jobs=\(jobs.count)")
+        }
+        let limiter = AsyncLimiter(caps.io)
+        var results = Array<SortedAttachmentBucket?>(repeating: nil, count: jobs.count)
+
+        try await withThrowingTaskGroup(of: (Int, SortedAttachmentBucket?).self) { group in
+            for (idx, job) in jobs.enumerated() {
+                group.addTask {
+                    try Task.checkCancellation()
+                    return try await limiter.withPermit {
+                        try Task.checkCancellation()
+                        let fm = FileManager.default
+                        if fm.fileExists(atPath: job.dst.path) {
+                            throw OutputCollisionError(url: job.dst)
+                        }
+                        do {
+                            try fm.copyItem(at: job.src, to: job.dst)
+                            syncFileSystemTimestamps(from: job.src, to: job.dst)
+                            return (idx, job.bucket)
+                        } catch {
+                            return (idx, nil)
+                        }
+                    }
+                }
+            }
+
+            for try await (idx, bucket) in group {
+                results[idx] = bucket
+            }
+        }
+
+        for bucket in results.compactMap({ $0 }) {
+            bucketsWithContent.insert(bucket)
+            switch bucket {
+            case .images:
+                mediaCounts.images += 1
+            case .videos:
+                mediaCounts.videos += 1
+            case .audios:
+                mediaCounts.audios += 1
+            case .documents:
+                mediaCounts.documents += 1
             }
         }
 
@@ -2756,7 +2806,7 @@ public enum WhatsAppExportService {
             .audios: audiosDir,
             .documents: docsDir
         ]
-        for bucket in ensuredBuckets where !bucketsWithContent.contains(bucket) {
+        for bucket in bucketsToCreate where !bucketsWithContent.contains(bucket) {
             if let dir = bucketDirs[bucket], isDirectoryEmptyRecursive(dir) {
                 if sidecarDebugEnabled {
                     print("WET-DBG: removeItem: \(dir.path)")
@@ -2822,6 +2872,54 @@ public enum WhatsAppExportService {
         }
 
         return lines.joined(separator: "\n")
+    }
+
+    private actor AsyncLimiter {
+        private var available: Int
+        private var waiters: [CheckedContinuation<Void, Never>] = []
+
+        init(_ maxConcurrent: Int) {
+            self.available = max(1, maxConcurrent)
+        }
+
+        func acquire() async {
+            if available > 0 {
+                available -= 1
+                return
+            }
+            await withCheckedContinuation { waiters.append($0) }
+        }
+
+        func release() {
+            if waiters.isEmpty {
+                available += 1
+            } else {
+                let next = waiters.removeFirst()
+                next.resume()
+            }
+        }
+
+        func withPermit<T>(_ work: @Sendable () async throws -> T) async rethrows -> T {
+            await acquire()
+            defer { release() }
+            return try await work()
+        }
+    }
+
+    nonisolated private static var wetConcurrencyCaps: (cpu: Int, io: Int) {
+        let env = ProcessInfo.processInfo.environment
+        let cores = ProcessInfo.processInfo.activeProcessorCount
+        let cpuDefault = max(2, cores)
+        let ioDefault = min(max(2, cores), 8)
+        let cpuOverride = env["WET_MAX_CPU"].flatMap { Int($0) }
+        let ioOverride = env["WET_MAX_IO"].flatMap { Int($0) }
+        let cpu = max(1, cpuOverride ?? cpuDefault)
+        let io = max(1, ioOverride ?? ioDefault)
+        return (cpu: cpu, io: io)
+    }
+
+    nonisolated static func concurrencyCaps() -> (cpu: Int, io: Int) {
+        wetConcurrencyCaps
     }
 
     nonisolated private static func guessMime(fromName name: String) -> String {
@@ -3929,6 +4027,7 @@ nonisolated private static func stageThumbnailForExport(
     ) async throws {
 
         let renderStart = ProcessInfo.processInfo.systemUptime
+        let perfEnabled = ProcessInfo.processInfo.environment["WET_PERF"] == "1"
 
         // participants -> title_names
         var authors: [String] = []
@@ -4292,6 +4391,116 @@ nonisolated private static func stageThumbnailForExport(
             if let externalPreviewsDir { print("WET-DBG: externalPreviewsDir: \(externalPreviewsDir.path)") }
         }
 
+        let caps = wetConcurrencyCaps
+        if perfEnabled {
+            print("WET-PERF: render caps cpu=\(caps.cpu) io=\(caps.io)")
+        }
+
+        var previewByURL: [String: WAPreview] = [:]
+        if enablePreviews {
+            var previewTargets: [String] = []
+            previewTargets.reserveCapacity(64)
+            var seen = Set<String>()
+            for m in msgs {
+                let textWoAttach = stripAttachmentMarkers(m.text)
+                let trimmedText = textWoAttach.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmedText.isEmpty { continue }
+                let urls = extractURLs(trimmedText)
+                if urls.isEmpty { continue }
+                for u in urls where seen.insert(u).inserted {
+                    previewTargets.append(u)
+                }
+            }
+            if !previewTargets.isEmpty {
+                let previewCap = min(caps.cpu, 8)
+                if perfEnabled {
+                    print("WET-PERF: previews cap=\(previewCap) jobs=\(previewTargets.count)")
+                }
+                let limiter = AsyncLimiter(previewCap)
+                var results = Array<WAPreview?>(repeating: nil, count: previewTargets.count)
+                try await withThrowingTaskGroup(of: (Int, WAPreview?).self) { group in
+                    for (idx, url) in previewTargets.enumerated() {
+                        group.addTask {
+                            try Task.checkCancellation()
+                            return try await limiter.withPermit {
+                                try Task.checkCancellation()
+                                let prev = await buildPreview(url)
+                                return (idx, prev)
+                            }
+                        }
+                    }
+                    for try await (idx, prev) in group {
+                        results[idx] = prev
+                    }
+                }
+                for (idx, prev) in results.enumerated() {
+                    if let prev {
+                        previewByURL[previewTargets[idx]] = prev
+                    }
+                }
+            }
+        }
+
+        var stagedThumbsByPath: [String: String] = [:]
+        if externalAttachments, !disableThumbStaging, let thumbsDir = externalThumbsDir {
+            struct ThumbJob {
+                let src: URL
+                let dest: URL
+            }
+            var jobs: [ThumbJob] = []
+            jobs.reserveCapacity(64)
+            var seenDest = Set<String>()
+            var seenSrc = Set<String>()
+            for m in msgs {
+                try Task.checkCancellation()
+                let fns = findAttachments(m.text)
+                if fns.isEmpty { continue }
+                for fn in fns {
+                    guard let src = resolveAttachmentURL(fileName: fn, sourceDir: chatDir) else { continue }
+                    let srcPath = src.path
+                    if !seenSrc.insert(srcPath).inserted { continue }
+                    let baseName = src.deletingPathExtension().lastPathComponent
+                    let dest = thumbsDir.appendingPathComponent(baseName).appendingPathExtension("jpg")
+                    if seenDest.insert(dest.path).inserted {
+                        jobs.append(ThumbJob(src: src, dest: dest))
+                    }
+                }
+            }
+            if !jobs.isEmpty {
+                let thumbCap = min(caps.io, 4)
+                if perfEnabled {
+                    print("WET-PERF: thumbs cap=\(thumbCap) jobs=\(jobs.count)")
+                }
+                let limiter = AsyncLimiter(thumbCap)
+                var results = Array<(String, String?)?>(repeating: nil, count: jobs.count)
+                try await withThrowingTaskGroup(of: (Int, String, String?).self) { group in
+                    for (idx, job) in jobs.enumerated() {
+                        group.addTask {
+                            try Task.checkCancellation()
+                            return try await limiter.withPermit {
+                                try Task.checkCancellation()
+                                let href = await stageThumbnailForExport(
+                                    source: job.src,
+                                    thumbsDir: thumbsDir,
+                                    relativeTo: attachmentRelBaseDir
+                                )
+                                return (idx, job.src.path, href)
+                            }
+                        }
+                    }
+                    for try await (idx, srcPath, href) in group {
+                        results[idx] = (srcPath, href)
+                    }
+                }
+                for item in results {
+                    guard let (srcPath, href) = item else { continue }
+                    if let href {
+                        stagedThumbsByPath[srcPath] = href
+                    }
+                }
+            }
+        }
+
         var embedCounter = 0
         for m in msgs {
             try Task.checkCancellation()
@@ -4353,7 +4562,13 @@ nonisolated private static func stageThumbnailForExport(
 
                 for u in previewTargets {
                     try Task.checkCancellation()
-                    if let prev = await buildPreview(u) {
+                    let prev: WAPreview?
+                    if let cached = previewByURL[u] {
+                        prev = cached
+                    } else {
+                        prev = await buildPreview(u)
+                    }
+                    if let prev {
                         var imgBlock = ""
                         if let img = prev.imageDataURL {
                             if externalPreviews, let previewsDir = externalPreviewsDir {
@@ -4573,7 +4788,17 @@ nonisolated private static func stageThumbnailForExport(
                         let mime = guessMime(fromName: fn)
                         var posterAttr = ""
                         if !disableThumbStaging, let thumbsDir = externalThumbsDir {
-                            if let poster = await stageThumbnailForExport(source: p, thumbsDir: thumbsDir, relativeTo: attachmentRelBaseDir) {
+                            let poster: String?
+                            if let cached = stagedThumbsByPath[p.path] {
+                                poster = cached
+                            } else {
+                                poster = await stageThumbnailForExport(
+                                    source: p,
+                                    thumbsDir: thumbsDir,
+                                    relativeTo: attachmentRelBaseDir
+                                )
+                            }
+                            if let poster {
                                 posterAttr = " poster='\(htmlEscape(poster))'"
                             }
                         }
@@ -4597,7 +4822,15 @@ nonisolated private static func stageThumbnailForExport(
                     if ["pdf", "doc", "docx"].contains(ext) {
                         var thumbHref: String? = nil
                         if !disableThumbStaging, let thumbsDir = externalThumbsDir {
-                            thumbHref = await stageThumbnailForExport(source: p, thumbsDir: thumbsDir, relativeTo: attachmentRelBaseDir)
+                            if let cached = stagedThumbsByPath[p.path] {
+                                thumbHref = cached
+                            } else {
+                                thumbHref = await stageThumbnailForExport(
+                                    source: p,
+                                    thumbsDir: thumbsDir,
+                                    relativeTo: attachmentRelBaseDir
+                                )
+                            }
                         }
                         if let thumbHref {
                             mediaBlocks.append(
@@ -4721,17 +4954,31 @@ nonisolated private static func stageThumbnailForExport(
         }
 
         parts.append("</div></body></html>")
-        let html = parts.joined()
         let renderDuration = ProcessInfo.processInfo.systemUptime - renderStart
         if let perfLabel {
             recordHTMLRender(label: perfLabel, duration: renderDuration)
         }
 
         let writeStart = ProcessInfo.processInfo.systemUptime
-        try html.write(to: outHTML, atomically: true, encoding: .utf8)
+        let tempHTML = outHTML.appendingPathExtension("tmp")
+        FileManager.default.createFile(atPath: tempHTML.path, contents: nil)
+        let handle = try FileHandle(forWritingTo: tempHTML)
+        var bytesWritten = 0
+        for part in parts {
+            if part.isEmpty { continue }
+            let data = Data(part.utf8)
+            bytesWritten += data.count
+            try Task.checkCancellation()
+            try handle.write(contentsOf: data)
+        }
+        try handle.close()
+        if FileManager.default.fileExists(atPath: outHTML.path) {
+            try? FileManager.default.removeItem(at: outHTML)
+        }
+        try FileManager.default.moveItem(at: tempHTML, to: outHTML)
         let writeDuration = ProcessInfo.processInfo.systemUptime - writeStart
         if let perfLabel {
-            recordHTMLWrite(label: perfLabel, duration: writeDuration, bytes: html.utf8.count)
+            recordHTMLWrite(label: perfLabel, duration: writeDuration, bytes: bytesWritten)
         }
     }
 

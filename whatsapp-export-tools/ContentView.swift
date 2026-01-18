@@ -2005,7 +2005,10 @@ struct ContentView: View {
             wantsSidecar: wantsSidecar
         )
 
-        let debugEnabled = wetDebugLoggingEnabled || ProcessInfo.processInfo.environment["WET_SIDECAR_DEBUG"] == "1"
+        let env = ProcessInfo.processInfo.environment
+        let debugEnabled = wetDebugLoggingEnabled
+            || env["WET_SIDECAR_DEBUG"] == "1"
+            || env["WET_DEBUG"] == "1"
         let debugLog: (String) -> Void = { [appendLog] message in
             guard debugEnabled else { return }
             appendLog("WET-DBG: \(message)")
@@ -2091,11 +2094,15 @@ struct ContentView: View {
             appendLog(message)
         }
         let logger = ExportProgressLogger(append: append)
-        let debugEnabled = wetDebugLoggingEnabled || ProcessInfo.processInfo.environment["WET_SIDECAR_DEBUG"] == "1"
+        let env = ProcessInfo.processInfo.environment
+        let debugEnabled = wetDebugLoggingEnabled
+            || env["WET_SIDECAR_DEBUG"] == "1"
+            || env["WET_DEBUG"] == "1"
         let debugLog: @Sendable (String) -> Void = { [appendLog] message in
             guard debugEnabled else { return }
             appendLog("WET-DBG: \(message)")
         }
+        let perfEnabled = env["WET_PERF"] == "1"
 
         let prepared: WhatsAppExportService.PreparedExport
         do {
@@ -2149,6 +2156,16 @@ struct ContentView: View {
                  "Markdown=\(onOff(context.wantsMD)) " +
                  "Sidecar=\(onOff(context.wantsSidecar)) " +
                  "DeleteOriginals=\(onOff(context.wantsDeleteOriginals))")
+        if perfEnabled {
+            let caps = WhatsAppExportService.concurrencyCaps()
+            logger.log("WET-PERF: caps cpu=\(caps.cpu) io=\(caps.io)")
+            if let cpuOverride = env["WET_MAX_CPU"] {
+                logger.log("WET-PERF: WET_MAX_CPU=\(cpuOverride)")
+            }
+            if let ioOverride = env["WET_MAX_IO"] {
+                logger.log("WET-PERF: WET_MAX_IO=\(ioOverride)")
+            }
+        }
 
         do {
             let preflight: OutputPreflight
@@ -2318,6 +2335,17 @@ struct ContentView: View {
         let fm = FileManager.default
         let exportDir = context.exportDir.standardizedFileURL
         let plan = context.plan
+        let env = ProcessInfo.processInfo.environment
+        if debugEnabled {
+            let caps = WhatsAppExportService.concurrencyCaps()
+            debugLog("CONCURRENCY CAPS: cpu=\(caps.cpu) io=\(caps.io)")
+            if let cpuOverride = env["WET_MAX_CPU"] {
+                debugLog("CONCURRENCY OVERRIDE: WET_MAX_CPU=\(cpuOverride)")
+            }
+            if let ioOverride = env["WET_MAX_IO"] {
+                debugLog("CONCURRENCY OVERRIDE: WET_MAX_IO=\(ioOverride)")
+            }
+        }
 
         // exportDir exists by workflow (picked by user + subfolder), but creating it is harmless.
         try fm.createDirectory(at: exportDir, withIntermediateDirectories: true)

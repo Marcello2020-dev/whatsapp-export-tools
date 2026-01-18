@@ -14,6 +14,8 @@ struct AIGlowOverlay: View {
     @Environment(\.colorSchemeContrast) private var colorSchemeContrast
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityReduceTransparency) private var accessibilityReduceTransparency
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.controlActiveState) private var controlActiveState
     @Environment(\.aiGlowReduceMotionOverride) private var reduceMotionOverride
     @Environment(\.aiGlowIncreasedContrastOverride) private var increasedContrastOverride
     @Environment(\.aiGlowReduceTransparencyOverride) private var reduceTransparencyOverride
@@ -601,10 +603,18 @@ struct AIGlowOverlay: View {
     }
 
     private var tickerPublisher: AnyPublisher<TimeInterval, Never> {
-        if active, isVisible {
+        if shouldAnimate {
             return AIGlowTicker.shared.publisher
         }
         return Empty().eraseToAnyPublisher()
+    }
+
+    private var shouldAnimate: Bool {
+        guard active, isVisible else { return false }
+        guard scenePhase == .active else { return false }
+        if controlActiveState == .inactive { return false }
+        if isRunning { return true }
+        return style.motionMode == .turbulence
     }
 
     private func clamp(_ value: Double, min: Double, max: Double) -> Double {
