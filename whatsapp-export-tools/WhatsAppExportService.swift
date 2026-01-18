@@ -988,8 +988,6 @@ public enum WhatsAppExportService {
         )
 
         let fm = FileManager.default
-        try fm.createDirectory(at: outPath, withIntermediateDirectories: true)
-        try cleanupTemporaryExportFolders(in: outPath)
 
         let outHTML = outPath.appendingPathComponent("\(base).html")
         let outMD = outPath.appendingPathComponent("\(base).md")
@@ -1018,13 +1016,13 @@ public enum WhatsAppExportService {
             throw WAExportError.outputAlreadyExists(urls: existing)
         }
 
-        let stagingDir = try createStagingDirectory(in: outPath)
+        let stagingBase = try localStagingBaseDirectory()
+        let stagingDir = try createStagingDirectory(in: stagingBase)
         var didRemoveStaging = false
         defer {
             if !didRemoveStaging {
                 try? fm.removeItem(at: stagingDir)
             }
-            try? cleanupTemporaryExportFolders(in: outPath)
         }
 
         let stagedHTML = stagingDir.appendingPathComponent("\(base).html")
@@ -1112,11 +1110,29 @@ public enum WhatsAppExportService {
             didSidecar = true
         }
 
-        if allowOverwrite {
-            let deleteTargets = [outHTML, outMD, sidecarHTML, sortedFolderURL]
-                + HTMLVariant.allCases.map { outPath.appendingPathComponent("\(base)\($0.filenameSuffix).html") }
-            for u in deleteTargets where fm.fileExists(atPath: u.path) {
-                try fm.removeItem(at: u)
+        func publishMove(_ src: URL, _ dst: URL) throws {
+            try fm.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if fm.fileExists(atPath: dst.path) {
+                if allowOverwrite {
+                    let isDir = (try? dst.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+                    let backup = dst
+                        .deletingLastPathComponent()
+                        .appendingPathComponent(".wa_backup_\(UUID().uuidString)", isDirectory: isDir)
+                    try fm.moveItem(at: dst, to: backup)
+                    do {
+                        try fm.moveItem(at: src, to: dst)
+                        try? fm.removeItem(at: backup)
+                    } catch {
+                        if fm.fileExists(atPath: backup.path) {
+                            try? fm.moveItem(at: backup, to: dst)
+                        }
+                        throw error
+                    }
+                } else {
+                    throw OutputCollisionError(url: dst)
+                }
+            } else {
+                try fm.moveItem(at: src, to: dst)
             }
         }
 
@@ -1132,10 +1148,7 @@ public enum WhatsAppExportService {
         var moved: [URL] = []
         do {
             for (src, dst) in moveItems {
-                if !allowOverwrite, fm.fileExists(atPath: dst.path) {
-                    throw OutputCollisionError(url: dst)
-                }
-                try fm.moveItem(at: src, to: dst)
+                try publishMove(src, dst)
                 moved.append(dst)
             }
         } catch {
@@ -1387,8 +1400,6 @@ public enum WhatsAppExportService {
         let base = composeExportBaseName(messages: msgs, chatURL: chatPath, meName: meName)
 
         let fm = FileManager.default
-        try fm.createDirectory(at: outPath, withIntermediateDirectories: true)
-        try cleanupTemporaryExportFolders(in: outPath)
 
         // Output URLs
         var htmlByVariant: [HTMLVariant: URL] = [:]
@@ -1425,13 +1436,13 @@ public enum WhatsAppExportService {
             throw WAExportError.outputAlreadyExists(urls: existing)
         }
 
-        let stagingDir = try createStagingDirectory(in: outPath)
+        let stagingBase = try localStagingBaseDirectory()
+        let stagingDir = try createStagingDirectory(in: stagingBase)
         var didRemoveStaging = false
         defer {
             if !didRemoveStaging {
                 try? fm.removeItem(at: stagingDir)
             }
-            try? cleanupTemporaryExportFolders(in: outPath)
         }
 
         var stagedHTMLByVariant: [HTMLVariant: URL] = [:]
@@ -1527,14 +1538,6 @@ public enum WhatsAppExportService {
             didSidecar = true
         }
 
-        if allowOverwrite {
-            let deleteTargets = [outMD, sidecarHTML, sortedFolderURL]
-                + HTMLVariant.allCases.map { outPath.appendingPathComponent("\(base)\($0.filenameSuffix).html") }
-            for u in deleteTargets where fm.fileExists(atPath: u.path) {
-                try fm.removeItem(at: u)
-            }
-        }
-
         var moveItems: [(src: URL, dst: URL)] = []
         for v in variants {
             if let src = stagedHTMLByVariant[v], let dst = htmlByVariant[v] {
@@ -1547,13 +1550,36 @@ public enum WhatsAppExportService {
             moveItems.append((stagedSidecarDir, sortedFolderURL))
         }
 
+        func publishMove(_ src: URL, _ dst: URL) throws {
+            try fm.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if fm.fileExists(atPath: dst.path) {
+                if allowOverwrite {
+                    let isDir = (try? dst.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+                    let backup = dst
+                        .deletingLastPathComponent()
+                        .appendingPathComponent(".wa_backup_\(UUID().uuidString)", isDirectory: isDir)
+                    try fm.moveItem(at: dst, to: backup)
+                    do {
+                        try fm.moveItem(at: src, to: dst)
+                        try? fm.removeItem(at: backup)
+                    } catch {
+                        if fm.fileExists(atPath: backup.path) {
+                            try? fm.moveItem(at: backup, to: dst)
+                        }
+                        throw error
+                    }
+                } else {
+                    throw OutputCollisionError(url: dst)
+                }
+            } else {
+                try fm.moveItem(at: src, to: dst)
+            }
+        }
+
         var moved: [URL] = []
         do {
             for (src, dst) in moveItems {
-                if !allowOverwrite, fm.fileExists(atPath: dst.path) {
-                    throw OutputCollisionError(url: dst)
-                }
-                try fm.moveItem(at: src, to: dst)
+                try publishMove(src, dst)
                 moved.append(dst)
             }
         } catch {
@@ -5384,6 +5410,29 @@ nonisolated private static func stageThumbnailForExport(
 
         let fallback = base.appendingPathComponent(".wa_export_tmp_\(UUID().uuidString)", isDirectory: true)
         throw StagingDirectoryCreationError(url: fallback, underlying: CocoaError(.fileWriteFileExists))
+    }
+
+    nonisolated static func localStagingBaseDirectory() throws -> URL {
+        let fm = FileManager.default
+        let base = fm.temporaryDirectory.appendingPathComponent("whatsapp-export-tools", isDirectory: true)
+        if !fm.fileExists(atPath: base.path) {
+            try fm.createDirectory(at: base, withIntermediateDirectories: true)
+        }
+        return base.standardizedFileURL
+    }
+
+    nonisolated static func isLikelyICloudBacked(_ url: URL) -> Bool {
+        let path = url.standardizedFileURL.path
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        if path.contains("/Library/Mobile Documents/") || path.contains("/Library/Mobile Documents/com~apple~CloudDocs/") {
+            return true
+        }
+        let desktop = home + "/Desktop"
+        let documents = home + "/Documents"
+        if path.hasPrefix(desktop) || path.hasPrefix(documents) {
+            return true
+        }
+        return false
     }
 
     nonisolated private static func suffixBaseNameIfPresent(_ name: String) -> String? {

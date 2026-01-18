@@ -286,6 +286,7 @@ struct ContentView: View {
     @State private var isRunning: Bool = false
     @State private var logText: String = ""
     @State private var logLines: [String] = []
+    @State private var logAutoScrollWorkItem: DispatchWorkItem? = nil
 
     @State private var showReplaceAlert: Bool = false
     @State private var replaceExistingNames: [String] = []
@@ -774,15 +775,31 @@ struct ContentView: View {
 
     private var logSection: some View {
         WASection(title: "Log", systemImage: "doc.text.magnifyingglass") {
-            ScrollView([.vertical, .horizontal]) {
-                Text(displayLogText)
-                    .font(.system(.body, design: .monospaced))
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: true, vertical: false)
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
-                    .padding(8)
+            ScrollViewReader { proxy in
+                ScrollView([.vertical, .horizontal]) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text(displayLogText)
+                            .font(.system(.body, design: .monospaced))
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: true, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .topLeading)
+                            .padding(8)
+                        Color.clear
+                            .frame(height: 1)
+                            .id("logBottom")
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .onChange(of: logLines.count) { _, _ in
+                    guard !logLines.isEmpty else { return }
+                    logAutoScrollWorkItem?.cancel()
+                    let work = DispatchWorkItem {
+                        proxy.scrollTo("logBottom", anchor: .bottomLeading)
+                    }
+                    logAutoScrollWorkItem = work
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: work)
+                }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         .waCard()
         .aiGlow(
@@ -1421,11 +1438,13 @@ struct ContentView: View {
             let pieces = s.split(whereSeparator: \.isNewline).map(String.init)
             if pieces.isEmpty { return }
             self.logLines.append(contentsOf: pieces)
-            let maxLines = self.maxLogLinesContent
-            if self.logLines.count > maxLines {
-                self.logLines.removeFirst(self.logLines.count - maxLines)
+            let chunk = pieces.joined(separator: "\n")
+            if self.logText.isEmpty {
+                self.logText = chunk
+            } else {
+                self.logText.append("\n")
+                self.logText.append(chunk)
             }
-            self.logText = self.logLines.joined(separator: "\n")
         }
     }
 
@@ -2366,6 +2385,8 @@ struct ContentView: View {
         let exportDir = context.exportDir.standardizedFileURL
         let plan = context.plan
         let env = ProcessInfo.processInfo.environment
+        let perfEnabled = env["WET_PERF"] == "1"
+        let verboseDebug = env["WET_DEBUG_VERBOSE"] == "1"
         if debugEnabled {
             let caps = WhatsAppExportService.concurrencyCaps()
             debugLog("CONCURRENCY CAPS: cpu=\(caps.cpu) io=\(caps.io)")
@@ -2377,15 +2398,23 @@ struct ContentView: View {
             }
         }
 
-        // exportDir exists by workflow (picked by user + subfolder), but creating it is harmless.
-        try fm.createDirectory(at: exportDir, withIntermediateDirectories: true)
-        try WhatsAppExportService.cleanupTemporaryExportFolders(in: exportDir)
         let baseHTMLName = "\(baseName).html"
+
+        let stagingBase = try WhatsAppExportService.localStagingBaseDirectory()
+        let targetIsICloud = WhatsAppExportService.isLikelyICloudBacked(exportDir)
+        if debugEnabled {
+            debugLog("STAGING BASE: \(stagingBase.path)")
+            debugLog("PUBLISH TARGET: \(exportDir.path)")
+            debugLog("TARGET ICLOUD: \(targetIsICloud)")
+        }
+        if perfEnabled {
+            log("WET-PERF: target_iCloud=\(targetIsICloud)")
+        }
 
         // Prewarm derived resources once per run (attachment index, caches).
         WhatsAppExportService.prewarmAttachmentIndex(for: prepared.chatURL.deletingLastPathComponent())
 
-        let stagingDir = try WhatsAppExportService.createStagingDirectory(in: exportDir)
+        let stagingDir = try WhatsAppExportService.createStagingDirectory(in: stagingBase)
         if debugEnabled {
             debugLog("STAGING ROOT CREATED: \(stagingDir.path)")
         }
@@ -2396,11 +2425,6 @@ struct ContentView: View {
                     debugLog("REMOVE: \(stagingDir.path)")
                 }
                 try? fm.removeItem(at: stagingDir)
-            }
-            do {
-                try WhatsAppExportService.cleanupTemporaryExportFolders(in: exportDir)
-            } catch {
-                log("ERROR: \(error)")
             }
             if debugEnabled {
                 debugLog("STAGING CLEANUP: \(stagingDir.path)")
@@ -2659,7 +2683,10 @@ struct ContentView: View {
             movedOutputs: inout [URL]
         ) throws {
             if debugEnabled {
-                debugLog("PUBLISH START: \(staged.path) -> \(final.path)")
+                debugLog("PUBLISH START: \(final.path)")
+                if verboseDebug {
+                    debugLog("PUBLISH STAGED: \(staged.path)")
+                }
             }
             guard recordPublishAttempt(final, artifact: artifact) else {
                 if debugEnabled {
@@ -2685,7 +2712,9 @@ struct ContentView: View {
             if fm.fileExists(atPath: final.path) {
                 if context.allowOverwrite {
                     let isDir = (try? final.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
-                    let backup = stagingDir.appendingPathComponent(".wa_backup_\(UUID().uuidString)", isDirectory: isDir)
+                    let backup = final
+                        .deletingLastPathComponent()
+                        .appendingPathComponent(".wa_backup_\(UUID().uuidString)", isDirectory: isDir)
                     if debugEnabled {
                         debugLog("OVERWRITE: backup existing -> \(backup.path)")
                         debugLog("PUBLISH REPLACE: \(final.path)")
@@ -2789,7 +2818,7 @@ struct ContentView: View {
                     }
                     stagedSidecarHTML = sidecarResult.sidecarHTML
                     stagedSidecarBaseDir = sidecarResult.sidecarBaseDir
-                    if debugEnabled, let stagedSidecarHTML {
+                    if verboseDebug, let stagedSidecarHTML {
                         debugLog("STAGE PATH: \(stagedSidecarHTML.path)")
                     }
 
@@ -2805,7 +2834,9 @@ struct ContentView: View {
                             )
                         }
                         if debugEnabled {
-                            debugLog("STAGE PATH: \(stagedSidecarBaseDir.path)")
+                            if verboseDebug {
+                                debugLog("STAGE PATH: \(stagedSidecarBaseDir.path)")
+                            }
                         }
                         let stagedSidecarOriginalName = WhatsAppExportService.applyPartnerOverrideToName(
                             originalName: sourceDir.lastPathComponent,
@@ -2886,7 +2917,10 @@ struct ContentView: View {
                         }
                         logSidecarDiagnostics(stagedSidecarBaseDir, label: "Sidecar staging dir before publish")
                         if debugEnabled {
-                            debugLog("PUBLISH TARGET: \(stagedSidecarBaseDir.path) -> \(finalSidecarDir.path)")
+                            debugLog("PUBLISH TARGET: \(finalSidecarDir.path)")
+                            if verboseDebug {
+                                debugLog("PUBLISH STAGED: \(stagedSidecarBaseDir.path)")
+                            }
                         }
                         try publishMove(
                             from: stagedSidecarBaseDir,
@@ -2901,7 +2935,10 @@ struct ContentView: View {
                     }
                     logSidecarDiagnostics(stagedSidecarHTML, label: "Sidecar HTML before publish")
                     if debugEnabled {
-                        debugLog("PUBLISH TARGET: \(stagedSidecarHTML.path) -> \(finalSidecarHTML.path)")
+                        debugLog("PUBLISH TARGET: \(finalSidecarHTML.path)")
+                        if verboseDebug {
+                            debugLog("PUBLISH STAGED: \(stagedSidecarHTML.path)")
+                        }
                     }
                     try publishMove(
                         from: stagedSidecarHTML,
@@ -2930,7 +2967,7 @@ struct ContentView: View {
                             perfLabel: artifactLabel(.html(variant))
                         )
                     }
-                    if debugEnabled {
+                    if verboseDebug {
                         debugLog("STAGE PATH: \(stagedHTML.path)")
                     }
                     try ensureNonEmptyArtifact(stagedHTML, artifact: .html(variant))
@@ -2940,7 +2977,10 @@ struct ContentView: View {
                     }
                     let finalHTML = Self.outputHTMLURL(baseName: baseName, variant: variant, in: exportDir)
                     if debugEnabled {
-                        debugLog("PUBLISH TARGET: \(stagedHTML.path) -> \(finalHTML.path)")
+                        debugLog("PUBLISH TARGET: \(finalHTML.path)")
+                        if verboseDebug {
+                            debugLog("PUBLISH STAGED: \(stagedHTML.path)")
+                        }
                     }
                     try publishMove(
                         from: stagedHTML,
@@ -2976,7 +3016,7 @@ struct ContentView: View {
                             outDir: stagingDir
                         )
                     }
-                    if debugEnabled {
+                    if verboseDebug {
                         debugLog("STAGE PATH: \(stagedMDURL.path)")
                     }
                     try ensureNonEmptyArtifact(stagedMDURL, artifact: .markdown)
@@ -2986,7 +3026,10 @@ struct ContentView: View {
                     }
                     let finalMDURL = Self.outputMarkdownURL(baseName: baseName, in: exportDir)
                     if debugEnabled {
-                        debugLog("PUBLISH TARGET: \(stagedMDURL.path) -> \(finalMDURL.path)")
+                        debugLog("PUBLISH TARGET: \(finalMDURL.path)")
+                        if verboseDebug {
+                            debugLog("PUBLISH STAGED: \(stagedMDURL.path)")
+                        }
                     }
                     try publishMove(
                         from: stagedMDURL,
