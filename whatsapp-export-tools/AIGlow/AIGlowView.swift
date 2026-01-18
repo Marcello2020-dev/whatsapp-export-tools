@@ -57,6 +57,7 @@ struct AIGlowOverlay: View {
         return base
             .onChangeCompat(of: tickerNow) {
                 guard active, let debugTag else { return }
+                guard ProcessInfo.processInfo.environment["WET_AIGLOW_DEBUG"] == "1" else { return }
                 let now = tickerNow
                 if now - lastDebugPrintTime >= 1.0 {
                     lastDebugPrintTime = now
@@ -613,8 +614,7 @@ struct AIGlowOverlay: View {
         guard active, isVisible else { return false }
         guard scenePhase == .active else { return false }
         if controlActiveState == .inactive { return false }
-        if isRunning { return true }
-        return style.motionMode == .turbulence
+        return true
     }
 
     private func clamp(_ value: Double, min: Double, max: Double) -> Double {

@@ -17,8 +17,16 @@ import AppKit
 import UIKit
 #endif
 
-#if canImport(QuickLookThumbnailing)
-import QuickLookThumbnailing
+#if canImport(ImageIO)
+import ImageIO
+#endif
+
+#if canImport(AVFoundation)
+import AVFoundation
+#endif
+
+#if canImport(PDFKit)
+import PDFKit
 #endif
 
 #if canImport(LinkPresentation)
@@ -555,6 +563,34 @@ public enum WhatsAppExportService {
         inlineThumbCacheLock.lock()
         inlineThumbCache[key] = value
         inlineThumbCacheLock.unlock()
+    }
+
+    nonisolated private static let thumbVersion: Int = 2
+    nonisolated private static let thumbMaxPixel: CGFloat = 512
+    nonisolated private static let thumbJPEGQuality: CGFloat = 0.74
+
+    nonisolated private static func thumbnailCacheKey(
+        for url: URL,
+        maxPixel: CGFloat,
+        quality: CGFloat? = nil
+    ) -> String {
+        let src = url.standardizedFileURL
+        let attrs = (try? FileManager.default.attributesOfItem(atPath: src.path)) ?? [:]
+        let size = attrs[.size] as? UInt64 ?? 0
+        let mtime = (attrs[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        let q = quality.map { "|q=\($0)" } ?? ""
+        return "\(src.path)|\(size)|\(mtime)|v\(thumbVersion)|px=\(Int(maxPixel))\(q)"
+    }
+
+    nonisolated private static func thumbnailCacheFilename(
+        for url: URL,
+        maxPixel: CGFloat,
+        quality: CGFloat
+    ) -> String {
+        let key = thumbnailCacheKey(for: url, maxPixel: maxPixel, quality: quality)
+        let hash = stableHashHex(key)
+        let base = url.deletingPathExtension().lastPathComponent
+        return "\(base)__thumb_\(hash).jpg"
     }
 
     nonisolated static func resetThumbnailCaches() {
@@ -3094,148 +3130,180 @@ public enum WhatsAppExportService {
 
 
     // ---------------------------
-    // Attachment previews (PDF/DOCX thumbnails via Quick Look)
+    // Attachment previews (ImageIO/AVFoundation/PDFKit; no Quick Look)
     // ---------------------------
 
-#if canImport(QuickLookThumbnailing)
-nonisolated private static func thumbnailPNGDataURL(for fileURL: URL, maxPixel: CGFloat = 900) async -> String? {
-    let src = fileURL.standardizedFileURL
-    let key = "\(src.path)||\(maxPixel)"
-    if let cached = thumbnailPNGCacheGet(key) {
-        recordThumbPNG(duration: 0, cacheHit: true)
-        return cached
+    nonisolated private static func thumbnailPNGDataURL(
+        for fileURL: URL,
+        maxPixel: CGFloat = thumbMaxPixel
+    ) async -> String? {
+        let src = fileURL.standardizedFileURL
+        let key = thumbnailCacheKey(for: src, maxPixel: maxPixel)
+        if let cached = thumbnailPNGCacheGet(key) {
+            recordThumbPNG(duration: 0, cacheHit: true)
+            return cached
+        }
+
+        let start = ProcessInfo.processInfo.systemUptime
+        let data = await thumbnailImageData(for: src, maxPixel: maxPixel, format: .png)
+        let dataURL = data.map { "data:image/png;base64,\($0.base64EncodedString())" }
+        let elapsed = ProcessInfo.processInfo.systemUptime - start
+        recordThumbPNG(duration: elapsed, cacheHit: false)
+        if let dataURL {
+            thumbnailPNGCacheSet(key, dataURL)
+        }
+        return dataURL
     }
 
-    let start = ProcessInfo.processInfo.systemUptime
-    let size = CGSize(width: maxPixel, height: maxPixel)
-    #if canImport(AppKit)
-        let scale = NSScreen.main?.backingScaleFactor ?? 2.0
-    #elseif canImport(UIKit)
-        let scale = UIScreen.main.scale
-    #else
-        let scale: CGFloat = 2.0
-    #endif
+    nonisolated private static func thumbnailJPEGData(
+        for fileURL: URL,
+        maxPixel: CGFloat = thumbMaxPixel,
+        quality: CGFloat = thumbJPEGQuality
+    ) async -> Data? {
+        let src = fileURL.standardizedFileURL
+        let key = thumbnailCacheKey(for: src, maxPixel: maxPixel, quality: quality)
+        if let cached = thumbnailJPEGCacheGet(key) {
+            recordThumbJPEG(duration: 0, cacheHit: true)
+            return cached
+        }
 
-    let req = QLThumbnailGenerator.Request(
-        fileAt: fileURL,
-        size: size,
-        scale: scale,
-        representationTypes: .thumbnail
-    )
+        let start = ProcessInfo.processInfo.systemUptime
+        let data = await thumbnailImageData(for: src, maxPixel: maxPixel, format: .jpeg(quality))
+        let elapsed = ProcessInfo.processInfo.systemUptime - start
+        recordThumbJPEG(duration: elapsed, cacheHit: false)
+        if let data {
+            thumbnailJPEGCacheSet(key, data)
+        }
+        return data
+    }
 
-    let dataURL: String? = await withCheckedContinuation { (cont: CheckedContinuation<String?, Never>) in
-        QLThumbnailGenerator.shared.generateBestRepresentation(for: req) { rep, err in
-            guard err == nil, let rep else {
-                cont.resume(returning: nil)
-                return
-            }
+    private enum ThumbnailFormat {
+        case png
+        case jpeg(CGFloat)
+    }
 
-            let cg = rep.cgImage
-
-            #if canImport(AppKit)
-            let nsImage = NSImage(cgImage: cg, size: size)
-            guard
-                let tiff = nsImage.tiffRepresentation,
-                let bmp = NSBitmapImageRep(data: tiff),
-                let png = bmp.representation(using: .png, properties: [:])
-            else {
-                cont.resume(returning: nil)
-                return
-            }
-            cont.resume(returning: "data:image/png;base64,\(png.base64EncodedString())")
-
-            #elseif canImport(UIKit)
-            let uiImage = UIImage(cgImage: cg)
-            guard let png = uiImage.pngData() else {
-                cont.resume(returning: nil)
-                return
-            }
-            cont.resume(returning: "data:image/png;base64,\(png.base64EncodedString())")
-
-            #else
-            cont.resume(returning: nil)
-            #endif
+    nonisolated private static func thumbnailImageData(
+        for fileURL: URL,
+        maxPixel: CGFloat,
+        format: ThumbnailFormat
+    ) async -> Data? {
+        guard let cg = await thumbnailCGImage(for: fileURL, maxPixel: maxPixel) else { return nil }
+        switch format {
+        case .png:
+            return encodeThumbnail(cg, type: .png, quality: nil)
+        case .jpeg(let quality):
+            return encodeThumbnail(cg, type: .jpeg, quality: quality)
         }
     }
 
-    let elapsed = ProcessInfo.processInfo.systemUptime - start
-    recordThumbPNG(duration: elapsed, cacheHit: false)
-
-    if let dataURL {
-        thumbnailPNGCacheSet(key, dataURL)
-    }
-
-    return dataURL
-}
-#endif
-
-#if canImport(QuickLookThumbnailing)
-nonisolated private static func thumbnailJPEGData(for fileURL: URL, maxPixel: CGFloat = 900, quality: CGFloat = 0.72) async -> Data? {
-    let src = fileURL.standardizedFileURL
-    let key = "\(src.path)||\(maxPixel)||\(quality)"
-    if let cached = thumbnailJPEGCacheGet(key) {
-        recordThumbJPEG(duration: 0, cacheHit: true)
-        return cached
-    }
-
-    let start = ProcessInfo.processInfo.systemUptime
-    let size = CGSize(width: maxPixel, height: maxPixel)
-    #if canImport(AppKit)
-        let scale = NSScreen.main?.backingScaleFactor ?? 2.0
-    #elseif canImport(UIKit)
-        let scale = UIScreen.main.scale
-    #else
-        let scale: CGFloat = 2.0
-    #endif
-
-    let req = QLThumbnailGenerator.Request(
-        fileAt: fileURL,
-        size: size,
-        scale: scale,
-        representationTypes: .thumbnail
-    )
-
-    let data: Data? = await withCheckedContinuation { (cont: CheckedContinuation<Data?, Never>) in
-        QLThumbnailGenerator.shared.generateBestRepresentation(for: req) { rep, err in
-            guard err == nil, let rep else {
-                cont.resume(returning: nil)
-                return
-            }
-
-            let cg = rep.cgImage
-
-            #if canImport(AppKit)
-            let nsImage = NSImage(cgImage: cg, size: size)
-            guard
-                let tiff = nsImage.tiffRepresentation,
-                let bmp = NSBitmapImageRep(data: tiff),
-                let jpg = bmp.representation(using: .jpeg, properties: [.compressionFactor: quality])
-            else {
-                cont.resume(returning: nil)
-                return
-            }
-            cont.resume(returning: jpg)
-
-            #elseif canImport(UIKit)
-            let uiImage = UIImage(cgImage: cg)
-            cont.resume(returning: uiImage.jpegData(compressionQuality: quality))
-
-            #else
-            cont.resume(returning: nil)
-            #endif
+    nonisolated private static func thumbnailCGImage(
+        for fileURL: URL,
+        maxPixel: CGFloat
+    ) async -> CGImage? {
+        let ext = fileURL.pathExtension.lowercased()
+        if ["jpg","jpeg","png","gif","webp","heic","heif","tif","tiff","bmp"].contains(ext) {
+            return imageIOThumbnailCGImage(fileURL, maxPixel: maxPixel)
         }
+        if ["mp4","mov","m4v"].contains(ext) {
+            return await videoThumbnailCGImage(fileURL, maxPixel: maxPixel)
+        }
+        if ext == "pdf" {
+            return await pdfThumbnailCGImage(fileURL, maxPixel: maxPixel)
+        }
+        if ["doc","docx"].contains(ext) {
+            // Policy: no thumbnails for DOC/DOCX (avoid Quick Look bottleneck).
+            return nil
+        }
+        return nil
     }
 
-    let elapsed = ProcessInfo.processInfo.systemUptime - start
-    recordThumbJPEG(duration: elapsed, cacheHit: false)
-
-    if let data {
-        thumbnailJPEGCacheSet(key, data)
+    nonisolated private static func imageIOThumbnailCGImage(
+        _ fileURL: URL,
+        maxPixel: CGFloat
+    ) -> CGImage? {
+        #if canImport(ImageIO)
+        guard let src = CGImageSourceCreateWithURL(fileURL as CFURL, nil) else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceThumbnailMaxPixelSize: Int(maxPixel),
+            kCGImageSourceCreateThumbnailWithTransform: true
+        ]
+        return CGImageSourceCreateThumbnailAtIndex(src, 0, options as CFDictionary)
+        #else
+        return nil
+        #endif
     }
 
-    return data
-}
-#endif
+    nonisolated private static func videoThumbnailCGImage(
+        _ fileURL: URL,
+        maxPixel: CGFloat
+    ) async -> CGImage? {
+        #if canImport(AVFoundation)
+        return await withCheckedContinuation { (cont: CheckedContinuation<CGImage?, Never>) in
+            let asset = AVURLAsset(url: fileURL)
+            let generator = AVAssetImageGenerator(asset: asset)
+            generator.appliesPreferredTrackTransform = true
+            generator.maximumSize = CGSize(width: maxPixel, height: maxPixel)
+            let time = CMTime(seconds: 0.0, preferredTimescale: 600)
+            generator.generateCGImageAsynchronously(for: time) { image, _, _ in
+                cont.resume(returning: image)
+            }
+        }
+        #else
+        return nil
+        #endif
+    }
+
+    nonisolated private static func pdfThumbnailCGImage(
+        _ fileURL: URL,
+        maxPixel: CGFloat
+    ) async -> CGImage? {
+        #if canImport(PDFKit)
+        return await withCheckedContinuation { (cont: CheckedContinuation<CGImage?, Never>) in
+            DispatchQueue.global(qos: .userInitiated).async {
+                guard let doc = PDFDocument(url: fileURL),
+                      let page = doc.page(at: 0) else {
+                    cont.resume(returning: nil)
+                    return
+                }
+                let bounds = page.bounds(for: .cropBox)
+                let scale = maxPixel / max(bounds.width, bounds.height)
+                let target = CGSize(width: bounds.width * scale, height: bounds.height * scale)
+                #if canImport(AppKit)
+                let image = page.thumbnail(of: target, for: .cropBox)
+                let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil)
+                cont.resume(returning: cg)
+                #else
+                cont.resume(returning: nil)
+                #endif
+            }
+        }
+        #else
+        return nil
+        #endif
+    }
+
+    nonisolated private static func encodeThumbnail(
+        _ cg: CGImage,
+        type: UTType,
+        quality: CGFloat?
+    ) -> Data? {
+        #if canImport(ImageIO)
+        let data = NSMutableData()
+        guard let dest = CGImageDestinationCreateWithData(data, type.identifier as CFString, 1, nil) else {
+            return nil
+        }
+        var props: [CFString: Any] = [:]
+        if let quality {
+            props[kCGImageDestinationLossyCompressionQuality] = quality
+        }
+        CGImageDestinationAddImage(dest, cg, props as CFDictionary)
+        guard CGImageDestinationFinalize(dest) else { return nil }
+        return data as Data
+        #else
+        return nil
+        #endif
+    }
 
 nonisolated private static func stageThumbnailForExport(
     source: URL,
@@ -3250,16 +3318,15 @@ nonisolated private static func stageThumbnailForExport(
         // Prefer a .jpg thumbnail to keep size down.
         // IMPORTANT: Use a deterministic destination name so repeated runs reuse the same file
         // instead of creating endless "(2)", "(3)", ... duplicates.
-        let baseName = src.deletingPathExtension().lastPathComponent
-        let dest = thumbsDir.appendingPathComponent(baseName).appendingPathExtension("jpg")
+        let fileName = thumbnailCacheFilename(for: src, maxPixel: thumbMaxPixel, quality: thumbJPEGQuality)
+        let dest = thumbsDir.appendingPathComponent(fileName)
 
         // If a thumbnail already exists, reuse it.
         if fm.fileExists(atPath: dest.path) {
             return relativeHref(for: dest, relativeTo: baseDir)
         }
 
-        #if canImport(QuickLookThumbnailing)
-        if let jpg = await thumbnailJPEGData(for: src, maxPixel: 900, quality: 0.72) {
+        if let jpg = await thumbnailJPEGData(for: src, maxPixel: thumbMaxPixel, quality: thumbJPEGQuality) {
             try ensureDirectory(thumbsDir)
             try jpg.write(to: dest, options: .atomic)
             if ProcessInfo.processInfo.environment["WET_SIDECAR_DEBUG"] == "1" {
@@ -3267,7 +3334,6 @@ nonisolated private static func stageThumbnailForExport(
             }
             return relativeHref(for: dest, relativeTo: baseDir)
         }
-        #endif
 
         // No thumbnail available.
         return nil
@@ -3287,11 +3353,9 @@ nonisolated private static func stageThumbnailForExport(
         let start = ProcessInfo.processInfo.systemUptime
         var dataURL: String? = nil
 
-        #if canImport(QuickLookThumbnailing)
-        if let jpg = await thumbnailJPEGData(for: src, maxPixel: 900, quality: 0.72) {
+        if let jpg = await thumbnailJPEGData(for: src, maxPixel: thumbMaxPixel, quality: thumbJPEGQuality) {
             dataURL = "data:image/jpeg;base64,\(jpg.base64EncodedString())"
         }
-        #endif
 
         if dataURL == nil {
             dataURL = await attachmentThumbnailDataURL(src)
@@ -3315,31 +3379,32 @@ nonisolated private static func stageThumbnailForExport(
             return fileToDataURL(url)
         }
 
-        // PDF/DOCX/DOC/MP4/MOV/M4V: generate a thumbnail via Quick Look.
-        if ["pdf","docx","doc","mp4","mov","m4v"].contains(ext) {
-            #if canImport(QuickLookThumbnailing)
-            return await thumbnailPNGDataURL(for: url)
-            #else
+        // PDF/Video: generate a thumbnail via local renderers (no Quick Look).
+        if ["pdf","mp4","mov","m4v"].contains(ext) {
+            if let jpg = await thumbnailJPEGData(for: url, maxPixel: thumbMaxPixel, quality: thumbJPEGQuality) {
+                return "data:image/jpeg;base64,\(jpg.base64EncodedString())"
+            }
             return nil
-            #endif
+        }
+
+        // DOC/DOCX: explicit policy = no thumbnail.
+        if ["doc","docx"].contains(ext) {
+            return nil
         }
 
         return nil
     }
 
     nonisolated private static func attachmentThumbnailDataURL(_ url: URL) async -> String? {
-        // Goal: always produce a lightweight thumbnail image (PNG) when possible.
-        // - Images: prefer QuickLook thumbnail so we do not embed the full photo bytes.
-        // - PDF/DOCX/Video: QuickLook thumbnail.
-        // Fallback: for images only, embed the original if QuickLook is unavailable.
+        // Goal: always produce a lightweight thumbnail image (JPEG) when possible.
+        // - Images/Video/PDF: local thumbnail generation (no Quick Look).
+        // - DOC/DOCX: no thumbnails.
+        // Fallback: for images only, embed the original if thumbnailing is unavailable.
         let ext = url.pathExtension.lowercased()
 
-        #if canImport(QuickLookThumbnailing)
-        // QuickLook can thumbnail images too; this keeps the HTML small.
-        if let thumb = await thumbnailPNGDataURL(for: url) {
-            return thumb
+        if let jpg = await thumbnailJPEGData(for: url, maxPixel: thumbMaxPixel, quality: thumbJPEGQuality) {
+            return "data:image/jpeg;base64,\(jpg.base64EncodedString())"
         }
-        #endif
 
         // Fallback: if we cannot thumbnail, only allow direct image embedding.
         if ["jpg","jpeg","png","gif","webp","heic","heif"].contains(ext) {
@@ -4597,7 +4662,7 @@ nonisolated private static func stageThumbnailForExport(
                 previewHTML = blocks.joined()
             }
 
-            // attachments: images embedded; PDFs/DOCX get a QuickLook thumbnail; otherwise show filename.
+            // attachments: images embedded; PDFs/videos get generated thumbs; DOC/DOCX use filename fallback.
             // Make previews + filenames clickable to the local file (file://...) when it exists.
             var mediaBlocks: [String] = []
             for fn in attachments {
@@ -5641,14 +5706,11 @@ nonisolated private static func stageThumbnailForExport(
                 }
                 try fm.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
                 try fm.copyItem(at: u, to: dst)
-
-                // Ensure copied files carry original creation/modification timestamps.
-                syncFileSystemTimestamps(from: u, to: dst)
                 filePairs.append((src: u, dst: dst))
             }
         }
 
-        // Re-apply file timestamps at the end to avoid any later touches.
+        // Apply file timestamps at the end to avoid any later touches.
         for pair in filePairs {
             try Task.checkCancellation()
             syncFileSystemTimestamps(from: pair.src, to: pair.dst)

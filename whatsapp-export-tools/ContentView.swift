@@ -836,6 +836,27 @@ struct ContentView: View {
         return digits.count >= 6
     }
 
+    private static func normalizedPhoneKey(_ s: String) -> String {
+        let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        if t.isEmpty { return "" }
+        var out = ""
+        out.reserveCapacity(t.count)
+        for ch in t {
+            if ch.isNumber {
+                out.append(ch)
+                continue
+            }
+            if ch == "+" && out.isEmpty {
+                out.append(ch)
+                continue
+            }
+        }
+        if out.hasPrefix("00") {
+            out = "+" + String(out.dropFirst(2))
+        }
+        return out
+    }
+
     private var phoneOnlyParticipants: [String] {
         detectedParticipants
             .filter { Self.isPhoneNumberLike($0) }
@@ -967,6 +988,18 @@ struct ContentView: View {
         if let override = phoneParticipantOverrides[trimmed]?.trimmingCharacters(in: .whitespacesAndNewlines),
            !override.isEmpty {
             return override
+        }
+        if Self.isPhoneNumberLike(trimmed) {
+            let key = Self.normalizedPhoneKey(trimmed)
+            if !key.isEmpty {
+                for (raw, val) in phoneParticipantOverrides {
+                    let cand = val.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if cand.isEmpty { continue }
+                    if Self.normalizedPhoneKey(raw) == key {
+                        return cand
+                    }
+                }
+            }
         }
         return trimmed
     }
@@ -1915,10 +1948,7 @@ struct ContentView: View {
             }
         }
 
-        let outputChatPartner = WhatsAppExportService.resolvedParticipantDisplayName(
-            uiChatPartnerRaw,
-            overrides: participantNameOverrides
-        )
+        let outputChatPartner = resolvedChatPartnerName()
         let normalizedDetected = normalizedDisplayName(detectedPartnerRaw)
         let normalizedOutput = normalizedDisplayName(outputChatPartner)
         let overridePartnerEffective: String? = {
@@ -2579,33 +2609,44 @@ struct ContentView: View {
 
         func finalizeSidecarTimestamps(sidecarBaseDir: URL, logMismatches: Bool) {
             let sourceDir = prepared.chatURL.deletingLastPathComponent()
+            let originalNameBefore: String
+            if let originalZipURL = context.provenance.originalZipURL {
+                originalNameBefore = originalZipURL.deletingPathExtension().lastPathComponent
+            } else {
+                originalNameBefore = sourceDir.lastPathComponent
+            }
             let originalFolderName = WhatsAppExportService.applyPartnerOverrideToName(
-                originalName: sourceDir.lastPathComponent,
+                originalName: originalNameBefore,
                 detectedPartnerRaw: context.detectedPartnerRaw,
                 overridePartnerRaw: context.overridePartnerRaw
             )
             let finalSidecarOriginalDir = sidecarBaseDir.appendingPathComponent(originalFolderName, isDirectory: true)
-            WhatsAppExportService.normalizeOriginalCopyTimestamps(
-                sourceDir: sourceDir,
-                destDir: finalSidecarOriginalDir,
-                skippingPathPrefixes: [
-                    context.outDir.standardizedFileURL.path,
-                    sidecarBaseDir.standardizedFileURL.path
-                ]
-            )
-            if logMismatches {
-                let mismatches = WhatsAppExportService.sampleTimestampMismatches(
+            if debugEnabled {
+                debugLog("TIMESTAMP SYNC: \(finalSidecarOriginalDir.path)")
+            }
+            if sidecarDebugEnabled || logMismatches {
+                WhatsAppExportService.normalizeOriginalCopyTimestamps(
                     sourceDir: sourceDir,
                     destDir: finalSidecarOriginalDir,
-                    maxFiles: 3,
-                    maxDirs: 2,
                     skippingPathPrefixes: [
                         context.outDir.standardizedFileURL.path,
                         sidecarBaseDir.standardizedFileURL.path
                     ]
                 )
-                if !mismatches.isEmpty {
-                    log("WARN: Zeitstempelabweichung bei \(mismatches.count) Element(en).")
+                if logMismatches {
+                    let mismatches = WhatsAppExportService.sampleTimestampMismatches(
+                        sourceDir: sourceDir,
+                        destDir: finalSidecarOriginalDir,
+                        maxFiles: 3,
+                        maxDirs: 2,
+                        skippingPathPrefixes: [
+                            context.outDir.standardizedFileURL.path,
+                            sidecarBaseDir.standardizedFileURL.path
+                        ]
+                    )
+                    if !mismatches.isEmpty {
+                        log("WARN: Zeitstempelabweichung bei \(mismatches.count) Element(en).")
+                    }
                 }
             }
         }
@@ -2643,10 +2684,22 @@ struct ContentView: View {
             let moveStart = ProcessInfo.processInfo.systemUptime
             if fm.fileExists(atPath: final.path) {
                 if context.allowOverwrite {
+                    let isDir = (try? final.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+                    let backup = stagingDir.appendingPathComponent(".wa_backup_\(UUID().uuidString)", isDirectory: isDir)
                     if debugEnabled {
+                        debugLog("OVERWRITE: backup existing -> \(backup.path)")
                         debugLog("PUBLISH REPLACE: \(final.path)")
                     }
-                    _ = try fm.replaceItemAt(final, withItemAt: staged, backupItemName: nil, options: [.usingNewMetadataOnly])
+                    try fm.moveItem(at: final, to: backup)
+                    do {
+                        try fm.moveItem(at: staged, to: final)
+                        try? fm.removeItem(at: backup)
+                    } catch {
+                        if fm.fileExists(atPath: backup.path) {
+                            try? fm.moveItem(at: backup, to: final)
+                        }
+                        throw error
+                    }
                 } else {
                     throw OutputCollisionError(url: final)
                 }
@@ -2790,14 +2843,29 @@ struct ContentView: View {
                         logFirstLevelEntries(stagedSidecarBaseDir, label: "Sidecar staging dir entries (all)", skipHidden: false)
                         try ensureNonEmptyArtifact(stagedSidecarBaseDir, artifact: .sidecar)
                         try WhatsAppExportService.validateSidecarLayout(sidecarBaseDir: stagedSidecarBaseDir)
-                        WhatsAppExportService.normalizeOriginalCopyTimestamps(
-                            sourceDir: sourceDir,
-                            destDir: stagedSidecarOriginalDir,
-                            skippingPathPrefixes: [
-                                context.outDir.standardizedFileURL.path,
-                                stagedSidecarBaseDir.standardizedFileURL.path
-                            ]
-                        )
+                        if sidecarDebugEnabled {
+                            WhatsAppExportService.normalizeOriginalCopyTimestamps(
+                                sourceDir: sourceDir,
+                                destDir: stagedSidecarOriginalDir,
+                                skippingPathPrefixes: [
+                                    context.outDir.standardizedFileURL.path,
+                                    stagedSidecarBaseDir.standardizedFileURL.path
+                                ]
+                            )
+                            let mismatches = WhatsAppExportService.sampleTimestampMismatches(
+                                sourceDir: sourceDir,
+                                destDir: stagedSidecarOriginalDir,
+                                maxFiles: 3,
+                                maxDirs: 3,
+                                skippingPathPrefixes: [
+                                    context.outDir.standardizedFileURL.path,
+                                    stagedSidecarBaseDir.standardizedFileURL.path
+                                ]
+                            )
+                            if !mismatches.isEmpty {
+                                debugLog("WARN: Zeitstempelabweichung bei \(mismatches.count) Element(en).")
+                            }
+                        }
                     }
                     guard let stagedSidecarHTML else {
                         throw EmptyArtifactError(url: stagingDir, reason: "sidecar HTML missing")
