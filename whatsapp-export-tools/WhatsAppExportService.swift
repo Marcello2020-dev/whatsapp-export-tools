@@ -3108,8 +3108,7 @@ public enum WhatsAppExportService {
         let fm = FileManager.default
         if !fm.fileExists(atPath: dest.path) {
             do {
-                try ensureDirectory(previewsDir)
-                try decoded.data.write(to: dest, options: .atomic)
+                try writeExclusiveData(decoded.data, to: dest)
                 if ProcessInfo.processInfo.environment["WET_SIDECAR_DEBUG"] == "1" {
                     print("WET-DBG: stage preview -> \(dest.path)")
                 }
@@ -3119,6 +3118,26 @@ public enum WhatsAppExportService {
         }
 
         return relativeHref(for: dest, relativeTo: baseDir)
+    }
+
+    nonisolated private static func writeExclusiveData(_ data: Data, to dest: URL) throws {
+        let fm = FileManager.default
+        if fm.fileExists(atPath: dest.path) {
+            return
+        }
+        try ensureDirectory(dest.deletingLastPathComponent())
+        let temp = dest.deletingLastPathComponent()
+            .appendingPathComponent(".wa_tmp_\(UUID().uuidString)")
+        try data.write(to: temp, options: .atomic)
+        do {
+            try fm.moveItem(at: temp, to: dest)
+        } catch {
+            try? fm.removeItem(at: temp)
+            if fm.fileExists(atPath: dest.path) {
+                return
+            }
+            throw error
+        }
     }
 
     /// Returns an href for an attachment without staging/copying it into an extra output folder.
@@ -3352,9 +3371,8 @@ nonisolated private static func stageThumbnailForExport(
             return relativeHref(for: dest, relativeTo: baseDir)
         }
 
-        if let jpg = await thumbnailJPEGData(for: src, maxPixel: thumbMaxPixel, quality: thumbJPEGQuality) {
-            try ensureDirectory(thumbsDir)
-            try jpg.write(to: dest, options: .atomic)
+    if let jpg = await thumbnailJPEGData(for: src, maxPixel: thumbMaxPixel, quality: thumbJPEGQuality) {
+            try writeExclusiveData(jpg, to: dest)
             if ProcessInfo.processInfo.environment["WET_SIDECAR_DEBUG"] == "1" {
                 print("WET-DBG: stage thumb -> \(dest.path)")
             }
@@ -4101,6 +4119,48 @@ nonisolated private static func stageThumbnailForExport(
     // Render HTML (1:1 layout + CSS)
     // ---------------------------
 
+    private struct BufferedFileWriter {
+        private let handle: FileHandle
+        private let flushThreshold: Int
+        private var buffer = Data()
+        private(set) var bytesWritten: Int = 0
+
+        nonisolated init(url: URL, flushThresholdBytes: Int = 1_048_576) throws {
+            let fm = FileManager.default
+            if fm.fileExists(atPath: url.path) {
+                try? fm.removeItem(at: url)
+            }
+            fm.createFile(atPath: url.path, contents: nil)
+            self.handle = try FileHandle(forWritingTo: url)
+            self.flushThreshold = max(64 * 1024, flushThresholdBytes)
+        }
+
+        nonisolated mutating func append(_ string: String) throws {
+            guard !string.isEmpty else { return }
+            try append(Data(string.utf8))
+        }
+
+        nonisolated mutating func append(_ data: Data) throws {
+            guard !data.isEmpty else { return }
+            buffer.append(data)
+            if buffer.count >= flushThreshold {
+                try flush()
+            }
+        }
+
+        nonisolated mutating func flush() throws {
+            guard !buffer.isEmpty else { return }
+            try handle.write(contentsOf: buffer)
+            bytesWritten += buffer.count
+            buffer.removeAll(keepingCapacity: true)
+        }
+
+        nonisolated mutating func close() throws {
+            try flush()
+            try handle.close()
+        }
+    }
+
     nonisolated private static func renderHTML(
         msgs: [WAMessage],
         chatURL: URL,
@@ -4329,13 +4389,14 @@ nonisolated private static func stageThumbnailForExport(
         // This keeps output deterministic while preserving readable source formatting.
         let cssIndented = "    " + css.replacingOccurrences(of: "\n", with: "\n    ")
 
-        var parts: [String] = []
-        parts.append("<!doctype html><html lang='de'><head><meta charset='utf-8'>")
-        parts.append("<meta name='viewport' content='width=device-width, initial-scale=1'>")
-        parts.append("<title>\(htmlEscape("WhatsApp Chat: " + titleNames))</title>")
-        parts.append("<style>\n\(cssIndented)\n    </style>")
-        // Insert the waOpenEmbed JS helper (in the <head>).
-        parts.append("""
+        let headerHTML: String = {
+            var parts: [String] = []
+            parts.append("<!doctype html><html lang='de'><head><meta charset='utf-8'>")
+            parts.append("<meta name='viewport' content='width=device-width, initial-scale=1'>")
+            parts.append("<title>\(htmlEscape("WhatsApp Chat: " + titleNames))</title>")
+            parts.append("<style>\n\(cssIndented)\n    </style>")
+            // Insert the waOpenEmbed JS helper (in the <head>).
+            parts.append("""
     <script>
     // Open embedded base64 file (avoids data: URLs in href, works in Safari).
     function waOpenEmbed(id){
@@ -4464,14 +4525,15 @@ nonisolated private static func stageThumbnailForExport(
     </head><body><div class='wrap'>
     """)
 
-        parts.append("<div class='header'>")
-        parts.append("<p class='h-title'>WhatsApp Chat<br>\(htmlEscape(titleNames))</p>")
-        parts.append("<p class='h-meta'>Quelle: \(htmlEscape(chatURL.lastPathComponent))<br>"
-                     + "Export: \(htmlEscape(exportDTFormatter.string(from: mtime)))<br>"
-                     + "Nachrichten: \(messageCount)</p>")
-        parts.append("</div>")
+            parts.append("<div class='header'>")
+            parts.append("<p class='h-title'>WhatsApp Chat<br>\(htmlEscape(titleNames))</p>")
+            parts.append("<p class='h-meta'>Quelle: \(htmlEscape(chatURL.lastPathComponent))<br>"
+                         + "Export: \(htmlEscape(exportDTFormatter.string(from: mtime)))<br>"
+                         + "Nachrichten: \(messageCount)</p>")
+            parts.append("</div>")
+            return parts.joined()
+        }()
 
-        var lastDayKey: String? = nil
         let chatDir = chatURL.deletingLastPathComponent().standardizedFileURL
         let externalAssetsRoot = externalAssetsDir?.standardizedFileURL
         let externalThumbsDir = externalAssetsRoot?.appendingPathComponent("_thumbs", isDirectory: true)
@@ -4592,20 +4654,33 @@ nonisolated private static func stageThumbnailForExport(
             }
         }
 
-        var embedCounter = 0
-        for m in msgs {
-            try Task.checkCancellation()
-            let dayKey = isoDateOnly(m.ts)
-            if lastDayKey != dayKey {
-                let wd = weekdayDE[weekdayIndexMonday0(m.ts)] ?? ""
-                parts.append("<div class='day'><span>\(htmlEscape("\(wd), \(fmtDateFull(m.ts))"))</span></div>")
-                lastDayKey = dayKey
+        let previewByURLSnapshot = previewByURL
+        let stagedThumbsByPathSnapshot = stagedThumbsByPath
+
+        let dayHeaders: [String?] = {
+            var headers = Array<String?>(repeating: nil, count: msgs.count)
+            var lastDayKey: String? = nil
+            for (idx, m) in msgs.enumerated() {
+                let dayKey = isoDateOnly(m.ts)
+                if lastDayKey != dayKey {
+                    let wd = weekdayDE[weekdayIndexMonday0(m.ts)] ?? ""
+                    headers[idx] = "<div class='day'><span>\(htmlEscape("\(wd), \(fmtDateFull(m.ts))"))</span></div>"
+                    lastDayKey = dayKey
+                }
+            }
+            return headers
+        }()
+
+        @Sendable func renderMessageHTML(index: Int, message: WAMessage) async throws -> String {
+            var chunkParts: [String] = []
+            if let dayHeader = dayHeaders[index] {
+                chunkParts.append(dayHeader)
             }
 
-            let authorRaw = _normSpace(m.author)
+            let authorRaw = _normSpace(message.author)
             let author = authorRaw.isEmpty ? "Unbekannt" : authorRaw
 
-            let textRaw = m.text
+            let textRaw = message.text
             // Minimal mode (no attachments): only include attachments when we either embed full files
             // or explicitly render thumbnails-only.
             let shouldRenderAttachments = embedAttachments || embedAttachmentThumbnailsOnly || externalAttachments
@@ -4618,8 +4693,8 @@ nonisolated private static func stageThumbnailForExport(
             if isSystemMsg {
                 let sysText = stripBOMAndBidi(textWoAttach).trimmingCharacters(in: .whitespacesAndNewlines)
                 let sysHTML = htmlEscapeKeepNewlines(sysText)
-                parts.append("<div class='sys'><span class='sys-line'>\(sysHTML)</span></div>")
-                continue
+                chunkParts.append("<div class='sys'><span class='sys-line'>\(sysHTML)</span></div>")
+                return chunkParts.joined()
             }
 
             let isMe = (!isSystemMsg) && (authorRaw.lowercased() == _normSpace(meName).lowercased())
@@ -4654,7 +4729,7 @@ nonisolated private static func stageThumbnailForExport(
                 for u in previewTargets {
                     try Task.checkCancellation()
                     let prev: WAPreview?
-                    if let cached = previewByURL[u] {
+                    if let cached = previewByURLSnapshot[u] {
                         prev = cached
                     } else {
                         prev = await buildPreview(u)
@@ -4691,6 +4766,7 @@ nonisolated private static func stageThumbnailForExport(
             // attachments: images embedded; PDFs/videos get generated thumbs; DOC/DOCX use filename fallback.
             // Make previews + filenames clickable to the local file (file://...) when it exists.
             var mediaBlocks: [String] = []
+            var embedCounter = 0
             for fn in attachments {
                 try Task.checkCancellation()
                 let direct = chatDir.appendingPathComponent(fn).standardizedFileURL
@@ -4729,7 +4805,7 @@ nonisolated private static func stageThumbnailForExport(
 
                         if let fmData = try? Data(contentsOf: p) {
                             embedCounter += 1
-                            let embedId = "wa-embed-\(embedCounter)"
+                            let embedId = "wa-embed-\(index)-\(embedCounter)"
                             let b64 = fmData.base64EncodedString()
                             let safeMime = htmlEscape(mime)
                             let safeName = htmlEscape(fn)
@@ -4754,14 +4830,14 @@ nonisolated private static func stageThumbnailForExport(
                         }
                         continue
                     }
-                    
+
                     // Audio: embed an inline mini player and keep a download link.
                     if ["mp3","m4a","aac","wav","ogg","opus","flac","caf","aiff","aif","amr"].contains(ext) {
                         let mime = guessMime(fromName: fn)
 
                         if let fmData = try? Data(contentsOf: p) {
                             embedCounter += 1
-                            let embedId = "wa-embed-\(embedCounter)"
+                            let embedId = "wa-embed-\(index)-\(embedCounter)"
                             let b64 = fmData.base64EncodedString()
                             let safeMime = htmlEscape(mime)
                             let safeName = htmlEscape(fn)
@@ -4787,7 +4863,7 @@ nonisolated private static func stageThumbnailForExport(
                         let fileData = try? Data(contentsOf: p)
                         if let previewDataURL, let fileData {
                             embedCounter += 1
-                            let embedId = "wa-embed-\(embedCounter)"
+                            let embedId = "wa-embed-\(index)-\(embedCounter)"
                             let b64 = fileData.base64EncodedString()
                             let safeMime = htmlEscape(mime)
                             let safeName = htmlEscape(fn)
@@ -4803,7 +4879,7 @@ nonisolated private static func stageThumbnailForExport(
                             mediaBlocks.append("<div class='fileline'>📎 \(htmlEscape(fn))</div>")
                         } else if let fileData {
                             embedCounter += 1
-                            let embedId = "wa-embed-\(embedCounter)"
+                            let embedId = "wa-embed-\(index)-\(embedCounter)"
                             let b64 = fileData.base64EncodedString()
                             let safeMime = htmlEscape(mime)
                             let safeName = htmlEscape(fn)
@@ -4822,7 +4898,7 @@ nonisolated private static func stageThumbnailForExport(
                         let mime = guessMime(fromName: fn)
                         if let dataURL = fileToDataURL(p), let fileData = try? Data(contentsOf: p) {
                             embedCounter += 1
-                            let embedId = "wa-embed-\(embedCounter)"
+                            let embedId = "wa-embed-\(index)-\(embedCounter)"
                             let b64 = fileData.base64EncodedString()
                             let safeMime = htmlEscape(mime)
                             let safeName = htmlEscape(fn)
@@ -4850,7 +4926,7 @@ nonisolated private static func stageThumbnailForExport(
                     let fileData = try? Data(contentsOf: p)
                     if let fileData {
                         embedCounter += 1
-                        let embedId = "wa-embed-\(embedCounter)"
+                        let embedId = "wa-embed-\(index)-\(embedCounter)"
                         let b64 = fileData.base64EncodedString()
                         let safeMime = htmlEscape(mime)
                         let safeName = htmlEscape(fn)
@@ -4880,7 +4956,7 @@ nonisolated private static func stageThumbnailForExport(
                         var posterAttr = ""
                         if !disableThumbStaging, let thumbsDir = externalThumbsDir {
                             let poster: String?
-                            if let cached = stagedThumbsByPath[p.path] {
+                            if let cached = stagedThumbsByPathSnapshot[p.path] {
                                 poster = cached
                             } else {
                                 poster = await stageThumbnailForExport(
@@ -4913,7 +4989,7 @@ nonisolated private static func stageThumbnailForExport(
                     if ["pdf", "doc", "docx"].contains(ext) {
                         var thumbHref: String? = nil
                         if !disableThumbStaging, let thumbsDir = externalThumbsDir {
-                            if let cached = stagedThumbsByPath[p.path] {
+                            if let cached = stagedThumbsByPathSnapshot[p.path] {
                                 thumbHref = cached
                             } else {
                                 thumbHref = await stageThumbnailForExport(
@@ -4972,7 +5048,7 @@ nonisolated private static func stageThumbnailForExport(
                     mediaBlocks.append("<div class='fileline'>⬇︎ <a href='\(htmlEscape(href))' download>Video herunterladen</a></div>")
                     continue
                 }
-                
+
                 // Audio attachments: embed an inline mini player + keep a download link.
                 if ["mp3","m4a","aac","wav","ogg","opus","flac","caf","aiff","aif","amr"].contains(ext), let href {
                     let mime = guessMime(fromName: fn)
@@ -5029,40 +5105,85 @@ nonisolated private static func stageThumbnailForExport(
                 linkLines = ""
             }
 
-            parts.append("<div class='row \(rowCls)'>")
+            chunkParts.append("<div class='row \(rowCls)'>")
             let hasMedia = (!previewHTML.isEmpty) || (!mediaBlocks.isEmpty)
             let bubbleExtra = hasMedia ? " has-media" : ""
-            parts.append("<div class='bubble \(bubCls)\(bubbleExtra)'>")
+            chunkParts.append("<div class='bubble \(bubCls)\(bubbleExtra)'>")
             if !isSystemMsg {
-                parts.append("<div class='name'>\(htmlEscape(author))</div>")
+                chunkParts.append("<div class='name'>\(htmlEscape(author))</div>")
             }
-            if !textHTML.isEmpty { parts.append("<div class='text'>\(textHTML)</div>") }
-            if !previewHTML.isEmpty { parts.append(previewHTML) }
-            if !linkLines.isEmpty { parts.append(linkLines) }
-            if !mediaBlocks.isEmpty { parts.append(contentsOf: mediaBlocks) }
-            parts.append("<div class='meta'>\(htmlEscape(fmtTime(m.ts)))<br>\(htmlEscape(fmtDateFull(m.ts)))</div>")
-            parts.append("</div></div>")
+            if !textHTML.isEmpty { chunkParts.append("<div class='text'>\(textHTML)</div>") }
+            if !previewHTML.isEmpty { chunkParts.append(previewHTML) }
+            if !linkLines.isEmpty { chunkParts.append(linkLines) }
+            if !mediaBlocks.isEmpty { chunkParts.append(contentsOf: mediaBlocks) }
+            chunkParts.append("<div class='meta'>\(htmlEscape(fmtTime(message.ts)))<br>\(htmlEscape(fmtDateFull(message.ts)))</div>")
+            chunkParts.append("</div></div>")
+            return chunkParts.joined()
         }
 
-        parts.append("</div></body></html>")
+        let writeStart = ProcessInfo.processInfo.systemUptime
+        let tempHTML = outHTML.appendingPathExtension("tmp")
+        var writer = try BufferedFileWriter(url: tempHTML, flushThresholdBytes: 1_048_576)
+        var didCloseWriter = false
+        do {
+            try writer.append(headerHTML)
+
+            let chunkSize = msgs.count > 50_000 ? 2_000 : 1_000
+            let ranges: [Range<Int>] = stride(from: 0, to: msgs.count, by: chunkSize).map { start in
+                let end = min(start + chunkSize, msgs.count)
+                return start..<end
+            }
+            if perfEnabled {
+                print("WET-PERF: html chunks size=\(chunkSize) count=\(ranges.count)")
+            }
+
+            let renderLimiter = AsyncLimiter(min(caps.cpu, 8))
+            var pending: [Int: Data] = [:]
+            var nextIndex = 0
+            try await withThrowingTaskGroup(of: (Int, Data).self) { group in
+                for (chunkIndex, range) in ranges.enumerated() {
+                    group.addTask {
+                        try Task.checkCancellation()
+                        return try await renderLimiter.withPermit {
+                            try Task.checkCancellation()
+                            var chunkParts: [String] = []
+                            chunkParts.reserveCapacity((range.count * 6) + 8)
+                            for idx in range {
+                                try Task.checkCancellation()
+                                let html = try await renderMessageHTML(index: idx, message: msgs[idx])
+                                chunkParts.append(html)
+                            }
+                            let chunkString = chunkParts.joined()
+                            return (chunkIndex, Data(chunkString.utf8))
+                        }
+                    }
+                }
+                for try await (chunkIndex, chunkData) in group {
+                    pending[chunkIndex] = chunkData
+                    while let data = pending.removeValue(forKey: nextIndex) {
+                        try Task.checkCancellation()
+                        try writer.append(data)
+                        nextIndex += 1
+                    }
+                }
+            }
+
+            try writer.append("</div></body></html>")
+            try writer.close()
+            didCloseWriter = true
+        } catch {
+            if !didCloseWriter {
+                try? writer.close()
+            }
+            throw error
+        }
+
         let renderDuration = ProcessInfo.processInfo.systemUptime - renderStart
         if let perfLabel {
             recordHTMLRender(label: perfLabel, duration: renderDuration)
         }
 
-        let writeStart = ProcessInfo.processInfo.systemUptime
-        let tempHTML = outHTML.appendingPathExtension("tmp")
-        FileManager.default.createFile(atPath: tempHTML.path, contents: nil)
-        let handle = try FileHandle(forWritingTo: tempHTML)
-        var bytesWritten = 0
-        for part in parts {
-            if part.isEmpty { continue }
-            let data = Data(part.utf8)
-            bytesWritten += data.count
-            try Task.checkCancellation()
-            try handle.write(contentsOf: data)
-        }
-        try handle.close()
+        let bytesWritten = writer.bytesWritten
         if FileManager.default.fileExists(atPath: outHTML.path) {
             try? FileManager.default.removeItem(at: outHTML)
         }
