@@ -37,6 +37,105 @@ import PDFKit
 import UniformTypeIdentifiers
 #endif
 
+// MARK: - Time Policy (Deterministic)
+
+enum TimePolicy {
+    nonisolated static let canonicalTimeZone: TimeZone =
+        TimeZone(identifier: "Europe/Berlin") ?? TimeZone(secondsFromGMT: 0)!
+    nonisolated static let canonicalLocale = Locale(identifier: "en_US_POSIX")
+    nonisolated static let canonicalCalendar: Calendar = {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = canonicalTimeZone
+        return cal
+    }()
+
+    nonisolated static let exportStampParser: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = canonicalLocale
+        f.timeZone = canonicalTimeZone
+        f.dateFormat = "yyyy.MM.dd HH.mm"
+        return f
+    }()
+
+    nonisolated static let isoDTFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = canonicalLocale
+        f.timeZone = canonicalTimeZone
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return f
+    }()
+
+    nonisolated static let exportDTFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = canonicalLocale
+        f.timeZone = canonicalTimeZone
+        f.dateFormat = "dd.MM.yyyy HH:mm:ss"
+        return f
+    }()
+
+    nonisolated static let fileStampFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = canonicalLocale
+        f.timeZone = canonicalTimeZone
+        // No seconds; avoid ':' in filenames.
+        f.dateFormat = "yyyy.MM.dd HH.mm"
+        return f
+    }()
+
+    nonisolated static let fileDateOnlyFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = canonicalLocale
+        f.timeZone = canonicalTimeZone
+        f.dateFormat = "yyyy.MM.dd"
+        return f
+    }()
+
+    nonisolated static func iso8601WithOffsetString(_ date: Date) -> String {
+        let f = ISO8601DateFormatter()
+        f.timeZone = canonicalTimeZone
+        f.formatOptions = [.withInternetDateTime]
+        return f.string(from: date)
+    }
+
+    nonisolated private static let exportCreatedStampRe = try! NSRegularExpression(
+        pattern: #"Chat\.txt created (\d{4}\.\d{2}\.\d{2} \d{2}\.\d{2})"#,
+        options: []
+    )
+
+    nonisolated static func exportCreatedDateFromFolderName(_ folderName: String) -> Date? {
+        let ns = folderName as NSString
+        guard let m = exportCreatedStampRe.firstMatch(
+            in: folderName,
+            options: [],
+            range: NSRange(location: 0, length: ns.length)
+        ) else { return nil }
+        let stamp = ns.substring(with: m.range(at: 1))
+        return exportStampParser.date(from: stamp)
+    }
+
+    nonisolated static func dateFromMSDOSTimestamp(date: UInt16, time: UInt16) -> Date? {
+        let seconds = Int(time & 0x1F) * 2
+        let minutes = Int((time >> 5) & 0x3F)
+        let hours = Int((time >> 11) & 0x1F)
+
+        let day = Int(date & 0x1F)
+        let month = Int((date >> 5) & 0x0F)
+        let year = Int((date >> 9) & 0x7F) + 1980
+
+        guard day > 0, month > 0 else { return nil }
+
+        var dc = DateComponents()
+        dc.year = year
+        dc.month = month
+        dc.day = day
+        dc.hour = hours
+        dc.minute = minutes
+        dc.second = seconds
+        dc.timeZone = canonicalTimeZone
+        return canonicalCalendar.date(from: dc)
+    }
+}
+
 // MARK: - Models
 
 public struct WAMessage: Sendable {
@@ -459,40 +558,23 @@ public enum WhatsAppExportService {
         6: "Sonntag",
     ]
 
-    // Date formatters (stable)
-    nonisolated private static let isoDTFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = TimeZone.current
-        f.dateFormat = "yyyy-MM-dd HH:mm:ss"
-        return f
-    }()
+    // Date formatters (stable, deterministic)
+    nonisolated private static let canonicalTimeZone: TimeZone = TimePolicy.canonicalTimeZone
+    nonisolated private static let canonicalLocale = TimePolicy.canonicalLocale
+    nonisolated private static let canonicalCalendar: Calendar = TimePolicy.canonicalCalendar
+    nonisolated private static let exportStampParser: DateFormatter = TimePolicy.exportStampParser
 
-    nonisolated private static let exportDTFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = TimeZone.current
-        f.dateFormat = "dd.MM.yyyy HH:mm:ss"
-        return f
-    }()
+    // Date formatters (stable)
+    nonisolated private static let isoDTFormatter: DateFormatter = TimePolicy.isoDTFormatter
+    nonisolated private static let exportDTFormatter: DateFormatter = TimePolicy.exportDTFormatter
 
     // File-name friendly stamps (Finder style): dots in dates, no seconds, no colon.
-    nonisolated private static let fileStampFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = TimeZone.current
-        // No seconds; avoid ':' in filenames.
-        f.dateFormat = "yyyy.MM.dd HH.mm"
-        return f
-    }()
+    nonisolated private static let fileStampFormatter: DateFormatter = TimePolicy.fileStampFormatter
+    nonisolated private static let fileDateOnlyFormatter: DateFormatter = TimePolicy.fileDateOnlyFormatter
 
-    nonisolated private static let fileDateOnlyFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = TimeZone.current
-        f.dateFormat = "yyyy.MM.dd"
-        return f
-    }()
+    nonisolated private static func iso8601WithOffsetString(_ date: Date) -> String {
+        TimePolicy.iso8601WithOffsetString(date)
+    }
 
     // Cache for previews
     private actor PreviewCache {
@@ -587,10 +669,31 @@ public enum WhatsAppExportService {
         maxPixel: CGFloat,
         quality: CGFloat
     ) -> String {
-        let key = thumbnailCacheKey(for: url, maxPixel: maxPixel, quality: quality)
+        let key = thumbnailStableKey(for: url, maxPixel: maxPixel, quality: quality)
         let hash = stableHashHex(key)
-        let base = url.deletingPathExtension().lastPathComponent
-        return "\(base)__thumb_\(hash).jpg"
+        return "thumb_\(hash).jpg"
+    }
+
+    nonisolated private static func thumbnailStableKey(
+        for url: URL,
+        maxPixel: CGFloat,
+        quality: CGFloat
+    ) -> String {
+        let src = url.standardizedFileURL
+        let attrs = (try? FileManager.default.attributesOfItem(atPath: src.path)) ?? [:]
+        let size = attrs[.size] as? UInt64 ?? 0
+        let prefixHash = filePrefixHash(src, maxBytes: 256 * 1024)
+        let q = Int((quality * 1000).rounded())
+        return "\(prefixHash)|\(size)|v\(thumbVersion)|px=\(Int(maxPixel))|q=\(q)"
+    }
+
+    nonisolated private static func filePrefixHash(_ url: URL, maxBytes: Int) -> String {
+        guard let handle = try? FileHandle(forReadingFrom: url) else {
+            return "0"
+        }
+        defer { try? handle.close() }
+        let data = (try? handle.read(upToCount: maxBytes)) ?? Data()
+        return fnv1a64Hex(data)
     }
 
     nonisolated static func resetThumbnailCaches() {
@@ -1030,6 +1133,22 @@ public enum WhatsAppExportService {
         let stagedSidecarHTML = stagingDir.appendingPathComponent("\(base)-sdc.html")
         let stagedSidecarDir = stagingDir.appendingPathComponent(base, isDirectory: true)
 
+        var sidecarOriginalDir: URL? = nil
+        var sidecarBaseDir: URL? = nil
+        if exportSortedAttachments {
+            let originalDir = try await exportSortedAttachmentsFolder(
+                chatURL: chatPath,
+                messages: msgs,
+                outDir: stagingDir,
+                folderName: base,
+                detectedPartnerRaw: "",
+                overridePartnerRaw: nil,
+                originalZipURL: nil
+            )
+            sidecarOriginalDir = originalDir
+            sidecarBaseDir = originalDir.deletingLastPathComponent()
+        }
+
         try await renderHTML(
             msgs: msgs,
             chatURL: chatPath,
@@ -1041,28 +1160,27 @@ public enum WhatsAppExportService {
             perfLabel: "HTML"
         )
 
+        let mdChatURL = sidecarOriginalDir?.appendingPathComponent(chatPath.lastPathComponent) ?? chatPath
+        let mdAttachmentRelBaseDir: URL? = sidecarOriginalDir != nil ? stagingDir : nil
+
         try renderMD(
             msgs: msgs,
-            chatURL: chatPath,
+            chatURL: mdChatURL,
             outMD: stagedMD,
             meName: meName,
             enablePreviews: enablePreviews,
             embedAttachments: embedAttachments,
-            embedAttachmentThumbnailsOnly: embedAttachmentThumbnailsOnly
+            embedAttachmentThumbnailsOnly: embedAttachmentThumbnailsOnly,
+            attachmentRelBaseDir: mdAttachmentRelBaseDir
         )
 
         var didSidecar = false
         if exportSortedAttachments {
-            let sidecarOriginalDir = try await exportSortedAttachmentsFolder(
-                chatURL: chatPath,
-                messages: msgs,
-                outDir: stagingDir,
-                folderName: base,
-                detectedPartnerRaw: "",
-                overridePartnerRaw: nil,
-                originalZipURL: nil
-            )
-            let sidecarBaseDir = sidecarOriginalDir.deletingLastPathComponent()
+            guard let sidecarOriginalDir, let sidecarBaseDir else {
+                throw NSError(domain: "WETExport", code: 1, userInfo: [
+                    NSLocalizedDescriptionKey: "Sidecar directory missing"
+                ])
+            }
 
             // Sidecar HTML: renders like -max but references media in the sidecar folder via relative links.
             let sidecarChatURL = sidecarOriginalDir.appendingPathComponent(chatPath.lastPathComponent)
@@ -1266,21 +1384,25 @@ public enum WhatsAppExportService {
 
     nonisolated static func renderMarkdown(
         prepared: PreparedExport,
-        outDir: URL
+        outDir: URL,
+        chatURLOverride: URL? = nil,
+        attachmentRelBaseDir: URL? = nil
     ) throws -> URL {
         resetStagedAttachmentCache()
 
         let outPath = outDir.standardizedFileURL
         let outMD = outPath.appendingPathComponent("\(prepared.baseName).md")
+        let chatURL = chatURLOverride ?? prepared.chatURL
 
         try renderMD(
             msgs: prepared.messages,
-            chatURL: prepared.chatURL,
+            chatURL: chatURL,
             outMD: outMD,
             meName: prepared.meName,
             enablePreviews: true,
             embedAttachments: false,
-            embedAttachmentThumbnailsOnly: false
+            embedAttachmentThumbnailsOnly: false,
+            attachmentRelBaseDir: attachmentRelBaseDir
         )
 
         return outMD
@@ -1454,6 +1576,21 @@ public enum WhatsAppExportService {
         let stagedSidecarHTML = stagingDir.appendingPathComponent("\(base)-sdc.html")
         let stagedSidecarDir = stagingDir.appendingPathComponent(base, isDirectory: true)
 
+        var sidecarOriginalDir: URL? = nil
+        var sidecarBaseDir: URL? = nil
+        if exportSortedAttachments {
+            let originalDir = try await exportSortedAttachmentsFolder(
+                chatURL: chatPath,
+                messages: msgs,
+                outDir: stagingDir,
+                folderName: base,
+                detectedPartnerRaw: "",
+                overridePartnerRaw: nil
+            )
+            sidecarOriginalDir = originalDir
+            sidecarBaseDir = originalDir.deletingLastPathComponent()
+        }
+
         // Render all HTML variants
         for v in variants {
             guard let outHTML = stagedHTMLByVariant[v] else { continue }
@@ -1470,27 +1607,26 @@ public enum WhatsAppExportService {
         }
 
         // Render one Markdown (portable)
+        let mdChatURL = sidecarOriginalDir?.appendingPathComponent(chatPath.lastPathComponent) ?? chatPath
+        let mdAttachmentRelBaseDir: URL? = sidecarOriginalDir != nil ? stagingDir : nil
         try renderMD(
             msgs: msgs,
-            chatURL: chatPath,
+            chatURL: mdChatURL,
             outMD: stagedMD,
             meName: meName,
             enablePreviews: true,
             embedAttachments: false,
-            embedAttachmentThumbnailsOnly: false
+            embedAttachmentThumbnailsOnly: false,
+            attachmentRelBaseDir: mdAttachmentRelBaseDir
         )
 
         var didSidecar = false
         if exportSortedAttachments {
-            let sidecarOriginalDir = try await exportSortedAttachmentsFolder(
-                chatURL: chatPath,
-                messages: msgs,
-                outDir: stagingDir,
-                folderName: base,
-                detectedPartnerRaw: "",
-                overridePartnerRaw: nil
-            )
-            let sidecarBaseDir = sidecarOriginalDir.deletingLastPathComponent()
+            guard let sidecarOriginalDir, let sidecarBaseDir else {
+                throw NSError(domain: "WETExport", code: 2, userInfo: [
+                    NSLocalizedDescriptionKey: "Sidecar directory missing"
+                ])
+            }
 
             // Sidecar HTML: renders like -max but references media in the sidecar folder via relative links.
             let sidecarChatURL = sidecarOriginalDir.appendingPathComponent(chatPath.lastPathComponent)
@@ -2137,6 +2273,236 @@ public enum WhatsAppExportService {
         try fm.createDirectory(at: url, withIntermediateDirectories: true)
     }
 
+    private struct ZipTimestampEntry {
+        let path: String
+        let date: Date
+    }
+
+    private enum ZipTimestampError: Error {
+        case eocdNotFound
+        case zip64Unsupported
+    }
+
+    nonisolated private static func normalizeZipEntryTimestamps(zipURL: URL, destDir: URL) {
+        let debugEnabled = ProcessInfo.processInfo.environment["WET_DEBUG"] == "1"
+        do {
+            let entries = try readZipEntryTimestamps(zipURL: zipURL)
+            guard !entries.isEmpty else { return }
+
+            let fm = FileManager.default
+            let root = destDir.standardizedFileURL
+            let rootPath = root.path.hasSuffix("/") ? root.path : root.path + "/"
+
+            func normalizedZipPathKey(_ path: String) -> String {
+                var p = path.replacingOccurrences(of: "\\", with: "/")
+                if p.hasPrefix("./") { p.removeFirst(2) }
+                if p.hasPrefix("/") { p.removeFirst() }
+                if p.hasSuffix("/") { p.removeLast() }
+                return p.precomposedStringWithCanonicalMapping.lowercased()
+            }
+
+            var fallbackIndex: [String: URL]? = nil
+            var fallbackAmbiguous = Set<String>()
+            var baseIndex: [String: URL]? = nil
+            var baseAmbiguous = Set<String>()
+
+            func buildFallbackIndex() {
+                var relIndex: [String: URL] = [:]
+                var relAmb: Set<String> = []
+                var baseIdx: [String: URL] = [:]
+                var baseAmb: Set<String> = []
+
+                guard let en = fm.enumerator(
+                    at: root,
+                    includingPropertiesForKeys: [.isDirectoryKey],
+                    options: [.skipsHiddenFiles]
+                ) else {
+                    fallbackIndex = [:]
+                    baseIndex = [:]
+                    fallbackAmbiguous = []
+                    baseAmbiguous = []
+                    return
+                }
+
+                for case let u as URL in en {
+                    let fullPath = u.standardizedFileURL.path
+                    guard fullPath.hasPrefix(rootPath) else { continue }
+                    var rel = String(fullPath.dropFirst(rootPath.count))
+                    if rel.hasPrefix("/") { rel.removeFirst() }
+                    if rel.isEmpty { continue }
+
+                    let relKey = normalizedZipPathKey(rel)
+                    if let _ = relIndex[relKey] {
+                        relAmb.insert(relKey)
+                        relIndex.removeValue(forKey: relKey)
+                    } else {
+                        relIndex[relKey] = u
+                    }
+
+                    let baseKey = normalizedZipPathKey(u.lastPathComponent)
+                    if let _ = baseIdx[baseKey] {
+                        baseAmb.insert(baseKey)
+                        baseIdx.removeValue(forKey: baseKey)
+                    } else {
+                        baseIdx[baseKey] = u
+                    }
+                }
+
+                fallbackIndex = relIndex
+                fallbackAmbiguous = relAmb
+                baseIndex = baseIdx
+                baseAmbiguous = baseAmb
+            }
+
+            func fallbackURL(for rel: String) -> URL? {
+                if fallbackIndex == nil { buildFallbackIndex() }
+                let relKey = normalizedZipPathKey(rel)
+                if !fallbackAmbiguous.contains(relKey), let hit = fallbackIndex?[relKey] {
+                    return hit
+                }
+                let baseKey = normalizedZipPathKey((rel as NSString).lastPathComponent)
+                if !baseAmbiguous.contains(baseKey), let hit = baseIndex?[baseKey] {
+                    return hit
+                }
+                return nil
+            }
+
+            for entry in entries {
+                var rel = entry.path.replacingOccurrences(of: "\\", with: "/")
+                if rel.hasPrefix("./") { rel.removeFirst(2) }
+                if rel.hasPrefix("/") { rel.removeFirst() }
+                if rel.hasSuffix("/") { rel.removeLast() }
+                if rel.isEmpty { continue }
+
+                let candidate = URL(fileURLWithPath: rel, relativeTo: root).standardizedFileURL
+                let candidatePath = candidate.path
+                guard candidatePath.hasPrefix(rootPath) else { continue }
+                let target: URL = {
+                    if fm.fileExists(atPath: candidatePath) { return candidate }
+                    if let fallback = fallbackURL(for: rel) { return fallback.standardizedFileURL }
+                    return candidate
+                }()
+                let targetPath = target.path
+                guard targetPath.hasPrefix(rootPath), fm.fileExists(atPath: targetPath) else { continue }
+
+                do {
+                    try fm.setAttributes([.creationDate: entry.date, .modificationDate: entry.date], ofItemAtPath: targetPath)
+                } catch {
+                    try? fm.setAttributes([.modificationDate: entry.date], ofItemAtPath: targetPath)
+                }
+                if debugEnabled, targetPath.lowercased().hasSuffix(".pdf") {
+                    let epoch = Int(entry.date.timeIntervalSince1970.rounded())
+                    print("WET-DBG: ZIP PDF mtime epoch=\(epoch) path=\(targetPath)")
+                }
+            }
+        } catch {
+            if debugEnabled {
+                print("WET-DBG: ZIP timestamp normalization skipped: \(error)")
+            }
+        }
+    }
+
+    nonisolated private static func readZipEntryTimestamps(zipURL: URL) throws -> [ZipTimestampEntry] {
+        let handle = try FileHandle(forReadingFrom: zipURL)
+        defer { try? handle.close() }
+
+        let fileSize = try handle.seekToEnd()
+        guard fileSize >= 22 else { return [] }
+
+        let maxComment: UInt64 = 0xFFFF
+        let eocdSize: UInt64 = 22
+        let tailSize = min(fileSize, eocdSize + maxComment)
+        try handle.seek(toOffset: fileSize - tailSize)
+        let tail = try handle.read(upToCount: Int(tailSize)) ?? Data()
+
+        let sig: [UInt8] = [0x50, 0x4b, 0x05, 0x06]
+        var eocdIndex: Int? = nil
+        if tail.count >= 4 {
+            for i in stride(from: tail.count - 4, through: 0, by: -1) {
+                if tail[i] == sig[0],
+                   tail[i + 1] == sig[1],
+                   tail[i + 2] == sig[2],
+                   tail[i + 3] == sig[3] {
+                    eocdIndex = i
+                    break
+                }
+            }
+        }
+        guard let eocdIndex else { throw ZipTimestampError.eocdNotFound }
+
+        func readU16(_ data: Data, _ offset: Int) -> UInt16 {
+            let b0 = UInt16(data[offset])
+            let b1 = UInt16(data[offset + 1]) << 8
+            return b0 | b1
+        }
+
+        func readU32(_ data: Data, _ offset: Int) -> UInt32 {
+            let b0 = UInt32(data[offset])
+            let b1 = UInt32(data[offset + 1]) << 8
+            let b2 = UInt32(data[offset + 2]) << 16
+            let b3 = UInt32(data[offset + 3]) << 24
+            return b0 | b1 | b2 | b3
+        }
+
+        let totalEntries = readU16(tail, eocdIndex + 10)
+        let cdSize = readU32(tail, eocdIndex + 12)
+        let cdOffset = readU32(tail, eocdIndex + 16)
+
+        if totalEntries == 0xFFFF || cdSize == 0xFFFFFFFF || cdOffset == 0xFFFFFFFF {
+            throw ZipTimestampError.zip64Unsupported
+        }
+
+        try handle.seek(toOffset: UInt64(cdOffset))
+        let cdData = try handle.read(upToCount: Int(cdSize)) ?? Data()
+
+        var entries: [ZipTimestampEntry] = []
+        entries.reserveCapacity(Int(totalEntries))
+
+        var offset = 0
+        while offset + 46 <= cdData.count {
+            if readU32(cdData, offset) != 0x02014b50 { break }
+
+            let flags = readU16(cdData, offset + 8)
+            let modTime = readU16(cdData, offset + 12)
+            let modDate = readU16(cdData, offset + 14)
+            let nameLen = Int(readU16(cdData, offset + 28))
+            let extraLen = Int(readU16(cdData, offset + 30))
+            let commentLen = Int(readU16(cdData, offset + 32))
+
+            let nameStart = offset + 46
+            let nameEnd = nameStart + nameLen
+            guard nameEnd <= cdData.count else { break }
+
+            let nameData = cdData.subdata(in: nameStart..<nameEnd)
+            let isUTF8 = (flags & 0x0800) != 0
+            let name: String = {
+                if isUTF8, let decoded = String(data: nameData, encoding: .utf8) {
+                    return decoded
+                }
+                let dosEncoding = String.Encoding(
+                    rawValue: CFStringConvertEncodingToNSStringEncoding(
+                        CFStringEncoding(CFStringEncodings.dosLatinUS.rawValue)
+                    )
+                )
+                if let dos = String(data: nameData, encoding: dosEncoding) {
+                    return dos
+                }
+                if let latin = String(data: nameData, encoding: .isoLatin1) {
+                    return latin
+                }
+                return String(decoding: nameData, as: UTF8.self)
+            }()
+
+            if let date = TimePolicy.dateFromMSDOSTimestamp(date: modDate, time: modTime) {
+                entries.append(ZipTimestampEntry(path: name, date: date))
+            }
+
+            offset = nameEnd + extraLen + commentLen
+        }
+
+        return entries
+    }
+
     nonisolated private static func extractZip(at zipURL: URL, to destDir: URL) throws {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
@@ -2152,6 +2518,8 @@ public enum WhatsAppExportService {
             let msg = String(data: data, encoding: .utf8) ?? "exit \(proc.terminationStatus)"
             throw WAInputError.zipExtractionFailed(url: zipURL, reason: msg.trimmingCharacters(in: .whitespacesAndNewlines))
         }
+
+        normalizeZipEntryTimestamps(zipURL: zipURL, destDir: destDir)
     }
 
     nonisolated private static func resolveTranscript(in dir: URL) throws -> (chatURL: URL, exportDir: URL) {
@@ -2241,12 +2609,35 @@ public enum WhatsAppExportService {
         return "\(start) to \(end)"
     }
 
-    nonisolated private static func exportCreatedStamp(for chatURL: URL) -> String {
+    nonisolated private static func exportCreatedDate(
+        chatURL: URL,
+        exportNameHint: String? = nil,
+        exportDirName: String? = nil
+    ) -> Date? {
+        if let exportNameHint,
+           let d = exportCreatedDateFromFolderName(exportNameHint) {
+            return d
+        }
+        if let exportDirName,
+           let d = exportCreatedDateFromFolderName(exportDirName) {
+            return d
+        }
         let chatFileAttrs = (try? FileManager.default.attributesOfItem(atPath: chatURL.path)) ?? [:]
-        let createdAt = (chatFileAttrs[.creationDate] as? Date)
-            ?? (chatFileAttrs[.modificationDate] as? Date)
-            ?? Date()
-        return fileStampFormatter.string(from: createdAt)
+        if let m = chatFileAttrs[.modificationDate] as? Date { return m }
+        if let c = chatFileAttrs[.creationDate] as? Date { return c }
+        return nil
+    }
+
+    nonisolated private static func exportCreatedStamp(for chatURL: URL) -> String {
+        let dirName = chatURL.deletingLastPathComponent().lastPathComponent
+        if let createdAt = exportCreatedDate(chatURL: chatURL, exportDirName: dirName) {
+            return fileStampFormatter.string(from: createdAt)
+        }
+        return "unknown"
+    }
+
+    nonisolated private static func exportCreatedDateFromFolderName(_ folderName: String) -> Date? {
+        TimePolicy.exportCreatedDateFromFolderName(folderName)
     }
 
     nonisolated private static func exportParticipantsLabel(
@@ -2293,8 +2684,7 @@ public enum WhatsAppExportService {
     }
 
     nonisolated private static func isoDateOnly(_ d: Date) -> String {
-        let cal = Calendar(identifier: .gregorian)
-        let c = cal.dateComponents([.year, .month, .day], from: d)
+        let c = canonicalCalendar.dateComponents([.year, .month, .day], from: d)
         return String(format: "%04d-%02d-%02d", c.year ?? 0, c.month ?? 0, c.day ?? 0)
     }
 
@@ -2324,7 +2714,8 @@ public enum WhatsAppExportService {
         dc.hour = hh
         dc.minute = mm
         dc.second = ss
-        return Calendar(identifier: .gregorian).date(from: dc)
+        dc.timeZone = canonicalTimeZone
+        return canonicalCalendar.date(from: dc)
     }
 
     nonisolated private static func match(_ re: NSRegularExpression, _ line: String) -> [String]? {
@@ -2758,8 +3149,8 @@ public enum WhatsAppExportService {
         var bucketsWithContent = Set<SortedAttachmentBucket>()
 
         let df = DateFormatter()
-        df.locale = Locale(identifier: "en_US_POSIX")
-        df.timeZone = TimeZone.current
+        df.locale = canonicalLocale
+        df.timeZone = canonicalTimeZone
         // Filename prefix: YYYY MM DD HH MM SS (spaces, no dashes)
         df.dateFormat = "yyyy MM dd HH mm ss"
 
@@ -3107,12 +3498,28 @@ public enum WhatsAppExportService {
 
         let fm = FileManager.default
         if !fm.fileExists(atPath: dest.path) {
-            do {
-                try writeExclusiveData(decoded.data, to: dest)
-                if ProcessInfo.processInfo.environment["WET_SIDECAR_DEBUG"] == "1" {
-                    print("WET-DBG: stage preview -> \(dest.path)")
+            var lastError: Error?
+            for attempt in 0..<2 {
+                do {
+                    try writeExclusiveData(decoded.data, to: dest)
+                    if previewDebugEnabled() {
+                        previewDebugLog("stage preview hash=\(hash) bytes=\(decoded.data.count) dest=\(dest.lastPathComponent)")
+                    } else if ProcessInfo.processInfo.environment["WET_SIDECAR_DEBUG"] == "1" {
+                        print("WET-DBG: stage preview -> \(dest.path)")
+                    }
+                    lastError = nil
+                    break
+                } catch {
+                    lastError = error
+                    if previewDebugEnabled() {
+                        previewDebugLog("stage preview retry=\(attempt + 1) hash=\(hash) error=\(error.localizedDescription)")
+                    }
                 }
-            } catch {
+            }
+            if let lastError {
+                if previewDebugEnabled() {
+                    previewDebugLog("stage preview failed hash=\(hash) error=\(lastError.localizedDescription)")
+                }
                 return nil
             }
         }
@@ -3843,27 +4250,82 @@ nonisolated private static func stageThumbnailForExport(
         return out
     }
 
-    nonisolated private static func downloadImageAsDataURL(_ imgURL: String, timeout: TimeInterval = 15, maxBytes: Int = 2_500_000) async -> String? {
-        do {
-            let (data, ct) = try await httpGet(imgURL, timeout: timeout)
-            if data.count > maxBytes { return nil }
+    private enum PreviewPolicy: String {
+        case deterministic
+        case full
+    }
 
-            var mime = ct.split(separator: ";").first.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() } ?? ""
-            if !mime.hasPrefix("image/") {
-                // guess from url path
-                let path = URL(string: imgURL)?.path ?? ""
-                mime = guessMime(fromName: path)
-                if !mime.hasPrefix("image/") { return nil }
-            }
+    nonisolated private static func previewPolicy() -> PreviewPolicy {
+        let env = ProcessInfo.processInfo.environment
+        let raw = (env["WET_PREVIEW_POLICY"] ?? "deterministic").lowercased()
+        if raw == "full" { return .full }
+        return .deterministic
+    }
 
-            return "data:\(mime);base64,\(data.base64EncodedString())"
-        } catch {
-            return nil
+    nonisolated private static func previewDebugEnabled() -> Bool {
+        ProcessInfo.processInfo.environment["WET_PREVIEW_DEBUG"] == "1"
+    }
+
+    nonisolated private static func previewDebugLog(_ message: String) {
+        guard previewDebugEnabled() else { return }
+        print("WET-PREVIEW: \(message)")
+    }
+
+    nonisolated private static func normalizePreviewURLKey(_ urlString: String) -> String {
+        guard var comps = URLComponents(string: urlString) else {
+            return urlString.trimmingCharacters(in: .whitespacesAndNewlines)
         }
+        comps.fragment = nil
+        if let scheme = comps.scheme { comps.scheme = scheme.lowercased() }
+        if let host = comps.host { comps.host = host.lowercased() }
+        if comps.scheme == "http", comps.port == 80 { comps.port = nil }
+        if comps.scheme == "https", comps.port == 443 { comps.port = nil }
+        return comps.string ?? urlString.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    nonisolated private static func downloadImageAsDataURL(
+        _ imgURL: String,
+        timeout: TimeInterval = 15,
+        maxBytes: Int = 2_500_000,
+        policy: PreviewPolicy
+    ) async -> String? {
+        let attempts = policy == .deterministic ? 2 : 1
+        for attempt in 0..<attempts {
+            do {
+                let (data, ct) = try await httpGet(imgURL, timeout: timeout)
+                if data.count > maxBytes { return nil }
+
+                var mime = ct.split(separator: ";").first.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() } ?? ""
+                if !mime.hasPrefix("image/") {
+                    // guess from url path
+                    let path = URL(string: imgURL)?.path ?? ""
+                    mime = guessMime(fromName: path)
+                    if !mime.hasPrefix("image/") { return nil }
+                }
+
+                if previewDebugEnabled() {
+                    let hash = fnv1a64Hex(data)
+                    previewDebugLog("image fetch ok url=\(imgURL) bytes=\(data.count) hash=\(hash)")
+                }
+
+                return "data:\(mime);base64,\(data.base64EncodedString())"
+            } catch {
+                if previewDebugEnabled() {
+                    previewDebugLog("image fetch fail url=\(imgURL) attempt=\(attempt + 1)/\(attempts) error=\(error.localizedDescription)")
+                }
+                continue
+            }
+        }
+        return nil
     }
 
     nonisolated private static func buildPreview(_ url: String) async -> WAPreview? {
-        if let cached = await previewCache.get(url) { return cached }
+        let urlKey = normalizePreviewURLKey(url)
+        if let cached = await previewCache.get(urlKey) { return cached }
+        let policy = previewPolicy()
+        if previewDebugEnabled() {
+            previewDebugLog("preview start url=\(urlKey) policy=\(policy.rawValue)")
+        }
 
         // Google Maps: avoid consent/interstitial pages and keep output stable.
         // For coordinate links like .../maps/search/?api=1&query=52.508450,13.372972
@@ -3879,24 +4341,35 @@ nonisolated private static func stageThumbnailForExport(
                 description: "Mit Google Maps lokale Anbieter suchen, Karten anzeigen und Routenpläne abrufen.",
                 imageDataURL: nil
             )
-            await previewCache.set(url, prev)
+            await previewCache.set(urlKey, prev)
+            if previewDebugEnabled() {
+                previewDebugLog("preview source=google_maps image=false")
+            }
             return prev
         }
 
         // YouTube special
         if let vid = youtubeVideoID(from: url) {
             let thumb = "https://img.youtube.com/vi/\(vid)/hqdefault.jpg"
-            let imgData = await downloadImageAsDataURL(thumb)
+            let imgData = await downloadImageAsDataURL(thumb, policy: policy)
             let prev = WAPreview(url: url, title: "YouTube", description: "", imageDataURL: imgData)
-            await previewCache.set(url, prev)
+            await previewCache.set(urlKey, prev)
+            if previewDebugEnabled() {
+                previewDebugLog("preview source=youtube image=\(imgData != nil)")
+            }
             return prev
         }
 
         // Prefer native LinkPresentation when available (often provides a real preview image).
         #if canImport(LinkPresentation)
-        if let lp = await buildPreviewViaLinkPresentation(url) {
-            await previewCache.set(url, lp)
-            return lp
+        if policy == .full {
+            if let lp = await buildPreviewViaLinkPresentation(url) {
+                await previewCache.set(urlKey, lp)
+                if previewDebugEnabled() {
+                    previewDebugLog("preview source=link_presentation image=\(lp.imageDataURL != nil)")
+                }
+                return lp
+            }
         }
         #endif
 
@@ -3911,13 +4384,19 @@ nonisolated private static func stageThumbnailForExport(
             var imgDataURL: String? = nil
             if !img.isEmpty {
                 let imgResolved = resolveURL(base: url, maybe: img)
-                imgDataURL = await downloadImageAsDataURL(imgResolved)
+                imgDataURL = await downloadImageAsDataURL(imgResolved, policy: policy)
             }
 
             let prev = WAPreview(url: url, title: title, description: desc, imageDataURL: imgDataURL)
-            await previewCache.set(url, prev)
+            await previewCache.set(urlKey, prev)
+            if previewDebugEnabled() {
+                previewDebugLog("preview source=meta image=\(imgDataURL != nil)")
+            }
             return prev
         } catch {
+            if previewDebugEnabled() {
+                previewDebugLog("preview source=meta failed error=\(error.localizedDescription)")
+            }
             return nil
         }
     }
@@ -3927,20 +4406,17 @@ nonisolated private static func stageThumbnailForExport(
     // ---------------------------
 
     nonisolated private static func weekdayIndexMonday0(_ date: Date) -> Int {
-        let cal = Calendar(identifier: .gregorian)
-        let w = cal.component(.weekday, from: date) // Sunday=1 ... Saturday=7
+        let w = canonicalCalendar.component(.weekday, from: date) // Sunday=1 ... Saturday=7
         return (w + 5) % 7 // Monday=0 ... Sunday=6
     }
 
     nonisolated private static func fmtDateFull(_ date: Date) -> String {
-        let cal = Calendar(identifier: .gregorian)
-        let c = cal.dateComponents([.year, .month, .day], from: date)
+        let c = canonicalCalendar.dateComponents([.year, .month, .day], from: date)
         return String(format: "%02d.%02d.%04d", c.day ?? 0, c.month ?? 0, c.year ?? 0)
     }
 
     nonisolated private static func fmtTime(_ date: Date) -> String {
-        let cal = Calendar(identifier: .gregorian)
-        let c = cal.dateComponents([.hour, .minute, .second], from: date)
+        let c = canonicalCalendar.dateComponents([.hour, .minute, .second], from: date)
         return String(format: "%02d:%02d:%02d", c.hour ?? 0, c.minute ?? 0, c.second ?? 0)
     }
 
@@ -4196,7 +4672,14 @@ nonisolated private static func stageThumbnailForExport(
         }()
 
         // export time = file mtime
-        let mtime: Date = (try? FileManager.default.attributesOfItem(atPath: chatURL.path)[.modificationDate] as? Date) ?? Date()
+        let exportDirName = chatURL.deletingLastPathComponent().lastPathComponent
+        let exportNameHint = outHTML.deletingPathExtension().lastPathComponent
+        let exportCreatedAt = exportCreatedDate(
+            chatURL: chatURL,
+            exportNameHint: exportNameHint,
+            exportDirName: exportDirName
+        )
+        let exportCreatedStr = exportCreatedAt.map { exportDTFormatter.string(from: $0) } ?? "(unknown)"
 
         // message count (exclude WhatsApp system messages)
         let messageCount: Int = msgs.reduce(0) { acc, m in
@@ -4528,7 +5011,7 @@ nonisolated private static func stageThumbnailForExport(
             parts.append("<div class='header'>")
             parts.append("<p class='h-title'>WhatsApp Chat<br>\(htmlEscape(titleNames))</p>")
             parts.append("<p class='h-meta'>Quelle: \(htmlEscape(chatURL.lastPathComponent))<br>"
-                         + "Export: \(htmlEscape(exportDTFormatter.string(from: mtime)))<br>"
+                         + "Export: \(htmlEscape(exportCreatedStr))<br>"
                          + "Nachrichten: \(messageCount)</p>")
             parts.append("</div>")
             return parts.joined()
@@ -5205,7 +5688,8 @@ nonisolated private static func stageThumbnailForExport(
         meName: String,
         enablePreviews: Bool,
         embedAttachments: Bool,
-        embedAttachmentThumbnailsOnly: Bool
+        embedAttachmentThumbnailsOnly: Bool,
+        attachmentRelBaseDir: URL? = nil
     ) throws {
 
         var authors: [String] = []
@@ -5223,7 +5707,14 @@ nonisolated private static func stageThumbnailForExport(
             return "\(meName) ↔ Chat"
         }()
 
-        let mtime: Date = (try? FileManager.default.attributesOfItem(atPath: chatURL.path)[.modificationDate] as? Date) ?? Date()
+        let exportDirName = chatURL.deletingLastPathComponent().lastPathComponent
+        let exportNameHint = outMD.deletingPathExtension().lastPathComponent
+        let exportCreatedAt = exportCreatedDate(
+            chatURL: chatURL,
+            exportNameHint: exportNameHint,
+            exportDirName: exportDirName
+        )
+        let exportCreatedStr = exportCreatedAt.map { iso8601WithOffsetString($0) } ?? "(unknown)"
 
         let messageCount: Int = msgs.reduce(0) { acc, m in
             let authorNorm = _normSpace(m.author)
@@ -5239,7 +5730,7 @@ nonisolated private static func stageThumbnailForExport(
         out.append("**\(titleNames)**")
         out.append("")
         out.append("- Quelle: \(chatURL.lastPathComponent)")
-        out.append("- Export: \(exportDTFormatter.string(from: mtime))")
+        out.append("- Export: \(exportCreatedStr)")
         out.append("- Nachrichten: \(messageCount)")
         out.append("")
 
@@ -5356,6 +5847,15 @@ nonisolated private static func stageThumbnailForExport(
         var newAttrs: [FileAttributeKey: Any] = [:]
         if let c = attrs[.creationDate] as? Date { newAttrs[.creationDate] = c }
         if let m = attrs[.modificationDate] as? Date { newAttrs[.modificationDate] = m }
+
+        if ProcessInfo.processInfo.environment["WET_DEBUG"] == "1" {
+            let srcExt = source.pathExtension.lowercased()
+            let dstExt = dest.pathExtension.lowercased()
+            if (srcExt == "pdf" || dstExt == "pdf"), let m = newAttrs[.modificationDate] as? Date {
+                let epoch = Int(m.timeIntervalSince1970.rounded())
+                print("WET-DBG: PDF mtime apply epoch=\(epoch) src=\(source.path) dst=\(dest.path)")
+            }
+        }
 
         if !newAttrs.isEmpty {
             do {

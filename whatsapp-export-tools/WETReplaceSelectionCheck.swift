@@ -17,13 +17,9 @@ struct WETReplaceSelectionCheck {
         let size: UInt64
     }
 
-    private static let manifestFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(secondsFromGMT: 0)
-        return formatter
-    }()
+    private static func manifestTimestamp(_ date: Date) -> String {
+        TimePolicy.iso8601WithOffsetString(date)
+    }
 
     private static func run() {
         let root = fixtureRoot()
@@ -245,8 +241,8 @@ struct WETReplaceSelectionCheck {
         files.sort { $0.path < $1.path }
         for url in files {
             guard let info = fileInfo(at: url) else { continue }
-            let mtime = manifestFormatter.string(from: info.mtime)
-            print("[\(label)] \(url.path) size=\(info.size) mtime=\(mtime)Z")
+            let mtime = manifestTimestamp(info.mtime)
+            print("[\(label)] \(url.path) size=\(info.size) mtime=\(mtime)")
         }
     }
 }

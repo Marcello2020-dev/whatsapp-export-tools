@@ -2540,6 +2540,15 @@ struct ContentView: View {
         }
 
         let sidecarDebugEnabled = debugEnabled || ProcessInfo.processInfo.environment["WET_SIDECAR_DEBUG"] == "1"
+        let sidecarSourceDir = prepared.chatURL.deletingLastPathComponent()
+        let sidecarOriginalNameBefore = context.provenance.originalZipURL?
+            .deletingPathExtension()
+            .lastPathComponent ?? sidecarSourceDir.lastPathComponent
+        let sidecarOriginalFolderName = WhatsAppExportService.applyPartnerOverrideToName(
+            originalName: sidecarOriginalNameBefore,
+            detectedPartnerRaw: context.detectedPartnerRaw,
+            overridePartnerRaw: context.overridePartnerRaw
+        )
 
         func logSidecarTree(root: URL, label: String) {
             guard sidecarDebugEnabled else { return }
@@ -2632,19 +2641,11 @@ struct ContentView: View {
         }
 
         func finalizeSidecarTimestamps(sidecarBaseDir: URL, logMismatches: Bool) {
-            let sourceDir = prepared.chatURL.deletingLastPathComponent()
-            let originalNameBefore: String
-            if let originalZipURL = context.provenance.originalZipURL {
-                originalNameBefore = originalZipURL.deletingPathExtension().lastPathComponent
-            } else {
-                originalNameBefore = sourceDir.lastPathComponent
-            }
-            let originalFolderName = WhatsAppExportService.applyPartnerOverrideToName(
-                originalName: originalNameBefore,
-                detectedPartnerRaw: context.detectedPartnerRaw,
-                overridePartnerRaw: context.overridePartnerRaw
+            let sourceDir = sidecarSourceDir
+            let finalSidecarOriginalDir = sidecarBaseDir.appendingPathComponent(
+                sidecarOriginalFolderName,
+                isDirectory: true
             )
-            let finalSidecarOriginalDir = sidecarBaseDir.appendingPathComponent(originalFolderName, isDirectory: true)
             if debugEnabled {
                 debugLog("TIMESTAMP SYNC: \(finalSidecarOriginalDir.path)")
             }
@@ -2758,6 +2759,7 @@ struct ContentView: View {
         var htmlByVariant: [HTMLVariant: URL] = [:]
         var finalMD: URL? = nil
         var finalSidecarBaseDir: URL? = nil
+        var finalSidecarOriginalDir: URL? = nil
         var sidecarSnapshot: SidecarTimestampSnapshot? = nil
         var sidecarImmutabilityWarnings: Set<String> = []
         var stagedSidecarHTML: URL? = nil
@@ -2775,21 +2777,10 @@ struct ContentView: View {
                 let stepStart = ProcessInfo.processInfo.systemUptime
                 switch step {
                 case .sidecar:
-                    let sourceDir = prepared.chatURL.deletingLastPathComponent()
+                    let sourceDir = sidecarSourceDir
                     if debugEnabled {
-                        let originalNameBefore: String
-                        if let originalZipURL = context.provenance.originalZipURL {
-                            originalNameBefore = originalZipURL.deletingPathExtension().lastPathComponent
-                        } else {
-                            originalNameBefore = sourceDir.lastPathComponent
-                        }
-                        let originalNameAfter = WhatsAppExportService.applyPartnerOverrideToName(
-                            originalName: originalNameBefore,
-                            detectedPartnerRaw: context.detectedPartnerRaw,
-                            overridePartnerRaw: context.overridePartnerRaw
-                        )
-                        debugLog("SIDECAR ORIGINAL NAME BEFORE: \"\(originalNameBefore)\"")
-                        debugLog("SIDECAR ORIGINAL NAME AFTER: \"\(originalNameAfter)\"")
+                        debugLog("SIDECAR ORIGINAL NAME BEFORE: \"\(sidecarOriginalNameBefore)\"")
+                        debugLog("SIDECAR ORIGINAL NAME AFTER: \"\(sidecarOriginalFolderName)\"")
                     }
                     let sidecarResult = try await Self.debugMeasureAsync("generate sidecar") {
                         try await WhatsAppExportService.renderSidecar(
@@ -2838,13 +2829,8 @@ struct ContentView: View {
                                 debugLog("STAGE PATH: \(stagedSidecarBaseDir.path)")
                             }
                         }
-                        let stagedSidecarOriginalName = WhatsAppExportService.applyPartnerOverrideToName(
-                            originalName: sourceDir.lastPathComponent,
-                            detectedPartnerRaw: context.detectedPartnerRaw,
-                            overridePartnerRaw: context.overridePartnerRaw
-                        )
                         let stagedSidecarOriginalDir = stagedSidecarBaseDir.appendingPathComponent(
-                            stagedSidecarOriginalName,
+                            sidecarOriginalFolderName,
                             isDirectory: true
                         )
                         if debugEnabled {
@@ -2953,6 +2939,10 @@ struct ContentView: View {
                     if expectedSidecarAttachments > 0 {
                         finalizeSidecarTimestamps(sidecarBaseDir: finalSidecarDir, logMismatches: false)
                         finalSidecarBaseDir = finalSidecarDir
+                        finalSidecarOriginalDir = finalSidecarDir.appendingPathComponent(
+                            sidecarOriginalFolderName,
+                            isDirectory: true
+                        )
                         sidecarSnapshot = captureSidecarTimestampSnapshot(sidecarBaseDir: finalSidecarDir)
                     }
                 case .html(let variant):
@@ -3010,10 +3000,15 @@ struct ContentView: View {
                     }
                     htmlByVariant[variant] = finalHTML
                 case .markdown:
+                    let mdChatURL = finalSidecarOriginalDir?
+                        .appendingPathComponent(prepared.chatURL.lastPathComponent) ?? prepared.chatURL
+                    let mdAttachmentRelBaseDir: URL? = finalSidecarOriginalDir != nil ? exportDir : nil
                     let stagedMDURL = try Self.debugMeasure("generate Markdown") {
                         try WhatsAppExportService.renderMarkdown(
                             prepared: prepared,
-                            outDir: stagingDir
+                            outDir: stagingDir,
+                            chatURLOverride: mdChatURL,
+                            attachmentRelBaseDir: mdAttachmentRelBaseDir
                         )
                     }
                     if verboseDebug {
