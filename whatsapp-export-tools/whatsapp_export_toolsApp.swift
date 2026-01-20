@@ -16,6 +16,7 @@ struct whatsapp_export_toolsApp: App {
             WETSystemMessageCheck.runIfNeeded()
             WETReplaceSelectionCheck.runIfNeeded()
             WETExternalAssetsCheck.runIfNeeded()
+            WETDeterminismCheck.runIfNeeded()
             AIGlowSnapshotRunner.runIfNeeded()
         }
     }
@@ -48,6 +49,11 @@ struct whatsapp_export_toolsApp: App {
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                         .padding()
+                } else if WETDeterminismCheck.isEnabled {
+                    Text("Running WET determinism check…")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .padding()
                 } else if AIGlowSnapshotRunner.isEnabled {
                     AIGlowSnapshotView(isRunning: false)
                 } else {
@@ -60,6 +66,7 @@ struct whatsapp_export_toolsApp: App {
                 WETSystemMessageCheck.runIfNeeded()
                 WETReplaceSelectionCheck.runIfNeeded()
                 WETExternalAssetsCheck.runIfNeeded()
+                WETDeterminismCheck.runIfNeeded()
                 AIGlowSnapshotRunner.runIfNeeded()
             }
         }
