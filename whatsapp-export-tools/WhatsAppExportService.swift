@@ -2610,27 +2610,16 @@ public enum WhatsAppExportService {
     }
 
     nonisolated private static func exportCreatedDate(
-        chatURL: URL,
-        exportNameHint: String? = nil,
-        exportDirName: String? = nil
+        chatURL: URL
     ) -> Date? {
-        if let exportNameHint,
-           let d = exportCreatedDateFromFolderName(exportNameHint) {
-            return d
-        }
-        if let exportDirName,
-           let d = exportCreatedDateFromFolderName(exportDirName) {
-            return d
-        }
         let chatFileAttrs = (try? FileManager.default.attributesOfItem(atPath: chatURL.path)) ?? [:]
-        if let m = chatFileAttrs[.modificationDate] as? Date { return m }
         if let c = chatFileAttrs[.creationDate] as? Date { return c }
+        if let m = chatFileAttrs[.modificationDate] as? Date { return m }
         return nil
     }
 
     nonisolated private static func exportCreatedStamp(for chatURL: URL) -> String {
-        let dirName = chatURL.deletingLastPathComponent().lastPathComponent
-        if let createdAt = exportCreatedDate(chatURL: chatURL, exportDirName: dirName) {
+        if let createdAt = exportCreatedDate(chatURL: chatURL) {
             return fileStampFormatter.string(from: createdAt)
         }
         return "unknown"
@@ -4671,14 +4660,8 @@ nonisolated private static func stageThumbnailForExport(
             return "\(meName) ↔ Chat"
         }()
 
-        // export time = file mtime
-        let exportDirName = chatURL.deletingLastPathComponent().lastPathComponent
-        let exportNameHint = outHTML.deletingPathExtension().lastPathComponent
-        let exportCreatedAt = exportCreatedDate(
-            chatURL: chatURL,
-            exportNameHint: exportNameHint,
-            exportDirName: exportDirName
-        )
+        // export time = transcript creation date (fallback: modification date)
+        let exportCreatedAt = exportCreatedDate(chatURL: chatURL)
         let exportCreatedStr = exportCreatedAt.map { exportDTFormatter.string(from: $0) } ?? "(unknown)"
 
         // message count (exclude WhatsApp system messages)
@@ -5707,13 +5690,8 @@ nonisolated private static func stageThumbnailForExport(
             return "\(meName) ↔ Chat"
         }()
 
-        let exportDirName = chatURL.deletingLastPathComponent().lastPathComponent
-        let exportNameHint = outMD.deletingPathExtension().lastPathComponent
-        let exportCreatedAt = exportCreatedDate(
-            chatURL: chatURL,
-            exportNameHint: exportNameHint,
-            exportDirName: exportDirName
-        )
+        // export time = transcript creation date (fallback: modification date)
+        let exportCreatedAt = exportCreatedDate(chatURL: chatURL)
         let exportCreatedStr = exportCreatedAt.map { iso8601WithOffsetString($0) } ?? "(unknown)"
 
         let messageCount: Int = msgs.reduce(0) { acc, m in
