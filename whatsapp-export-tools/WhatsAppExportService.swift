@@ -151,6 +151,52 @@ public struct WAPreview: Sendable {
     public var imageDataURL: String?
 }
 
+public enum WAParticipantChatKind: String, Sendable {
+    case oneToOne
+    case group
+    case unknown
+}
+
+public enum WAParticipantDetectionConfidence: String, Sendable {
+    case high
+    case medium
+    case low
+}
+
+public struct WAParticipantDetectionEvidence: Sendable {
+    public let source: String
+    public let excerpt: String
+}
+
+public struct WAParticipantDetectionResult: Sendable {
+    public let chatKind: WAParticipantChatKind
+    public let chatTitleCandidate: String?
+    public let otherPartyCandidate: String?
+    public let exporterSelfCandidate: String?
+    public let confidence: WAParticipantDetectionConfidence
+    public let evidence: [WAParticipantDetectionEvidence]
+}
+
+public struct WAMediaCounts: Sendable {
+    public let images: Int
+    public let videos: Int
+    public let audios: Int
+    public let documents: Int
+
+    public static let zero = WAMediaCounts(images: 0, videos: 0, audios: 0, documents: 0)
+
+    public var total: Int {
+        images + videos + audios + documents
+    }
+}
+
+public struct WAParticipantDetectionSnapshot: Sendable {
+    public let participants: [String]
+    public let detection: WAParticipantDetectionResult
+    public let dateRange: ClosedRange<Date>?
+    public let mediaCounts: WAMediaCounts
+}
+
 public struct WAInputSnapshot: Sendable {
     public let inputURL: URL
     public let chatURL: URL
@@ -475,6 +521,12 @@ public enum WhatsAppExportService {
     // Bracketed timestamp format (often used in exports).
     nonisolated private static let patBracket = try! NSRegularExpression(
         pattern: #"^\[(\d{1,2}\.\d{1,2}\.\d{2,4}),\s+(\d{1,2}:\d{2})(?::(\d{2}))?\]\s+([^:]+?):\s*(.*)$"#,
+        options: []
+    )
+
+    // Timestamp-like prefix (used to reject implausible header/container candidates).
+    nonisolated private static let patTimestampPrefix = try! NSRegularExpression(
+        pattern: #"^\s*(?:\[\s*)?\d{1,4}[./-]\d{1,2}[./-]\d{2,4}(?:[,\]]\s*)?(?:\d{1,2}:\d{2})?"#,
         options: []
     )
 
@@ -969,10 +1021,343 @@ public enum WhatsAppExportService {
 
         let chatPath = chatURL.standardizedFileURL
         let msgs = try parseMessages(chatPath)
+        return participants(from: msgs)
+    }
 
+    /// Best-effort detection of the exporter ("Ich"-Perspektive) from the chat text.
+    /// Returns nil if no reliable signal is found.
+    public static func detectMeName(chatURL: URL) throws -> String? {
+        let chatPath = chatURL.standardizedFileURL
+        let msgs = try parseMessages(chatPath)
+        return inferMeName(messages: msgs)
+    }
+
+    /// Best-effort participant detection snapshot (participants + evidence + summary data).
+    public static func participantDetectionSnapshot(
+        chatURL: URL,
+        provenance: WETSourceProvenance
+    ) throws -> WAParticipantDetectionSnapshot {
+        let chatPath = chatURL.standardizedFileURL
+        let lines = try loadChatLines(chatPath)
+        let msgs = parseMessages(lines)
+
+        let participantsRaw = participants(from: msgs)
+        let participants = participantsRaw.map { safeFinderFilename($0) }
+        let dateRange = messageDateRange(messages: msgs)
+        let mediaCounts = messageMediaCounts(messages: msgs)
+
+        let headerCandidateRaw = headerTitleCandidate(lines: lines)
+        let headerCandidate = headerCandidateRaw.map { safeFinderFilename($0) }
+
+        let containerRaw = containerNameCandidates(provenance: provenance)
+        let selectedContainerRaw = containerRaw.selected.flatMap { stripChatPrefix($0) }
+        let topLevelContainerRaw = containerRaw.topLevel.flatMap { stripChatPrefix($0) }
+
+        let selectedContainer = selectedContainerRaw.map { safeFinderFilename($0) }
+        let topLevelContainer = topLevelContainerRaw.map { safeFinderFilename($0) }
+
+        let topLevelDecision = containerCandidateDecision(topLevelContainerRaw)
+        let selectedDecision = containerCandidateDecision(selectedContainerRaw)
+
+        let topLevelContainerCandidateRaw = topLevelDecision.candidate
+        let selectedContainerCandidateRaw = selectedDecision.candidate
+        let topLevelContainerCandidate = topLevelContainerCandidateRaw.map { safeFinderFilename($0) }
+        let selectedContainerCandidate = selectedContainerCandidateRaw.map { safeFinderFilename($0) }
+
+        var rejectedCandidates: [(source: String, reason: String)] = []
+        var rejectionKeys: Set<String> = []
+        let rejectCandidate: (String, String) -> Void = { source, reason in
+            let key = "\(source)|\(reason)"
+            if rejectionKeys.insert(key).inserted {
+                rejectedCandidates.append((source: source, reason: reason))
+            }
+        }
+        if let reason = topLevelDecision.rejection { rejectCandidate("container:top-level", reason) }
+        if let reason = selectedDecision.rejection { rejectCandidate("container:selected", reason) }
+
+        let selectedKey = normalizedKey(normalizedParticipantIdentifier(selectedContainerCandidateRaw ?? ""))
+        let topLevelKey = normalizedKey(normalizedParticipantIdentifier(topLevelContainerCandidateRaw ?? ""))
+        let containerConflict = !selectedKey.isEmpty && !topLevelKey.isEmpty && selectedKey != topLevelKey
+
+        let participantKey: (String) -> String = { normalizedKey(normalizedParticipantIdentifier($0)) }
+        var participantByKey: [String: String] = [:]
+        for (idx, raw) in participantsRaw.enumerated() {
+            let key = participantKey(raw)
+            if key.isEmpty { continue }
+            if participantByKey[key] == nil {
+                participantByKey[key] = participants[idx]
+            }
+        }
+
+        let resolveCandidate: (String) -> String = { raw in
+            let key = participantKey(raw)
+            if let match = participantByKey[key] {
+                return match
+            }
+            return safeFinderFilename(raw)
+        }
+
+        let selfEvidence = inferMeNameEvidence(messages: msgs)
+        let exporterSelfCandidate: String? = {
+            guard let raw = selfEvidence?.name else { return nil }
+            if let match = participantByKey[participantKey(raw)] {
+                return match
+            }
+            return resolveCandidate(raw)
+        }()
+
+        let otherEvidence = inferOtherPartyNameEvidence(messages: msgs)
+
+        let selfKey = exporterSelfCandidate.map { participantKey($0) } ?? ""
+        let selfLooseKey = exporterSelfCandidate.map { normalizedPersonKey($0) } ?? ""
+        let hasSelf = !selfKey.isEmpty
+        let isSelfCandidate: (String) -> Bool = { candidate in
+            guard hasSelf else { return false }
+            return participantKey(candidate) == selfKey
+        }
+        let isSelfLikeCandidate: (String) -> Bool = { candidate in
+            guard !selfLooseKey.isEmpty else { return false }
+            let key = normalizedPersonKey(candidate)
+            return !key.isEmpty && key == selfLooseKey
+        }
+
+        var otherPartyCandidate: String? = nil
+        var otherPartySource: String? = nil
+        var selfExclusionSources: [String] = []
+
+        let considerCandidate: (String?, String) -> Void = { rawCandidate, source in
+            guard otherPartyCandidate == nil else { return }
+            guard let rawCandidate else { return }
+            let candidate = resolveCandidate(rawCandidate)
+            if isSelfCandidate(candidate) || isSelfLikeCandidate(candidate) {
+                if hasSelf {
+                    selfExclusionSources.append(source)
+                }
+                rejectCandidate(source, "self")
+                return
+            }
+            otherPartyCandidate = candidate
+            otherPartySource = source
+        }
+
+        // Priority order: header -> system (other) -> container (top-level, selected) -> sender tokens
+        considerCandidate(headerCandidateRaw, "header")
+        considerCandidate(otherEvidence?.name, "system:other")
+        considerCandidate(topLevelContainerCandidateRaw, "container:top-level")
+        considerCandidate(selectedContainerCandidateRaw, "container:selected")
+
+        if otherPartyCandidate == nil, hasSelf {
+            let senderOthers = participantsRaw.filter {
+                participantKey($0) != selfKey && !isSelfLikeCandidate($0)
+            }
+            if senderOthers.count == 1 {
+                otherPartyCandidate = resolveCandidate(senderOthers[0])
+                otherPartySource = "sender-tokens"
+            }
+        }
+
+        let groupSignal = participantsRaw.count > 2 || selfEvidence?.tag == "me_group_action_marker"
+        let chatKind: WAParticipantChatKind = {
+            if groupSignal { return .group }
+            if otherPartyCandidate != nil { return .oneToOne }
+            if participantsRaw.count == 2 { return .oneToOne }
+            return .unknown
+        }()
+
+        var chatTitleCandidate: String? = nil
+        var chatTitleSource: String? = nil
+        let titleOptions: [(candidate: String?, source: String)] = [
+            (headerCandidate, "header"),
+            (topLevelContainerCandidate, "container:top-level"),
+            (selectedContainerCandidate, "container:selected"),
+        ]
+
+        switch chatKind {
+        case .group:
+            for (candidate, source) in titleOptions {
+                guard let candidate else { continue }
+                chatTitleCandidate = candidate
+                chatTitleSource = source
+                break
+            }
+        case .oneToOne:
+            for (candidate, source) in titleOptions {
+                guard let candidate else { continue }
+                if isSelfCandidate(candidate) || isSelfLikeCandidate(candidate) {
+                    rejectCandidate(source, "self")
+                    continue
+                }
+                chatTitleCandidate = candidate
+                chatTitleSource = source
+                break
+            }
+            if chatTitleCandidate == nil, let otherPartyCandidate {
+                chatTitleCandidate = otherPartyCandidate
+                chatTitleSource = otherPartySource ?? "sender-tokens"
+            }
+        case .unknown:
+            for (candidate, source) in titleOptions {
+                guard let candidate else { continue }
+                chatTitleCandidate = candidate
+                chatTitleSource = source
+                break
+            }
+        }
+
+        var confidence: WAParticipantDetectionConfidence = .low
+        let hasHeader = headerCandidate != nil
+        let hasSystem = selfEvidence != nil || otherEvidence != nil
+        let hasSenderTokens = !participantsRaw.isEmpty
+        if hasHeader || hasSystem { confidence = .medium }
+        if hasHeader && (hasSystem || hasSenderTokens) { confidence = .high }
+        if !hasHeader && hasSystem && hasSenderTokens { confidence = .high }
+        if containerConflict && !(hasHeader || hasSystem) {
+            if confidence == .high { confidence = .medium }
+        }
+
+        var evidence: [WAParticipantDetectionEvidence] = []
+        if let headerCandidate {
+            evidence.append(WAParticipantDetectionEvidence(source: "header", excerpt: headerCandidate))
+        }
+        if let selfEvidence {
+            evidence.append(WAParticipantDetectionEvidence(source: "system", excerpt: selfEvidence.tag))
+        }
+        if let otherEvidence {
+            evidence.append(WAParticipantDetectionEvidence(source: "system:other", excerpt: otherEvidence.tag))
+        }
+        if let topLevelContainer {
+            evidence.append(WAParticipantDetectionEvidence(source: "container:top-level", excerpt: topLevelContainer))
+        }
+        if let selectedContainer, normalizedKey(selectedContainer) != normalizedKey(topLevelContainer ?? "") {
+            evidence.append(WAParticipantDetectionEvidence(source: "container:selected", excerpt: selectedContainer))
+        }
+        if !participantsRaw.isEmpty {
+            evidence.append(WAParticipantDetectionEvidence(source: "sender-tokens", excerpt: "unique=\(participantsRaw.count)"))
+        }
+
+        var nonPhoneAlternatives: [(candidate: String, source: String)] = []
+        let appendNonPhone: (String?, String) -> Void = { rawCandidate, source in
+            guard let rawCandidate else { return }
+            let candidate = resolveCandidate(rawCandidate)
+            if isPhoneCandidate(candidate) { return }
+            if isSelfCandidate(candidate) || isSelfLikeCandidate(candidate) { return }
+            if nonPhoneAlternatives.contains(where: { normalizedKey($0.candidate) == normalizedKey(candidate) }) { return }
+            nonPhoneAlternatives.append((candidate: candidate, source: source))
+        }
+
+        appendNonPhone(headerCandidateRaw, "header")
+        appendNonPhone(otherEvidence?.name, "system:other")
+        appendNonPhone(topLevelContainerCandidateRaw, "container:top-level")
+        appendNonPhone(selectedContainerCandidateRaw, "container:selected")
+        if hasSelf {
+            for raw in participantsRaw where participantKey(raw) != selfKey {
+                appendNonPhone(raw, "sender-tokens")
+            }
+        }
+
+        var phoneOverrideSource: String? = nil
+        let otherPartyCandidateFinal: String? = {
+            if chatKind == .group { return nil }
+            guard var candidate = otherPartyCandidate else { return nil }
+            if isPhoneCandidate(candidate) {
+                let replacement = nonPhoneAlternatives.first(where: { $0.source.hasPrefix("container:") })
+                    ?? nonPhoneAlternatives.first
+                if let replacement,
+                   !(isSelfCandidate(replacement.candidate) || isSelfLikeCandidate(replacement.candidate)) {
+                    candidate = replacement.candidate
+                    phoneOverrideSource = replacement.source
+                    return candidate
+                }
+            }
+            return candidate
+        }()
+        var otherPartySourceFinal = otherPartySource
+        if let phoneOverrideSource {
+            otherPartySourceFinal = phoneOverrideSource
+        }
+
+        if !selfExclusionSources.isEmpty {
+            let summary = selfExclusionSources.sorted().joined(separator: ", ")
+            evidence.append(WAParticipantDetectionEvidence(source: "policy:self-exclusion", excerpt: summary))
+        }
+
+        if chatKind != .group,
+           !hasSelf,
+           otherPartyCandidateFinal == nil,
+           (headerCandidate != nil || topLevelContainerCandidate != nil || selectedContainerCandidate != nil || !participantsRaw.isEmpty) {
+            evidence.append(WAParticipantDetectionEvidence(source: "policy:ambiguous-other", excerpt: "self-unknown"))
+        }
+        if let phoneOverrideSource {
+            evidence.append(WAParticipantDetectionEvidence(source: "policy:phone-suppressed", excerpt: phoneOverrideSource))
+        }
+
+        var chatTitleCandidateFinal = chatTitleCandidate
+        var chatTitleSourceFinal = chatTitleSource
+        if let candidate = chatTitleCandidateFinal,
+           isPhoneCandidate(candidate),
+           let otherPartyCandidateFinal,
+           !isPhoneCandidate(otherPartyCandidateFinal) {
+            chatTitleCandidateFinal = otherPartyCandidateFinal
+            chatTitleSourceFinal = otherPartySourceFinal ?? "policy:phone-suppressed"
+        }
+
+        if chatTitleCandidateFinal == nil && otherPartyCandidateFinal == nil {
+            let fallback = safeFinderFilename(fallbackChatIdentifier(from: chatURL))
+            chatTitleCandidateFinal = fallback
+            chatTitleSourceFinal = "fallback"
+            evidence.append(WAParticipantDetectionEvidence(source: "fallback", excerpt: fallback))
+        }
+
+        if chatKind == .oneToOne && otherPartyCandidateFinal == nil {
+            confidence = .low
+        }
+
+        if !rejectedCandidates.isEmpty {
+            for rejection in rejectedCandidates {
+                evidence.append(WAParticipantDetectionEvidence(source: "reject:\(rejection.source)", excerpt: rejection.reason))
+            }
+        }
+
+        let winningSource: String? = {
+            switch chatKind {
+            case .oneToOne:
+                if otherPartyCandidateFinal != nil {
+                    return otherPartySourceFinal ?? chatTitleSourceFinal
+                }
+                return chatTitleSourceFinal
+            case .group:
+                return chatTitleSourceFinal
+            case .unknown:
+                return chatTitleSourceFinal ?? otherPartySourceFinal
+            }
+        }()
+
+        if let winningSource {
+            evidence.append(WAParticipantDetectionEvidence(source: "decision:winner", excerpt: winningSource))
+        }
+        evidence.append(WAParticipantDetectionEvidence(source: "decision:confidence", excerpt: confidence.rawValue))
+
+        let detection = WAParticipantDetectionResult(
+            chatKind: chatKind,
+            chatTitleCandidate: chatTitleCandidateFinal,
+            otherPartyCandidate: otherPartyCandidateFinal,
+            exporterSelfCandidate: exporterSelfCandidate,
+            confidence: confidence,
+            evidence: evidence
+        )
+
+        return WAParticipantDetectionSnapshot(
+            participants: participants,
+            detection: detection,
+            dateRange: dateRange,
+            mediaCounts: mediaCounts
+        )
+    }
+
+    nonisolated private static func participants(from messages: [WAMessage]) -> [String] {
         // Preserve first-seen order
         var uniq: [String] = []
-        for m in msgs {
+        for m in messages {
             let a = normalizedParticipantIdentifier(m.author)
             if a.isEmpty { continue }
             if isSystemAuthor(a) { continue }
@@ -983,12 +1368,158 @@ public enum WhatsAppExportService {
         return filtered.isEmpty ? uniq : filtered
     }
 
-    /// Best-effort detection of the exporter ("Ich"-Perspektive) from the chat text.
-    /// Returns nil if no reliable signal is found.
-    public static func detectMeName(chatURL: URL) throws -> String? {
-        let chatPath = chatURL.standardizedFileURL
-        let msgs = try parseMessages(chatPath)
-        return inferMeName(messages: msgs)
+    nonisolated private static func messageDateRange(messages: [WAMessage]) -> ClosedRange<Date>? {
+        var minDate: Date? = nil
+        var maxDate: Date? = nil
+        for m in messages {
+            if let currentMin = minDate {
+                if m.ts < currentMin { minDate = m.ts }
+            } else {
+                minDate = m.ts
+            }
+            if let currentMax = maxDate {
+                if m.ts > currentMax { maxDate = m.ts }
+            } else {
+                maxDate = m.ts
+            }
+        }
+        if let minDate, let maxDate {
+            return minDate...maxDate
+        }
+        return nil
+    }
+
+    nonisolated private static func messageMediaCounts(messages: [WAMessage]) -> WAMediaCounts {
+        var images = 0
+        var videos = 0
+        var audios = 0
+        var documents = 0
+
+        for m in messages {
+            let attachments = findAttachments(m.text)
+            if attachments.isEmpty { continue }
+            for fn in attachments {
+                let ext = URL(fileURLWithPath: fn).pathExtension
+                switch bucketForExtension(ext) {
+                case .images: images += 1
+                case .videos: videos += 1
+                case .audios: audios += 1
+                case .documents: documents += 1
+                }
+            }
+        }
+
+        return WAMediaCounts(images: images, videos: videos, audios: audios, documents: documents)
+    }
+
+    nonisolated private static func headerTitleCandidate(lines: [String], limit: Int = 120) -> String? {
+        var checked = 0
+        for line in lines {
+            if checked >= limit { break }
+            checked += 1
+
+            let stripped = _normSpace(stripBOMAndBidi(line))
+            if stripped.isEmpty { continue }
+            if isMessageLine(stripped) { continue }
+            if isSystemMessage(authorRaw: "header", text: stripped) { continue }
+
+            guard let candidate = stripExplicitChatPrefix(stripped) else { continue }
+            let cleaned = _normSpace(candidate).precomposedStringWithCanonicalMapping
+            if cleaned.isEmpty { continue }
+            return cleaned
+        }
+        return nil
+    }
+
+    nonisolated private static func containerNameCandidates(
+        provenance: WETSourceProvenance
+    ) -> (selected: String?, topLevel: String?) {
+        let topLevel = provenance.detectedFolderURL.lastPathComponent
+        switch provenance.inputKind {
+        case .folder:
+            return (selected: topLevel, topLevel: topLevel)
+        case .zip:
+            let selected = provenance.originalZipURL?.deletingPathExtension().lastPathComponent
+            return (selected: selected, topLevel: topLevel)
+        }
+    }
+
+    nonisolated private static func inferOtherPartyNameEvidence(messages: [WAMessage]) -> (name: String, tag: String)? {
+        var candidates: Set<String> = []
+        var deletedByOther: [String: Int] = [:]
+
+        for m in messages {
+            let author = normalizedParticipantIdentifier(m.author)
+            if author.isEmpty { continue }
+            if isSystemAuthor(author) { continue }
+            candidates.insert(author)
+
+            let text = normalizedSystemText(m.text)
+            if text.isEmpty { continue }
+            if containsAny(text, otherDeletedMarkers) {
+                deletedByOther[author, default: 0] += 1
+            }
+        }
+
+        if candidates.count == 2, deletedByOther.count == 1, let other = deletedByOther.keys.first {
+            return (name: other, tag: "other_deleted_marker")
+        }
+
+        return nil
+    }
+
+    nonisolated private static func inferMeNameEvidence(messages: [WAMessage]) -> (name: String, tag: String)? {
+        var candidates: Set<String> = []
+        var deletedByMe: [String: Int] = [:]
+        var groupActionsByMe: [String: Int] = [:]
+        var deletedByOther: [String: Int] = [:]
+
+        for m in messages {
+            let author = normalizedParticipantIdentifier(m.author)
+            if author.isEmpty { continue }
+            if isSystemAuthor(author) { continue }
+            candidates.insert(author)
+
+            let text = normalizedSystemText(m.text)
+            if text.isEmpty { continue }
+
+            if containsAny(text, meDeletedMarkers) {
+                deletedByMe[author, default: 0] += 1
+                continue
+            }
+            if containsAny(text, meGroupActionMarkers) {
+                groupActionsByMe[author, default: 0] += 1
+                continue
+            }
+            if containsAny(text, otherDeletedMarkers) {
+                deletedByOther[author, default: 0] += 1
+            }
+        }
+
+        if deletedByMe.count == 1, let me = deletedByMe.keys.first {
+            return (name: me, tag: "me_deleted_marker")
+        }
+
+        if deletedByMe.count > 1 {
+            return nil
+        }
+
+        if groupActionsByMe.count == 1, let me = groupActionsByMe.keys.first {
+            return (name: me, tag: "me_group_action_marker")
+        }
+
+        if groupActionsByMe.count > 1 {
+            return nil
+        }
+
+        if candidates.count == 2, deletedByOther.count == 1 {
+            let notMe = deletedByOther.keys.first!
+            if let me = candidates.first(where: { $0 != notMe }) {
+                return (name: me, tag: "other_deleted_marker")
+            }
+        }
+
+        return nil
     }
 
     /// Compare the original WhatsApp export folder (and sibling zip, if present) with the sidecar copies.
@@ -1747,6 +2278,20 @@ public enum WhatsAppExportService {
         x = x.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
         return x
     }
+
+    nonisolated private static func normalizedKey(_ s: String) -> String {
+        _normSpace(s).precomposedStringWithCanonicalMapping.lowercased()
+    }
+
+    // Looser normalization for matching names that differ only in punctuation/spacing.
+    nonisolated private static func normalizedPersonKey(_ s: String) -> String {
+        let x = _normSpace(s).precomposedStringWithCanonicalMapping.lowercased()
+        if x.isEmpty { return "" }
+        let filtered = x.unicodeScalars.filter {
+            CharacterSet.letters.contains($0) || CharacterSet.decimalDigits.contains($0)
+        }
+        return String(String.UnicodeScalarView(filtered))
+    }
     
     // ---------------------------
     // Helpers: participant overrides (phone normalization)
@@ -2084,6 +2629,105 @@ public enum WhatsAppExportService {
         }
 
         return x
+    }
+
+    nonisolated private static let chatTitlePrefixes: [String] = [
+        "WhatsApp Chat - ",
+        "WhatsApp Chat – ",
+        "WhatsApp Chat — ",
+        "WhatsApp Chat with ",
+        "WhatsApp Chat mit ",
+        "WhatsApp-Chat - ",
+        "WhatsApp-Chat – ",
+        "WhatsApp-Chat — ",
+        "WhatsApp-Chat with ",
+        "WhatsApp-Chat mit "
+    ]
+
+    nonisolated private static func stripChatPrefix(_ raw: String) -> String? {
+        let cleaned = _normSpace(raw)
+        if cleaned.isEmpty { return nil }
+
+        let lower = cleaned.lowercased()
+        let genericNames = [
+            "whatsapp chat",
+            "whatsapp-chat"
+        ]
+        if genericNames.contains(lower) { return nil }
+
+        for prefix in chatTitlePrefixes {
+            if lower.hasPrefix(prefix.lowercased()) {
+                let suffix = String(cleaned.dropFirst(prefix.count))
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                return suffix.isEmpty ? nil : suffix
+            }
+        }
+
+        return cleaned
+    }
+
+    // Like stripChatPrefix, but only returns a value if an explicit WhatsApp header/title prefix is present.
+    nonisolated private static func stripExplicitChatPrefix(_ raw: String) -> String? {
+        let cleaned = _normSpace(raw)
+        if cleaned.isEmpty { return nil }
+
+        let lower = cleaned.lowercased()
+        for prefix in chatTitlePrefixes {
+            if lower.hasPrefix(prefix.lowercased()) {
+                let suffix = String(cleaned.dropFirst(prefix.count))
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                return suffix.isEmpty ? nil : suffix
+            }
+        }
+
+        return nil
+    }
+
+    nonisolated private static func containsURLLikeText(_ text: String) -> Bool {
+        !extractURLs(text).isEmpty
+    }
+
+    nonisolated private static func hasTimestampPrefix(_ text: String) -> Bool {
+        match(patTimestampPrefix, text) != nil
+    }
+
+    nonisolated private static func isNameLikeCandidate(_ text: String) -> Bool {
+        let cleaned = _normSpace(text).precomposedStringWithCanonicalMapping
+        if cleaned.isEmpty { return false }
+
+        var letterCount = 0
+        let allowedPunct = CharacterSet(charactersIn: "-'’·.")
+        for scalar in cleaned.unicodeScalars {
+            if CharacterSet.letters.contains(scalar) {
+                letterCount += 1
+                continue
+            }
+            if CharacterSet.nonBaseCharacters.contains(scalar) { continue }
+            if CharacterSet.whitespaces.contains(scalar) { continue }
+            if allowedPunct.contains(scalar) { continue }
+            return false
+        }
+        return letterCount > 0
+    }
+
+    nonisolated private static func containerCandidateDecision(_ raw: String?) -> (candidate: String?, rejection: String?) {
+        guard let raw else { return (nil, nil) }
+        if raw.contains(where: \.isNewline) { return (nil, "newline") }
+
+        let cleaned = _normSpace(raw).precomposedStringWithCanonicalMapping
+        if cleaned.isEmpty { return (nil, "empty") }
+        if containsURLLikeText(cleaned) { return (nil, "url") }
+        if hasTimestampPrefix(cleaned) { return (nil, "timestamp") }
+        if cleaned.count > 80 { return (nil, "length>80") }
+
+        let punctCount = cleaned.unicodeScalars.filter { scalar in
+            ".?!".unicodeScalars.contains(scalar)
+        }.count
+        if punctCount >= 2 { return (nil, "punctuation") }
+
+        if isPhoneCandidate(cleaned) { return (cleaned, nil) }
+        guard isNameLikeCandidate(cleaned) else { return (nil, "non-name") }
+        return (cleaned, nil)
     }
 
     nonisolated static func applyPartnerOverrideToName(
@@ -2718,8 +3362,7 @@ public enum WhatsAppExportService {
         return g
     }
 
-    // Parse WhatsApp export lines into message records.
-    nonisolated private static func parseMessages(_ chatURL: URL) throws -> [WAMessage] {
+    nonisolated private static func loadChatLines(_ chatURL: URL) throws -> [String] {
         let s: String
         do {
             s = try String(contentsOf: chatURL, encoding: .utf8)
@@ -2733,13 +3376,28 @@ public enum WhatsAppExportService {
                 throw error
             }
         }
+        return s.components(separatedBy: .newlines)
+    }
 
-        let raw = s.components(separatedBy: .newlines)
+    nonisolated private static func isMessageLine(_ line: String) -> Bool {
+        if match(patISO, line) != nil { return true }
+        if match(patDE, line) != nil { return true }
+        if match(patBracket, line) != nil { return true }
+        return false
+    }
 
+    // Parse WhatsApp export lines into message records.
+    nonisolated private static func parseMessages(_ chatURL: URL) throws -> [WAMessage] {
+        let lines = try loadChatLines(chatURL)
+        return parseMessages(lines)
+    }
+
+    // Parse WhatsApp export lines into message records.
+    nonisolated private static func parseMessages(_ lines: [String]) -> [WAMessage] {
         var msgs: [WAMessage] = []
         var lastIndex: Int? = nil
 
-        for origLine in raw {
+        for origLine in lines {
             var line = origLine
             if !line.isEmpty { line = stripBOMAndBidi(line) }
 

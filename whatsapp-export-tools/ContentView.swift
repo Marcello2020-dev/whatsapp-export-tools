@@ -25,6 +25,7 @@ struct ContentView: View {
         let chatPartnerFolderOverride: String?
         let detectedPartnerRaw: String
         let overridePartnerRaw: String?
+        let participantDetection: WAParticipantDetectionResult?
         let provenance: WETSourceProvenance
         let participantNameOverrides: [String: String]
         let selectedVariantsInOrder: [HTMLVariant]
@@ -277,6 +278,11 @@ struct ContentView: View {
     @State private var chatPartnerCustomName: String = ""
     @State private var autoDetectedChatPartnerName: String? = nil
     @State private var exporterName: String = ""
+    @State private var participantDetection: WAParticipantDetectionResult? = nil
+    @State private var detectedChatTitle: String? = nil
+    @State private var detectedDateRange: ClosedRange<Date>? = nil
+    @State private var detectedMediaCounts: WAMediaCounts = .zero
+    @State private var inputKindBadge: String? = nil
 
     // Optional overrides for participants that appear only as phone numbers in the WhatsApp export
     // Key = phone-number-like participant string as it appears in the export; Value = user-provided display name
@@ -398,9 +404,66 @@ struct ContentView: View {
                             .accessibilityLabel("Zielordner auswählen")
                     }
                 }
+
+                if chatURL != nil {
+                    Divider()
+                        .padding(.vertical, 2)
+                    inputSummary
+                }
             }
         }
         .waCard()
+    }
+
+    private var inputSummary: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let badge = inputKindBadge {
+                Text(badge)
+                    .font(.system(size: 11, weight: .semibold))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 2)
+                    .background(Color.black.opacity(0.06))
+                    .clipShape(Capsule())
+            }
+
+            Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 6) {
+                GridRow {
+                    Text("Detected chat title:")
+                        .foregroundStyle(.secondary)
+                        .frame(width: Self.labelWidth, alignment: .leading)
+                    Text(detectedChatTitle ?? "—")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                GridRow {
+                    Text("Participant label:")
+                        .foregroundStyle(.secondary)
+                        .frame(width: Self.labelWidth, alignment: .leading)
+                    HStack(spacing: 6) {
+                        Text(autoDetectedChatPartnerName ?? "—")
+                        if let confidence = inputSummaryConfidenceText {
+                            Text(confidence)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                GridRow {
+                    Text("Message date range:")
+                        .foregroundStyle(.secondary)
+                        .frame(width: Self.labelWidth, alignment: .leading)
+                    Text(inputSummaryDateRangeText)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                GridRow {
+                    Text("Media counts:")
+                        .foregroundStyle(.secondary)
+                        .frame(width: Self.labelWidth, alignment: .leading)
+                    Text(inputSummaryMediaCountsText)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            .font(.system(size: 12))
+        }
     }
 
     private var optionsAndLogSection: some View {
@@ -890,6 +953,36 @@ struct ContentView: View {
         return url.path
     }
 
+    nonisolated private static let inputSummaryDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "de_DE")
+        formatter.timeZone = TimeZone.current
+        formatter.dateFormat = "dd.MM.yyyy"
+        return formatter
+    }()
+
+    private var inputSummaryDateRangeText: String {
+        guard let detectedDateRange else { return "—" }
+        let start = Self.inputSummaryDateFormatter.string(from: detectedDateRange.lowerBound)
+        let end = Self.inputSummaryDateFormatter.string(from: detectedDateRange.upperBound)
+        return "\(start) – \(end)"
+    }
+
+    private var inputSummaryMediaCountsText: String {
+        let counts = detectedMediaCounts
+        if counts.total == 0 { return "—" }
+        return "Images \(counts.images) · Videos \(counts.videos) · Audio \(counts.audios) · Documents \(counts.documents)"
+    }
+
+    private var inputSummaryConfidenceText: String? {
+        guard let confidence = participantDetection?.confidence else { return nil }
+        switch confidence {
+        case .high: return "Confident"
+        case .medium: return "Likely"
+        case .low: return "Uncertain"
+        }
+    }
+
     private func suggestedChatSubfolderName(
         chatURL: URL,
         chatPartner: String,
@@ -900,6 +993,8 @@ struct ContentView: View {
         let base: String
         if !trimmed.isEmpty {
             base = safeFolderName(trimmed)
+        } else if let detectedChatTitle, !detectedChatTitle.isEmpty {
+            base = safeFolderName(detectedChatTitle)
         } else if let fromExportFolder = chatNameFromExportFolder(chatURL: chatURL) {
             base = safeFolderName(fromExportFolder)
         } else {
@@ -1218,15 +1313,41 @@ struct ContentView: View {
 
         let chatURL = snapshot.chatURL
         do {
-            var parts = try WhatsAppExportService.participants(chatURL: chatURL)
+            let detectionSnapshot = try WhatsAppExportService.participantDetectionSnapshot(
+                chatURL: chatURL,
+                provenance: snapshot.provenance
+            )
+            let detection = detectionSnapshot.detection
+
+            participantDetection = detection
+            detectedChatTitle = detection.chatTitleCandidate
+            detectedDateRange = detectionSnapshot.dateRange
+            detectedMediaCounts = detectionSnapshot.mediaCounts
+            switch snapshot.provenance.inputKind {
+            case .folder:
+                inputKindBadge = "Folder"
+            case .zip:
+                inputKindBadge = "ZIP"
+            }
+
+            var parts = detectionSnapshot.participants
             let usedFallbackParticipant = parts.isEmpty
             if parts.isEmpty { parts = ["Ich"] }
             detectedParticipants = parts
 
-            let partnerHintRaw = chatNameFromExportFolder(chatURL: chatURL)
+            let partnerHintRaw: String? = {
+                switch detection.chatKind {
+                case .group:
+                    return detection.chatTitleCandidate ?? detection.otherPartyCandidate
+                case .oneToOne:
+                    return detection.otherPartyCandidate ?? detection.chatTitleCandidate
+                case .unknown:
+                    return detection.chatTitleCandidate ?? detection.otherPartyCandidate
+                }
+            }()
             let partnerHint = partnerHintRaw?.trimmingCharacters(in: .whitespacesAndNewlines)
 
-            let detectedMeRaw = try? WhatsAppExportService.detectMeName(chatURL: chatURL)
+            let detectedMeRaw = detection.exporterSelfCandidate
             var detectedExporter: String? = nil
 
             if let detectedMeRaw, let match = firstMatchingParticipant(detectedMeRaw, in: parts) {
@@ -1285,7 +1406,8 @@ struct ContentView: View {
             autoSuggestedPhoneNames = newAutoSuggested
 
             var candidates: [String] = []
-            if parts.count > 2 {
+            let isGroup = detection.chatKind == .group || parts.count > 2
+            if isGroup {
                 let groupName = partnerHint ?? groupNameFromParticipants(parts)
                 if !groupName.isEmpty {
                     candidates = [groupName]
@@ -1345,7 +1467,12 @@ struct ContentView: View {
             }
         } catch {
             detectedParticipants = []
-            let fallbackPartner = chatNameFromExportFolder(chatURL: chatURL) ?? "WhatsApp Chat"
+            participantDetection = nil
+            detectedChatTitle = nil
+            detectedDateRange = nil
+            detectedMediaCounts = .zero
+            inputKindBadge = nil
+            let fallbackPartner = "WhatsApp Chat"
             chatPartnerCandidates = [fallbackPartner]
             autoDetectedChatPartnerName = fallbackPartner
             if chatPartnerSelection != Self.customChatPartnerTag {
@@ -1573,6 +1700,27 @@ struct ContentView: View {
                 let moveTime = snapshot.publishTimeByLabel[key] ?? 0
                 lines.append("- \(key): \(Self.formatSeconds(moveTime))")
             }
+        }
+        lines.append("")
+        lines.append("## Participant Detection")
+        if let detection = context.participantDetection {
+            lines.append("- Chosen label: \(context.chatPartner)")
+            lines.append("- Source: \(context.chatPartnerSource)")
+            lines.append("- Confidence: \(detection.confidence.rawValue)")
+            lines.append("- Chat kind: \(detection.chatKind.rawValue)")
+            lines.append("- Chat title candidate: \(detection.chatTitleCandidate ?? "n/a")")
+            lines.append("- Other party candidate: \(detection.otherPartyCandidate ?? "n/a")")
+            lines.append("- Exporter self candidate: \(detection.exporterSelfCandidate ?? "n/a")")
+            if detection.evidence.isEmpty {
+                lines.append("- Evidence: n/a")
+            } else {
+                lines.append("- Evidence:")
+                for item in detection.evidence.prefix(8) {
+                    lines.append("  - \(item.source): \(item.excerpt)")
+                }
+            }
+        } else {
+            lines.append("- Detection: n/a")
         }
         lines.append("")
         lines.append("## Validation Notes")
@@ -2109,6 +2257,7 @@ struct ContentView: View {
             chatPartnerFolderOverride: outputChatPartnerFolderOverride,
             detectedPartnerRaw: detectedPartnerRaw,
             overridePartnerRaw: overridePartnerEffective,
+            participantDetection: participantDetection,
             provenance: provenance,
             participantNameOverrides: participantNameOverrides,
             selectedVariantsInOrder: selectedVariantsInOrder,
@@ -2178,6 +2327,19 @@ struct ContentView: View {
             return
         }
         let baseName = prepared.baseName
+
+        if let detection = context.participantDetection {
+            let winner = detection.evidence.first(where: { $0.source == "decision:winner" })?.excerpt ?? "n/a"
+            let rejectSummary = detection.evidence
+                .filter { $0.source.hasPrefix("reject:") }
+                .map { "\($0.source.replacingOccurrences(of: "reject:", with: ""))=\($0.excerpt)" }
+                .joined(separator: ", ")
+            debugLog("DETECTION: winner=\(winner) confidence=\(detection.confidence.rawValue) chatKind=\(detection.chatKind.rawValue)")
+            debugLog("DETECTION CANDIDATES: title=\(detection.chatTitleCandidate ?? "n/a") other=\(detection.otherPartyCandidate ?? "n/a") self=\(detection.exporterSelfCandidate ?? "n/a")")
+            if !rejectSummary.isEmpty {
+                debugLog("DETECTION REJECTS: \(rejectSummary)")
+            }
+        }
 
         let runStartWall = Date()
         let runStartUptime = ProcessInfo.processInfo.systemUptime
