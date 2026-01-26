@@ -2573,8 +2573,13 @@ struct ContentView: View {
             log("WET-PERF: target_iCloud=\(targetIsICloud)")
         }
 
-        // Prewarm derived resources once per run (attachment index, caches).
-        WhatsAppExportService.prewarmAttachmentIndex(for: prepared.chatURL.deletingLastPathComponent())
+        // Prewarm D1 attachment index once per run when any artifact might need attachment resolution.
+        let wantsAttachmentIndex = plan.wantsSidecar
+            || plan.wantsMD
+            || plan.variants.contains(where: { $0 == .embedAll || $0 == .thumbnailsOnly })
+        if wantsAttachmentIndex, WhatsAppExportService.hasAnyAttachmentMarkers(messages: prepared.messages) {
+            WhatsAppExportService.prewarmAttachmentIndex(for: prepared.chatURL.deletingLastPathComponent())
+        }
 
         let stagingDir = try WhatsAppExportService.createStagingDirectory(in: stagingBase)
         if debugEnabled {

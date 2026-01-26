@@ -647,13 +647,16 @@ public enum WhatsAppExportService {
         stagedAttachmentLock.unlock()
     }
 
-    nonisolated private static let attachmentIndexLock = NSLock()
-    nonisolated(unsafe) private static var attachmentIndexCache: [String: [String: URL]] = [:]
+    nonisolated private static let attachmentIndexCondition = NSCondition()
+    nonisolated(unsafe) private static var attachmentIndexSnapshot: AttachmentIndexSnapshot? = nil
+    nonisolated(unsafe) private static var attachmentIndexBuildInProgress: Bool = false
 
     nonisolated static func resetAttachmentIndexCache() {
-        attachmentIndexLock.lock()
-        attachmentIndexCache.removeAll(keepingCapacity: true)
-        attachmentIndexLock.unlock()
+        attachmentIndexCondition.lock()
+        attachmentIndexSnapshot = nil
+        attachmentIndexBuildInProgress = false
+        attachmentIndexCondition.broadcast()
+        attachmentIndexCondition.unlock()
     }
 
     nonisolated private static let thumbnailJPEGCacheLock = NSLock()
@@ -1621,6 +1624,11 @@ public enum WhatsAppExportService {
             meName: meName
         )
 
+        // D1 Attachment index (run-wide, at most once) if attachments are referenced.
+        if hasAnyAttachmentMarkers(messages: msgs) {
+            prewarmAttachmentIndex(for: chatPath.deletingLastPathComponent())
+        }
+
         let fm = FileManager.default
 
         let outHTML = outPath.appendingPathComponent("\(base).html")
@@ -1885,6 +1893,13 @@ public enum WhatsAppExportService {
         return count
     }
 
+    nonisolated static func hasAnyAttachmentMarkers(messages: [WAMessage]) -> Bool {
+        for m in messages {
+            if !findAttachments(m.text).isEmpty { return true }
+        }
+        return false
+    }
+
     nonisolated static func renderHTMLPrepared(
         prepared: PreparedExport,
         outDir: URL,
@@ -2051,6 +2066,11 @@ public enum WhatsAppExportService {
         }()
 
         let base = composeExportBaseName(messages: msgs, chatURL: chatPath, meName: meName)
+
+        // D1 Attachment index (run-wide, at most once) if attachments are referenced.
+        if hasAnyAttachmentMarkers(messages: msgs) {
+            prewarmAttachmentIndex(for: chatPath.deletingLastPathComponent())
+        }
 
         let fm = FileManager.default
 
@@ -3586,6 +3606,19 @@ public enum WhatsAppExportService {
         return matches.map { ns.substring(with: $0.range(at: 1)).trimmingCharacters(in: .whitespacesAndNewlines) }
     }
 
+    private struct AttachmentIndexSnapshot: Sendable {
+        let relPathByName: [String: String]
+    }
+
+    nonisolated private static func relativePath(from baseDir: URL, to fileURL: URL) -> String? {
+        let base = baseDir.standardizedFileURL.path
+        let full = fileURL.standardizedFileURL.path
+        let prefix = base.hasSuffix("/") ? base : base + "/"
+        guard full.hasPrefix(prefix) else { return nil }
+        let rel = String(full.dropFirst(prefix.count))
+        return rel.isEmpty ? nil : rel
+    }
+
     // ---------------------------
     // Sorted attachments folder (standalone export)
     // ---------------------------
@@ -3611,20 +3644,12 @@ public enum WhatsAppExportService {
         }
     }
 
-    nonisolated private static func attachmentIndex(for sourceDir: URL) -> [String: URL] {
+    nonisolated private static func buildAttachmentIndexSnapshot(for sourceDir: URL) -> AttachmentIndexSnapshot {
         let fm = FileManager.default
         let base = sourceDir.standardizedFileURL
-        let key = base.path
-
-        attachmentIndexLock.lock()
-        if let cached = attachmentIndexCache[key] {
-            attachmentIndexLock.unlock()
-            return cached
-        }
-        attachmentIndexLock.unlock()
 
         let buildStart = ProcessInfo.processInfo.systemUptime
-        var index: [String: URL] = [:]
+        var index: [String: String] = [:]
         var fileCount = 0
         if let en = fm.enumerator(
             at: base,
@@ -3636,40 +3661,69 @@ public enum WhatsAppExportService {
                 if rv?.isRegularFile != true { continue }
                 fileCount += 1
                 let name = u.lastPathComponent
-                if index[name] == nil {
-                    index[name] = u
+                if index[name] == nil, let rel = relativePath(from: base, to: u) {
+                    index[name] = rel
                 }
             }
         }
         let buildDuration = ProcessInfo.processInfo.systemUptime - buildStart
         recordAttachmentIndexBuild(duration: buildDuration, fileCount: fileCount)
+        return AttachmentIndexSnapshot(relPathByName: index)
+    }
 
-        attachmentIndexLock.lock()
-        attachmentIndexCache[key] = index
-        attachmentIndexLock.unlock()
+    nonisolated private static func attachmentIndexSnapshot(for sourceDir: URL) -> AttachmentIndexSnapshot {
+        attachmentIndexCondition.lock()
+        if let cached = attachmentIndexSnapshot {
+            attachmentIndexCondition.unlock()
+            return cached
+        }
+        if attachmentIndexBuildInProgress {
+            while attachmentIndexSnapshot == nil {
+                attachmentIndexCondition.wait()
+            }
+            let cached = attachmentIndexSnapshot!
+            attachmentIndexCondition.unlock()
+            return cached
+        }
+        attachmentIndexBuildInProgress = true
+        attachmentIndexCondition.unlock()
 
-        return index
+        let snapshot = buildAttachmentIndexSnapshot(for: sourceDir)
+
+        attachmentIndexCondition.lock()
+        if attachmentIndexSnapshot == nil {
+            attachmentIndexSnapshot = snapshot
+        }
+        attachmentIndexBuildInProgress = false
+        attachmentIndexCondition.broadcast()
+        let cached = attachmentIndexSnapshot ?? snapshot
+        attachmentIndexCondition.unlock()
+        return cached
     }
 
     nonisolated static func prewarmAttachmentIndex(for sourceDir: URL) {
-        _ = attachmentIndex(for: sourceDir)
+        _ = attachmentIndexSnapshot(for: sourceDir)
     }
 
     nonisolated private static func resolveAttachmentURL(fileName: String, sourceDir: URL) -> URL? {
         let fm = FileManager.default
+        let base = sourceDir.standardizedFileURL
 
         // 1) Most common: attachment is next to the chat.txt
-        let direct = sourceDir.appendingPathComponent(fileName)
+        let direct = base.appendingPathComponent(fileName)
         if fm.fileExists(atPath: direct.path) { return direct }
 
         // 2) Common alternative: inside a "Media" folder
-        let media = sourceDir.appendingPathComponent("Media", isDirectory: true).appendingPathComponent(fileName)
+        let media = base.appendingPathComponent("Media", isDirectory: true).appendingPathComponent(fileName)
         if fm.fileExists(atPath: media.path) { return media }
 
         // 3) Last resort: resolve via cached index (avoids per-attachment recursion).
-        let index = attachmentIndex(for: sourceDir)
-        if let hit = index[fileName], fm.fileExists(atPath: hit.path) {
-            return hit
+        let index = attachmentIndexSnapshot(for: base)
+        if let rel = index.relPathByName[fileName] {
+            let candidate = base.appendingPathComponent(rel)
+            if fm.fileExists(atPath: candidate.path) {
+                return candidate
+            }
         }
 
         return nil
