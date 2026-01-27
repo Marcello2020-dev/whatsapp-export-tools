@@ -113,7 +113,7 @@ enum TimePolicy {
         return exportStampParser.date(from: stamp)
     }
 
-    nonisolated static func dateFromMSDOSTimestamp(date: UInt16, time: UInt16) -> Date? {
+    nonisolated static func dateFromMSDOSTimestamp(date: UInt16, time: UInt16, timeZone: TimeZone) -> Date? {
         let seconds = Int(time & 0x1F) * 2
         let minutes = Int((time >> 5) & 0x3F)
         let hours = Int((time >> 11) & 0x1F)
@@ -131,8 +131,15 @@ enum TimePolicy {
         dc.hour = hours
         dc.minute = minutes
         dc.second = seconds
-        dc.timeZone = canonicalTimeZone
-        return canonicalCalendar.date(from: dc)
+        dc.timeZone = timeZone
+
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = timeZone
+        return cal.date(from: dc)
+    }
+
+    nonisolated static func dateFromMSDOSTimestamp(date: UInt16, time: UInt16) -> Date? {
+        dateFromMSDOSTimestamp(date: date, time: time, timeZone: canonicalTimeZone)
     }
 }
 
@@ -3268,154 +3275,237 @@ public enum WhatsAppExportService {
         try fm.createDirectory(at: url, withIntermediateDirectories: true)
     }
 
-    private enum ZipTimestampSource: String {
-        case dos
-        case utCentral
-        case ntfsCentral
-        case utLocal
-        case ntfsLocal
-    }
-
     private struct ZipTimestampEntry {
         let path: String
-        let date: Date
-        let source: ZipTimestampSource
+        let utLocal: Date?
+        let utCentral: Date?
+        let ntfsLocal: Date?
+        let ntfsCentral: Date?
+        let dosDateLocal: Date?
+        let dosDateCentral: Date?
+    }
+
+    private enum ZipTimestampSource: String {
+        case utLocal = "ut-local"
+        case utCentral = "ut-central"
+        case ntfsLocal = "ntfs-local"
+        case ntfsCentral = "ntfs-central"
+        case dos = "dos"
     }
 
     private enum ZipTimestampError: Error {
         case eocdNotFound
         case zip64Unsupported
+        case timestampApplyFailed
     }
 
-    nonisolated private static func normalizeZipEntryTimestamps(zipURL: URL, destDir: URL) {
+    nonisolated private static func normalizeZipEntryTimestamps(zipURL: URL, destDir: URL) throws {
         let debugEnabled = ProcessInfo.processInfo.environment["WET_DEBUG"] == "1"
-        do {
-            let entries = try readZipEntryTimestamps(zipURL: zipURL)
-            guard !entries.isEmpty else { return }
+        let entries = try readZipEntryTimestamps(zipURL: zipURL)
+        guard !entries.isEmpty else { return }
 
-            let fm = FileManager.default
-            let root = destDir.standardizedFileURL
-            let rootPath = root.path.hasSuffix("/") ? root.path : root.path + "/"
+        let fm = FileManager.default
+        let root = destDir.standardizedFileURL
+        let rootPath = root.path.hasSuffix("/") ? root.path : root.path + "/"
 
-            func normalizedZipPathKey(_ path: String) -> String {
-                var p = path.replacingOccurrences(of: "\\", with: "/")
-                if p.hasPrefix("./") { p.removeFirst(2) }
-                if p.hasPrefix("/") { p.removeFirst() }
-                if p.hasSuffix("/") { p.removeLast() }
-                return p.precomposedStringWithCanonicalMapping.lowercased()
+        func normalizedZipPathKey(_ path: String) -> String {
+            var p = path.replacingOccurrences(of: "\\", with: "/")
+            if p.hasPrefix("./") { p.removeFirst(2) }
+            if p.hasPrefix("/") { p.removeFirst() }
+            if p.hasSuffix("/") { p.removeLast() }
+            return p.precomposedStringWithCanonicalMapping.lowercased()
+        }
+
+        var fallbackIndex: [String: URL]? = nil
+        var fallbackAmbiguous = Set<String>()
+        var baseIndex: [String: URL]? = nil
+        var baseAmbiguous = Set<String>()
+
+        func buildFallbackIndex() {
+            var relIndex: [String: URL] = [:]
+            var relAmb: Set<String> = []
+            var baseIdx: [String: URL] = [:]
+            var baseAmb: Set<String> = []
+
+            guard let en = fm.enumerator(
+                at: root,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles]
+            ) else {
+                fallbackIndex = [:]
+                baseIndex = [:]
+                fallbackAmbiguous = []
+                baseAmbiguous = []
+                return
             }
 
-            var fallbackIndex: [String: URL]? = nil
-            var fallbackAmbiguous = Set<String>()
-            var baseIndex: [String: URL]? = nil
-            var baseAmbiguous = Set<String>()
+            for case let u as URL in en {
+                let fullPath = u.standardizedFileURL.path
+                guard fullPath.hasPrefix(rootPath) else { continue }
+                var rel = String(fullPath.dropFirst(rootPath.count))
+                if rel.hasPrefix("/") { rel.removeFirst() }
+                if rel.isEmpty { continue }
 
-            func buildFallbackIndex() {
-                var relIndex: [String: URL] = [:]
-                var relAmb: Set<String> = []
-                var baseIdx: [String: URL] = [:]
-                var baseAmb: Set<String> = []
-
-                guard let en = fm.enumerator(
-                    at: root,
-                    includingPropertiesForKeys: [.isDirectoryKey],
-                    options: [.skipsHiddenFiles]
-                ) else {
-                    fallbackIndex = [:]
-                    baseIndex = [:]
-                    fallbackAmbiguous = []
-                    baseAmbiguous = []
-                    return
-                }
-
-                for case let u as URL in en {
-                    let fullPath = u.standardizedFileURL.path
-                    guard fullPath.hasPrefix(rootPath) else { continue }
-                    var rel = String(fullPath.dropFirst(rootPath.count))
-                    if rel.hasPrefix("/") { rel.removeFirst() }
-                    if rel.isEmpty { continue }
-
-                    let relKey = normalizedZipPathKey(rel)
-                    if let _ = relIndex[relKey] {
-                        relAmb.insert(relKey)
-                        relIndex.removeValue(forKey: relKey)
-                    } else {
-                        relIndex[relKey] = u
-                    }
-
-                    let baseKey = normalizedZipPathKey(u.lastPathComponent)
-                    if let _ = baseIdx[baseKey] {
-                        baseAmb.insert(baseKey)
-                        baseIdx.removeValue(forKey: baseKey)
-                    } else {
-                        baseIdx[baseKey] = u
-                    }
-                }
-
-                fallbackIndex = relIndex
-                fallbackAmbiguous = relAmb
-                baseIndex = baseIdx
-                baseAmbiguous = baseAmb
-            }
-
-            func fallbackURL(for rel: String) -> URL? {
-                if fallbackIndex == nil { buildFallbackIndex() }
                 let relKey = normalizedZipPathKey(rel)
-                if !fallbackAmbiguous.contains(relKey), let hit = fallbackIndex?[relKey] {
-                    return hit
+                if let _ = relIndex[relKey] {
+                    relAmb.insert(relKey)
+                    relIndex.removeValue(forKey: relKey)
+                } else {
+                    relIndex[relKey] = u
                 }
-                let baseKey = normalizedZipPathKey((rel as NSString).lastPathComponent)
-                if !baseAmbiguous.contains(baseKey), let hit = baseIndex?[baseKey] {
-                    return hit
+
+                let baseKey = normalizedZipPathKey(u.lastPathComponent)
+                if let _ = baseIdx[baseKey] {
+                    baseAmb.insert(baseKey)
+                    baseIdx.removeValue(forKey: baseKey)
+                } else {
+                    baseIdx[baseKey] = u
+                }
+            }
+
+            fallbackIndex = relIndex
+            fallbackAmbiguous = relAmb
+            baseIndex = baseIdx
+            baseAmbiguous = baseAmb
+        }
+
+        func fallbackURL(for rel: String) -> URL? {
+            if fallbackIndex == nil { buildFallbackIndex() }
+            let relKey = normalizedZipPathKey(rel)
+            if !fallbackAmbiguous.contains(relKey), let hit = fallbackIndex?[relKey] {
+                return hit
+            }
+            let baseKey = normalizedZipPathKey((rel as NSString).lastPathComponent)
+            if !baseAmbiguous.contains(baseKey), let hit = baseIndex?[baseKey] {
+                return hit
+            }
+            return nil
+        }
+
+        func sanitizeDebugPath(_ raw: String) -> String {
+            var p = raw.replacingOccurrences(of: "\\", with: "/")
+            if p.hasPrefix("./") { p.removeFirst(2) }
+            if p.hasPrefix("/") { p.removeFirst() }
+            if p.hasSuffix("/") { p.removeLast() }
+
+            let safeDirs: Set<String> = [
+                "documents", "images", "videos", "audios", "media", "attachments", "_thumbs", "_previews", "previews"
+            ]
+
+            func scrubComponent(_ comp: String) -> String {
+                var out = ""
+                var lastUnderscore = false
+                for scalar in comp.unicodeScalars {
+                    if CharacterSet.letters.contains(scalar) {
+                        if !lastUnderscore {
+                            out.append("_")
+                            lastUnderscore = true
+                        }
+                    } else {
+                        out.append(Character(scalar))
+                        lastUnderscore = false
+                    }
+                }
+                let trimmed = out.trimmingCharacters(in: CharacterSet(charactersIn: "_"))
+                return trimmed.isEmpty ? "_" : trimmed
+            }
+
+            let comps = p.split(separator: "/").map(String.init)
+            var out: [String] = []
+            for (idx, comp) in comps.enumerated() {
+                let lower = comp.lowercased()
+                if idx == 0 && (lower.hasPrefix("whatsapp chat") || lower.hasPrefix("whatsapp-chat")) {
+                    continue
+                }
+                if safeDirs.contains(lower) {
+                    out.append(lower)
+                    continue
+                }
+                out.append(scrubComponent(comp))
+            }
+            return out.joined(separator: "/")
+        }
+
+        func offsetMismatchInfo(candidate: Date, dos: Date) -> (delta: Int, offset: Int, dst: Int)? {
+            let delta = Int((candidate.timeIntervalSince1970 - dos.timeIntervalSince1970).rounded())
+            let offset = TimePolicy.canonicalTimeZone.secondsFromGMT(for: dos)
+            let dst = Int(TimePolicy.canonicalTimeZone.daylightSavingTimeOffset(for: dos).rounded())
+            let diffOffset = abs(abs(delta) - abs(offset))
+            if offset != 0, diffOffset <= 2 {
+                return (delta, offset, dst)
+            }
+            let diffDst = abs(abs(delta) - abs(dst))
+            if dst != 0, diffDst <= 2 {
+                return (delta, offset, dst)
+            }
+            return nil
+        }
+
+        func pickCandidate(_ date: Date?, source: ZipTimestampSource, dos: Date?, rel: String) -> (Date, ZipTimestampSource)? {
+            guard let date else { return nil }
+            if let dos, let mismatch = offsetMismatchInfo(candidate: date, dos: dos) {
+                if debugEnabled {
+                    let relSanitized = sanitizeDebugPath(rel)
+                    print("WET-DBG: ZIP mtime skip path=\(relSanitized) source=\(source.rawValue) delta=\(mismatch.delta)s offset=\(mismatch.offset)s dst=\(mismatch.dst)s")
                 }
                 return nil
             }
+            return (date, source)
+        }
 
-            func adjustedDate(for entry: ZipTimestampEntry, existingMTime: Date?) -> (Date, Bool) {
-                guard entry.source == .dos, let existingMTime else { return (entry.date, false) }
-                let offset = TimePolicy.canonicalTimeZone.secondsFromGMT(for: entry.date)
-                if offset == 0 { return (entry.date, false) }
-                let delta = Int((entry.date.timeIntervalSince1970 - existingMTime.timeIntervalSince1970).rounded())
-                if abs(delta) == abs(offset) {
-                    return (existingMTime, true)
+        for entry in entries {
+            var rel = entry.path.replacingOccurrences(of: "\\", with: "/")
+            if rel.hasPrefix("./") { rel.removeFirst(2) }
+            if rel.hasPrefix("/") { rel.removeFirst() }
+            if rel.hasSuffix("/") { rel.removeLast() }
+            if rel.isEmpty { continue }
+
+            let candidate = URL(fileURLWithPath: rel, relativeTo: root).standardizedFileURL
+            let candidatePath = candidate.path
+            guard candidatePath.hasPrefix(rootPath) else { continue }
+            let target: URL = {
+                if fm.fileExists(atPath: candidatePath) { return candidate }
+                if let fallback = fallbackURL(for: rel) { return fallback.standardizedFileURL }
+                return candidate
+            }()
+            let targetPath = target.path
+            guard targetPath.hasPrefix(rootPath), fm.fileExists(atPath: targetPath) else { continue }
+
+            let dosRef = entry.dosDateLocal ?? entry.dosDateCentral
+            let chosen: (Date, ZipTimestampSource)? =
+                pickCandidate(entry.utLocal, source: .utLocal, dos: dosRef, rel: rel)
+                ?? pickCandidate(entry.utCentral, source: .utCentral, dos: dosRef, rel: rel)
+                ?? pickCandidate(entry.ntfsLocal, source: .ntfsLocal, dos: dosRef, rel: rel)
+                ?? pickCandidate(entry.ntfsCentral, source: .ntfsCentral, dos: dosRef, rel: rel)
+                ?? pickCandidate(dosRef, source: .dos, dos: nil, rel: rel)
+
+            guard let (appliedDate, source) = chosen else { continue }
+            do {
+                try fm.setAttributes([.modificationDate: appliedDate], ofItemAtPath: targetPath)
+            } catch {
+                if debugEnabled {
+                    print("WET-DBG: ZIP mtime apply failed for \(sanitizeDebugPath(rel))")
                 }
-                return (entry.date, false)
+                throw ZipTimestampError.timestampApplyFailed
             }
 
-            for entry in entries {
-                var rel = entry.path.replacingOccurrences(of: "\\", with: "/")
-                if rel.hasPrefix("./") { rel.removeFirst(2) }
-                if rel.hasPrefix("/") { rel.removeFirst() }
-                if rel.hasSuffix("/") { rel.removeLast() }
-                if rel.isEmpty { continue }
-
-                let candidate = URL(fileURLWithPath: rel, relativeTo: root).standardizedFileURL
-                let candidatePath = candidate.path
-                guard candidatePath.hasPrefix(rootPath) else { continue }
-                let target: URL = {
-                    if fm.fileExists(atPath: candidatePath) { return candidate }
-                    if let fallback = fallbackURL(for: rel) { return fallback.standardizedFileURL }
-                    return candidate
-                }()
-                let targetPath = target.path
-                guard targetPath.hasPrefix(rootPath), fm.fileExists(atPath: targetPath) else { continue }
-
-                let existingMTime = (try? fm.attributesOfItem(atPath: targetPath))?[.modificationDate] as? Date
-                let (appliedDate, didAdjust) = adjustedDate(for: entry, existingMTime: existingMTime)
-                do {
-                    try fm.setAttributes([.creationDate: appliedDate, .modificationDate: appliedDate], ofItemAtPath: targetPath)
-                } catch {
-                    try? fm.setAttributes([.modificationDate: appliedDate], ofItemAtPath: targetPath)
-                }
-                if debugEnabled, targetPath.lowercased().hasSuffix(".pdf") {
-                    let epoch = Int(appliedDate.timeIntervalSince1970.rounded())
-                    let source = didAdjust ? "\(entry.source.rawValue)+adj" : entry.source.rawValue
-                    print("WET-DBG: ZIP PDF mtime epoch=\(epoch) source=\(source) path=\(targetPath)")
-                }
-            }
-        } catch {
             if debugEnabled {
-                print("WET-DBG: ZIP timestamp normalization skipped: \(error)")
+                let isPDF = rel.lowercased().hasSuffix(".pdf")
+                if isPDF {
+                    let epoch = Int(appliedDate.timeIntervalSince1970.rounded())
+                    print("WET-DBG: ZIP mtime set path=\(sanitizeDebugPath(rel)) source=\(source.rawValue) epoch=\(epoch)")
+                }
+                if let actual = (try? fm.attributesOfItem(atPath: targetPath))?[.modificationDate] as? Date {
+                    let delta = abs(actual.timeIntervalSince1970 - appliedDate.timeIntervalSince1970)
+                    if delta > 2.0 {
+                        let intendedEpoch = Int(appliedDate.timeIntervalSince1970.rounded())
+                        let actualEpoch = Int(actual.timeIntervalSince1970.rounded())
+                        print("WET-DBG: ZIP mtime verify path=\(sanitizeDebugPath(rel)) source=\(source.rawValue) intended=\(intendedEpoch) actual=\(actualEpoch)")
+                    }
+                } else {
+                    let intendedEpoch = Int(appliedDate.timeIntervalSince1970.rounded())
+                    print("WET-DBG: ZIP mtime verify path=\(sanitizeDebugPath(rel)) source=\(source.rawValue) intended=\(intendedEpoch) actual=-1")
+                }
             }
         }
     }
@@ -3470,15 +3560,57 @@ public enum WhatsAppExportService {
             return out
         }
 
-        let totalEntries = readU16(tail, eocdIndex + 10)
-        let cdSize = readU32(tail, eocdIndex + 12)
-        let cdOffset = readU32(tail, eocdIndex + 16)
+        let totalEntries16 = readU16(tail, eocdIndex + 10)
+        let cdSize32 = readU32(tail, eocdIndex + 12)
+        let cdOffset32 = readU32(tail, eocdIndex + 16)
 
-        if totalEntries == 0xFFFF || cdSize == 0xFFFFFFFF || cdOffset == 0xFFFFFFFF {
+        func findZip64LocatorIndex(in data: Data) -> Int? {
+            if data.count < 20 { return nil }
+            let sig: [UInt8] = [0x50, 0x4b, 0x06, 0x07]
+            for i in stride(from: data.count - 20, through: 0, by: -1) {
+                if data[i] == sig[0],
+                   data[i + 1] == sig[1],
+                   data[i + 2] == sig[2],
+                   data[i + 3] == sig[3] {
+                    return i
+                }
+            }
+            return nil
+        }
+
+        func readZip64EOCD(offset: UInt64) throws -> (totalEntries: UInt64, cdSize: UInt64, cdOffset: UInt64)? {
+            if offset + 56 > fileSize { return nil }
+            try handle.seek(toOffset: offset)
+            let data = try handle.read(upToCount: 56) ?? Data()
+            guard data.count >= 56, readU32(data, 0) == 0x06064b50 else { return nil }
+            let totalEntries = readU64(data, 32)
+            let cdSize = readU64(data, 40)
+            let cdOffset = readU64(data, 48)
+            return (totalEntries, cdSize, cdOffset)
+        }
+
+        var totalEntries = UInt64(totalEntries16)
+        var cdSize = UInt64(cdSize32)
+        var cdOffset = UInt64(cdOffset32)
+
+        if totalEntries16 == 0xFFFF || cdSize32 == 0xFFFFFFFF || cdOffset32 == 0xFFFFFFFF {
+            guard let locatorIndex = findZip64LocatorIndex(in: tail) else {
+                throw ZipTimestampError.zip64Unsupported
+            }
+            let locatorOffset = readU64(tail, locatorIndex + 8)
+            guard let zip64 = try readZip64EOCD(offset: locatorOffset) else {
+                throw ZipTimestampError.zip64Unsupported
+            }
+            totalEntries = zip64.totalEntries
+            cdSize = zip64.cdSize
+            cdOffset = zip64.cdOffset
+        }
+
+        if cdSize > UInt64(Int.max) {
             throw ZipTimestampError.zip64Unsupported
         }
 
-        try handle.seek(toOffset: UInt64(cdOffset))
+        try handle.seek(toOffset: cdOffset)
         let cdData = try handle.read(upToCount: Int(cdSize)) ?? Data()
 
         func parseExtendedTimestamp(_ data: Data) -> Date? {
@@ -3510,11 +3642,13 @@ public enum WhatsAppExportService {
             return nil
         }
 
-        func parseExtraTimestamp(
-            _ data: Data,
-            utSource: ZipTimestampSource,
-            ntfsSource: ZipTimestampSource
-        ) -> (Date, ZipTimestampSource)? {
+        struct ExtraTimestampResult {
+            var ut: Date? = nil
+            var ntfs: Date? = nil
+        }
+
+        func parseExtraTimestamps(_ data: Data) -> ExtraTimestampResult {
+            var result = ExtraTimestampResult()
             var idx = 0
             while idx + 4 <= data.count {
                 let headerID = readU16(data, idx)
@@ -3522,39 +3656,90 @@ public enum WhatsAppExportService {
                 idx += 4
                 if idx + dataSize > data.count { break }
                 let field = data.subdata(in: idx..<(idx + dataSize))
-                if headerID == 0x5455, let date = parseExtendedTimestamp(field) {
-                    return (date, utSource)
+                if headerID == 0x5455, result.ut == nil, let date = parseExtendedTimestamp(field) {
+                    result.ut = date
+                } else if headerID == 0x000a, result.ntfs == nil, let date = parseNTFSTimestamp(field) {
+                    result.ntfs = date
                 }
-                if headerID == 0x000a, let date = parseNTFSTimestamp(field) {
-                    return (date, ntfsSource)
+                idx += dataSize
+            }
+            return result
+        }
+
+        func zip64LocalHeaderOffset(
+            from extra: Data,
+            needsUncompressed: Bool,
+            needsCompressed: Bool,
+            needsLocalOffset: Bool,
+            needsDiskStart: Bool
+        ) -> UInt64? {
+            var idx = 0
+            while idx + 4 <= extra.count {
+                let headerID = readU16(extra, idx)
+                let dataSize = Int(readU16(extra, idx + 2))
+                idx += 4
+                if idx + dataSize > extra.count { break }
+                if headerID == 0x0001 {
+                    let field = extra.subdata(in: idx..<(idx + dataSize))
+                    var cursor = 0
+                    if needsUncompressed {
+                        guard cursor + 8 <= field.count else { return nil }
+                        cursor += 8
+                    }
+                    if needsCompressed {
+                        guard cursor + 8 <= field.count else { return nil }
+                        cursor += 8
+                    }
+                    if needsLocalOffset {
+                        guard cursor + 8 <= field.count else { return nil }
+                        return readU64(field, cursor)
+                    }
+                    if needsDiskStart {
+                        guard cursor + 4 <= field.count else { return nil }
+                    }
                 }
                 idx += dataSize
             }
             return nil
         }
 
-        func readLocalExtraField(offset: UInt32) -> Data? {
-            if offset == 0xFFFFFFFF { return nil }
-            let start = UInt64(offset)
+        struct LocalHeaderInfo {
+            let modDate: UInt16
+            let modTime: UInt16
+            let extra: Data?
+        }
+
+        func readLocalHeader(offset: UInt64?) -> LocalHeaderInfo? {
+            guard let offset else { return nil }
+            let start = offset
             if start + 30 > fileSize { return nil }
             do {
                 try handle.seek(toOffset: start)
                 let header = try handle.read(upToCount: 30) ?? Data()
                 guard header.count >= 30, readU32(header, 0) == 0x04034b50 else { return nil }
+                let modTime = readU16(header, 10)
+                let modDate = readU16(header, 12)
                 let nameLen = Int(readU16(header, 26))
                 let extraLen = Int(readU16(header, 28))
                 if nameLen > 0 {
                     _ = try handle.read(upToCount: nameLen)
                 }
-                guard extraLen > 0 else { return nil }
-                return try handle.read(upToCount: extraLen) ?? Data()
+                let extra: Data?
+                if extraLen > 0 {
+                    extra = try handle.read(upToCount: extraLen) ?? Data()
+                } else {
+                    extra = nil
+                }
+                return LocalHeaderInfo(modDate: modDate, modTime: modTime, extra: extra)
             } catch {
                 return nil
             }
         }
 
         var entries: [ZipTimestampEntry] = []
-        entries.reserveCapacity(Int(totalEntries))
+        if totalEntries <= UInt64(Int.max) {
+            entries.reserveCapacity(Int(totalEntries))
+        }
 
         var offset = 0
         while offset + 46 <= cdData.count {
@@ -3563,10 +3748,13 @@ public enum WhatsAppExportService {
             let flags = readU16(cdData, offset + 8)
             let modTime = readU16(cdData, offset + 12)
             let modDate = readU16(cdData, offset + 14)
+            let compSize32 = readU32(cdData, offset + 20)
+            let uncompSize32 = readU32(cdData, offset + 24)
             let nameLen = Int(readU16(cdData, offset + 28))
             let extraLen = Int(readU16(cdData, offset + 30))
             let commentLen = Int(readU16(cdData, offset + 32))
-            let localHeaderOffset = readU32(cdData, offset + 42)
+            let diskStart32 = readU16(cdData, offset + 34)
+            let localHeaderOffset32 = readU32(cdData, offset + 42)
 
             let nameStart = offset + 46
             let nameEnd = nameStart + nameLen
@@ -3594,19 +3782,58 @@ public enum WhatsAppExportService {
 
             let extraStart = nameEnd
             let extraEnd = extraStart + extraLen
-            var chosen: (Date, ZipTimestampSource)? = nil
+            var centralExtra = ExtraTimestampResult()
+            var localHeaderOffset: UInt64? = UInt64(localHeaderOffset32)
+            if localHeaderOffset32 == 0xFFFFFFFF {
+                localHeaderOffset = nil
+            }
             if extraLen > 0, extraEnd <= cdData.count {
                 let extraData = cdData.subdata(in: extraStart..<extraEnd)
-                chosen = parseExtraTimestamp(extraData, utSource: .utCentral, ntfsSource: .ntfsCentral)
+                centralExtra = parseExtraTimestamps(extraData)
+                if localHeaderOffset == nil {
+                    let needUnc = uncompSize32 == 0xFFFFFFFF
+                    let needComp = compSize32 == 0xFFFFFFFF
+                    let needLocal = true
+                    let needDisk = diskStart32 == 0xFFFF
+                    localHeaderOffset = zip64LocalHeaderOffset(
+                        from: extraData,
+                        needsUncompressed: needUnc,
+                        needsCompressed: needComp,
+                        needsLocalOffset: needLocal,
+                        needsDiskStart: needDisk
+                    )
+                }
             }
-            if chosen == nil, let localExtra = readLocalExtraField(offset: localHeaderOffset) {
-                chosen = parseExtraTimestamp(localExtra, utSource: .utLocal, ntfsSource: .ntfsLocal)
+            var localExtra = ExtraTimestampResult()
+            var localDosDate: Date? = nil
+            if let localHeader = readLocalHeader(offset: localHeaderOffset) {
+                if let extra = localHeader.extra {
+                    localExtra = parseExtraTimestamps(extra)
+                }
+                localDosDate = TimePolicy.dateFromMSDOSTimestamp(
+                    date: localHeader.modDate,
+                    time: localHeader.modTime,
+                    timeZone: canonicalTimeZone
+                )
             }
-            if let chosen {
-                entries.append(ZipTimestampEntry(path: name, date: chosen.0, source: chosen.1))
-            } else if let date = TimePolicy.dateFromMSDOSTimestamp(date: modDate, time: modTime) {
-                entries.append(ZipTimestampEntry(path: name, date: date, source: .dos))
-            }
+
+            let dosCentral = TimePolicy.dateFromMSDOSTimestamp(
+                date: modDate,
+                time: modTime,
+                timeZone: canonicalTimeZone
+            )
+
+            entries.append(
+                ZipTimestampEntry(
+                    path: name,
+                    utLocal: localExtra.ut,
+                    utCentral: centralExtra.ut,
+                    ntfsLocal: localExtra.ntfs,
+                    ntfsCentral: centralExtra.ntfs,
+                    dosDateLocal: localDosDate,
+                    dosDateCentral: dosCentral
+                )
+            )
 
             offset = nameEnd + extraLen + commentLen
         }
@@ -3630,7 +3857,11 @@ public enum WhatsAppExportService {
             throw WAInputError.zipExtractionFailed(url: zipURL, reason: msg.trimmingCharacters(in: .whitespacesAndNewlines))
         }
 
-        normalizeZipEntryTimestamps(zipURL: zipURL, destDir: destDir)
+        do {
+            try normalizeZipEntryTimestamps(zipURL: zipURL, destDir: destDir)
+        } catch {
+            throw WAInputError.zipExtractionFailed(url: zipURL, reason: "ZIP timestamp normalization failed")
+        }
     }
 
     nonisolated private static func resolveTranscript(in dir: URL) throws -> (chatURL: URL, exportDir: URL) {
