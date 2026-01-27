@@ -1676,6 +1676,7 @@ struct ContentView: View {
         lines.append("- Time: \(Self.formatSeconds(snapshot.attachmentIndexBuildTime))")
         lines.append("")
         lines.append("## Thumbnails")
+        lines.append("- Store: requested=\(snapshot.thumbStoreRequested) reused=\(snapshot.thumbStoreReused) generated=\(snapshot.thumbStoreGenerated) time=\(Self.formatSeconds(snapshot.thumbStoreTime))")
         lines.append("- JPEG: hits=\(snapshot.thumbJPEGCacheHits) misses=\(snapshot.thumbJPEGMisses) time=\(Self.formatSeconds(snapshot.thumbJPEGTime))")
         lines.append("- PNG: hits=\(snapshot.thumbPNGCacheHits) misses=\(snapshot.thumbPNGMisses) time=\(Self.formatSeconds(snapshot.thumbPNGTime))")
         lines.append("- Inline (Compact): hits=\(snapshot.inlineThumbCacheHits) misses=\(snapshot.inlineThumbMisses) time=\(Self.formatSeconds(snapshot.inlineThumbTime))")
@@ -2581,17 +2582,33 @@ struct ContentView: View {
             WhatsAppExportService.prewarmAttachmentIndex(for: prepared.chatURL.deletingLastPathComponent())
         }
 
+        let wantsThumbStore = plan.wantsAnyThumbs
+        var attachmentEntries: [WhatsAppExportService.AttachmentCanonicalEntry] = []
+        if wantsThumbStore, WhatsAppExportService.hasAnyAttachmentMarkers(messages: prepared.messages) {
+            attachmentEntries = WhatsAppExportService.buildAttachmentCanonicalEntries(
+                messages: prepared.messages,
+                chatSourceDir: prepared.chatURL.deletingLastPathComponent()
+            )
+        }
+
         let stagingDir = try WhatsAppExportService.createStagingDirectory(in: stagingBase)
         if debugEnabled {
             debugLog("STAGING ROOT CREATED: \(stagingDir.path)")
         }
         var didRemoveStaging = false
+        var tempThumbsRoot: URL? = nil
         defer {
             if !didRemoveStaging {
                 if debugEnabled {
                     debugLog("REMOVE: \(stagingDir.path)")
                 }
                 try? fm.removeItem(at: stagingDir)
+            }
+            if let tempThumbsRoot, fm.fileExists(atPath: tempThumbsRoot.path) {
+                if debugEnabled {
+                    debugLog("REMOVE: \(tempThumbsRoot.path)")
+                }
+                try? fm.removeItem(at: tempThumbsRoot)
             }
             if debugEnabled {
                 debugLog("STAGING CLEANUP: \(stagingDir.path)")
@@ -2922,6 +2939,8 @@ struct ContentView: View {
             steps.append(.markdown)
         }
 
+        var thumbnailStore: WhatsAppExportService.ThumbnailStore? = nil
+
         var movedOutputs: [URL] = []
         var htmlByVariant: [HTMLVariant: URL] = [:]
         var finalMD: URL? = nil
@@ -2933,6 +2952,34 @@ struct ContentView: View {
         var stagedSidecarBaseDir: URL? = nil
         var expectedSidecarAttachments = 0
         var didPublishExternalAssets = false
+
+        if wantsThumbStore, !context.wantsSidecar, !attachmentEntries.isEmpty {
+            let tempRoot = WhatsAppExportService.temporaryThumbsWorkspace(
+                baseName: baseName,
+                chatURL: prepared.chatURL,
+                stagingBase: stagingBase
+            )
+            tempThumbsRoot = tempRoot
+            if fm.fileExists(atPath: tempRoot.path) {
+                try? fm.removeItem(at: tempRoot)
+            }
+            try fm.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+            let tempThumbsDir = tempRoot.appendingPathComponent("_thumbs", isDirectory: true)
+            let writeStore = WhatsAppExportService.ThumbnailStore(
+                entries: attachmentEntries,
+                thumbsDir: tempThumbsDir,
+                allowWrite: true
+            )
+            await writeStore.precomputeAll()
+            thumbnailStore = WhatsAppExportService.ThumbnailStore(
+                entries: attachmentEntries,
+                thumbsDir: tempThumbsDir,
+                allowWrite: false
+            )
+            if debugEnabled {
+                debugLog("THUMBS TEMP: \(tempThumbsDir.path)")
+            }
+        }
 
         do {
             for step in steps {
@@ -2956,7 +3003,8 @@ struct ContentView: View {
                             allowStagingOverwrite: true,
                             detectedPartnerRaw: context.detectedPartnerRaw,
                             overridePartnerRaw: context.overridePartnerRaw,
-                            originalZipURL: context.provenance.originalZipURL
+                            originalZipURL: context.provenance.originalZipURL,
+                            attachmentEntries: attachmentEntries
                         )
                     }
                     if debugEnabled {
@@ -3106,6 +3154,17 @@ struct ContentView: View {
                     if expectedSidecarAttachments > 0 {
                         finalizeSidecarTimestamps(sidecarBaseDir: finalSidecarDir, logMismatches: false)
                         finalSidecarBaseDir = finalSidecarDir
+                        if wantsThumbStore, !attachmentEntries.isEmpty {
+                            let thumbsDir = finalSidecarDir.appendingPathComponent("_thumbs", isDirectory: true)
+                            thumbnailStore = WhatsAppExportService.ThumbnailStore(
+                                entries: attachmentEntries,
+                                thumbsDir: thumbsDir,
+                                allowWrite: false
+                            )
+                            if debugEnabled {
+                                debugLog("THUMBS SIDECR: \(thumbsDir.path)")
+                            }
+                        }
                         finalSidecarOriginalDir = finalSidecarDir.appendingPathComponent(
                             sidecarOriginalFolderName,
                             isDirectory: true
@@ -3121,6 +3180,7 @@ struct ContentView: View {
                             enablePreviews: variant.enablePreviews,
                             embedAttachments: variant.embedAttachments,
                             embedAttachmentThumbnailsOnly: variant.thumbnailsOnly,
+                            thumbnailStore: thumbnailStore,
                             perfLabel: artifactLabel(.html(variant))
                         )
                     }

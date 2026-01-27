@@ -782,6 +782,11 @@ public enum WhatsAppExportService {
         var inlineThumbMisses = 0
         var inlineThumbTime: TimeInterval = 0
 
+        var thumbStoreRequested = 0
+        var thumbStoreReused = 0
+        var thumbStoreGenerated = 0
+        var thumbStoreTime: TimeInterval = 0
+
         var htmlRenderTimeByLabel: [String: TimeInterval] = [:]
         var htmlWriteTimeByLabel: [String: TimeInterval] = [:]
         var htmlWriteBytesByLabel: [String: Int] = [:]
@@ -806,6 +811,11 @@ public enum WhatsAppExportService {
         let inlineThumbCacheHits: Int
         let inlineThumbMisses: Int
         let inlineThumbTime: TimeInterval
+
+        let thumbStoreRequested: Int
+        let thumbStoreReused: Int
+        let thumbStoreGenerated: Int
+        let thumbStoreTime: TimeInterval
 
         let htmlRenderTimeByLabel: [String: TimeInterval]
         let htmlWriteTimeByLabel: [String: TimeInterval]
@@ -851,6 +861,10 @@ public enum WhatsAppExportService {
             inlineThumbCacheHits: store.inlineThumbCacheHits,
             inlineThumbMisses: store.inlineThumbMisses,
             inlineThumbTime: store.inlineThumbTime,
+            thumbStoreRequested: store.thumbStoreRequested,
+            thumbStoreReused: store.thumbStoreReused,
+            thumbStoreGenerated: store.thumbStoreGenerated,
+            thumbStoreTime: store.thumbStoreTime,
             htmlRenderTimeByLabel: store.htmlRenderTimeByLabel,
             htmlWriteTimeByLabel: store.htmlWriteTimeByLabel,
             htmlWriteBytesByLabel: store.htmlWriteBytesByLabel,
@@ -900,6 +914,25 @@ public enum WhatsAppExportService {
         }
     }
 
+    nonisolated private static func recordThumbStoreRequested() {
+        perfRecord { store in
+            store.thumbStoreRequested += 1
+        }
+    }
+
+    nonisolated private static func recordThumbStoreReused() {
+        perfRecord { store in
+            store.thumbStoreReused += 1
+        }
+    }
+
+    nonisolated private static func recordThumbStoreGenerated(duration: TimeInterval) {
+        perfRecord { store in
+            store.thumbStoreGenerated += 1
+            store.thumbStoreTime += duration
+        }
+    }
+
     nonisolated private static func recordHTMLRender(label: String, duration: TimeInterval) {
         perfRecord { store in
             store.htmlRenderTimeByLabel[label, default: 0] += duration
@@ -922,6 +955,199 @@ public enum WhatsAppExportService {
     nonisolated static func recordArtifactDuration(label: String, duration: TimeInterval) {
         perfRecord { store in
             store.artifactDurationByLabel[label, default: 0] += duration
+        }
+    }
+
+    // ---------------------------
+    // Shared ThumbnailStore (D2)
+    // ---------------------------
+
+    final actor ThumbnailStore {
+        private struct ThumbResult {
+            let fileURL: URL?
+            let generated: Bool
+            let duration: TimeInterval
+        }
+
+        private let entries: [AttachmentCanonicalEntry]
+        private let entriesByName: [String: AttachmentCanonicalEntry]
+        private let thumbsDir: URL
+        private let allowWrite: Bool
+        private let limiter: AsyncLimiter
+
+        private var inFlight: [String: Task<ThumbResult?, Never>] = [:]
+        private var dataCache: [String: Data] = [:]
+        private var dataURLCache: [String: String] = [:]
+        private var hrefCache: [String: String] = [:]
+
+        init(entries: [AttachmentCanonicalEntry], thumbsDir: URL, allowWrite: Bool) {
+            self.entries = entries
+            var map: [String: AttachmentCanonicalEntry] = [:]
+            for entry in entries where map[entry.fileName] == nil {
+                map[entry.fileName] = entry
+            }
+            self.entriesByName = map
+            self.thumbsDir = thumbsDir.standardizedFileURL
+            self.allowWrite = allowWrite
+            let cap = max(1, min(wetConcurrencyCaps.io, 4))
+            self.limiter = AsyncLimiter(cap)
+        }
+
+        func precomputeAll() async {
+            let targets = entries.filter { Self.isThumbnailCandidateExtension($0.sourceURL.pathExtension) }
+            guard !targets.isEmpty else { return }
+            if ProcessInfo.processInfo.environment["WET_PERF"] == "1" {
+                let cap = max(1, min(wetConcurrencyCaps.io, 4))
+                print("WET-PERF: thumbs cap=\(cap) jobs=\(targets.count)")
+            }
+            await withTaskGroup(of: Void.self) { group in
+                for entry in targets {
+                    group.addTask {
+                        _ = await self.ensureThumbnailFile(for: entry)
+                    }
+                }
+            }
+        }
+
+        func thumbnailDataURL(fileName: String, allowOriginalFallback: Bool = false) async -> String? {
+            guard let entry = entriesByName[fileName] else { return nil }
+            let key = entry.canonicalRelPath
+            if let cached = dataURLCache[key] {
+                return cached
+            }
+
+            if let data = await thumbnailData(for: entry) {
+                let dataURL = "data:image/jpeg;base64,\(data.base64EncodedString())"
+                dataURLCache[key] = dataURL
+                return dataURL
+            }
+
+            if allowOriginalFallback, Self.isImageExtension(entry.sourceURL.pathExtension) {
+                if let dataURL = WhatsAppExportService.fileToDataURL(entry.sourceURL) {
+                    dataURLCache[key] = dataURL
+                    return dataURL
+                }
+            }
+
+            return nil
+        }
+
+        func thumbnailHref(fileName: String, relativeTo baseDir: URL?) async -> String? {
+            guard let entry = entriesByName[fileName] else { return nil }
+            let key = entry.canonicalRelPath + "||" + (baseDir?.standardizedFileURL.path ?? "")
+            if let cached = hrefCache[key] { return cached }
+            guard let fileURL = await ensureThumbnailFile(for: entry) else { return nil }
+            let href = WhatsAppExportService.relativeHref(for: fileURL, relativeTo: baseDir)
+            hrefCache[key] = href
+            return href
+        }
+
+        private func thumbnailData(for entry: AttachmentCanonicalEntry) async -> Data? {
+            let key = entry.canonicalRelPath
+            if let cached = dataCache[key] {
+                return cached
+            }
+            guard let fileURL = await ensureThumbnailFile(for: entry) else { return nil }
+            guard let data = try? Data(contentsOf: fileURL) else { return nil }
+            dataCache[key] = data
+            return data
+        }
+
+        private func ensureThumbnailFile(for entry: AttachmentCanonicalEntry) async -> URL? {
+            WhatsAppExportService.recordThumbStoreRequested()
+            guard Self.isThumbnailCandidateExtension(entry.sourceURL.pathExtension) else { return nil }
+            let key = entry.canonicalRelPath
+            let dest = thumbFileURL(for: key)
+
+            if Self.isValidThumbFile(dest) {
+                WhatsAppExportService.recordThumbStoreReused()
+                return dest
+            }
+
+            guard allowWrite else { return nil }
+
+            if let existing = inFlight[key] {
+                return (await existing.value)?.fileURL
+            }
+
+            let src = entry.sourceURL
+            let destURL = dest
+            let allowWrite = self.allowWrite
+            let limiter = self.limiter
+
+            let task = Task { () -> ThumbResult? in
+                guard allowWrite else { return nil }
+                return await limiter.withPermit {
+                    if Self.isValidThumbFile(destURL) {
+                        return ThumbResult(fileURL: destURL, generated: false, duration: 0)
+                    }
+                    let start = ProcessInfo.processInfo.systemUptime
+                    guard let jpg = await WhatsAppExportService.thumbnailJPEGData(
+                        for: src,
+                        maxPixel: thumbMaxPixel,
+                        quality: thumbJPEGQuality
+                    ) else {
+                        return nil
+                    }
+                    do {
+                        try WhatsAppExportService.ensureDirectory(destURL.deletingLastPathComponent())
+                        try WhatsAppExportService.writeExclusiveData(jpg, to: destURL)
+                    } catch {
+                        // Best-effort write; fallback to reuse if file exists.
+                    }
+                    let elapsed = ProcessInfo.processInfo.systemUptime - start
+                    if Self.isValidThumbFile(destURL) {
+                        return ThumbResult(fileURL: destURL, generated: true, duration: elapsed)
+                    }
+                    return nil
+                }
+            }
+
+            inFlight[key] = task
+            let result = await task.value
+            inFlight[key] = nil
+
+            if let result, let fileURL = result.fileURL {
+                if result.generated {
+                    WhatsAppExportService.recordThumbStoreGenerated(duration: result.duration)
+                } else {
+                    WhatsAppExportService.recordThumbStoreReused()
+                }
+                return fileURL
+            }
+
+            return nil
+        }
+
+        private nonisolated static func isValidThumbFile(_ url: URL) -> Bool {
+            let rv = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+            guard rv?.isRegularFile == true else { return false }
+            return (rv?.fileSize ?? 0) > 0
+        }
+
+        private func thumbFileURL(for canonicalRelPath: String) -> URL {
+            let fileName = Self.thumbnailStoreFilename(for: canonicalRelPath)
+            return thumbsDir.appendingPathComponent(fileName)
+        }
+
+        private static func thumbnailStoreFilename(for canonicalRelPath: String) -> String {
+            let q = Int((thumbJPEGQuality * 1000).rounded())
+            let key = "\(canonicalRelPath)|v\(thumbVersion)|px=\(Int(thumbMaxPixel))|q=\(q)"
+            let hash = stableHashHex(key)
+            return "thumb_\(hash).jpg"
+        }
+
+        private static func isThumbnailCandidateExtension(_ ext: String) -> Bool {
+            let e = ext.lowercased()
+            if ["jpg","jpeg","png","gif","webp","heic","heif","tif","tiff","bmp"].contains(e) { return true }
+            if ["mp4","mov","m4v"].contains(e) { return true }
+            if e == "pdf" { return true }
+            return false
+        }
+
+        private static func isImageExtension(_ ext: String) -> Bool {
+            let e = ext.lowercased()
+            return ["jpg","jpeg","png","gif","webp","heic","heif","tif","tiff","bmp"].contains(e)
         }
     }
 
@@ -1624,6 +1850,15 @@ public enum WhatsAppExportService {
             meName: meName
         )
 
+        let wantsThumbs = exportSortedAttachments || embedAttachments || embedAttachmentThumbnailsOnly
+        var attachmentEntries: [AttachmentCanonicalEntry] = []
+        if wantsThumbs && hasAnyAttachmentMarkers(messages: msgs) {
+            attachmentEntries = buildAttachmentCanonicalEntries(
+                messages: msgs,
+                chatSourceDir: chatPath.deletingLastPathComponent()
+            )
+        }
+
         // D1 Attachment index (run-wide, at most once) if attachments are referenced.
         if hasAnyAttachmentMarkers(messages: msgs) {
             prewarmAttachmentIndex(for: chatPath.deletingLastPathComponent())
@@ -1661,7 +1896,11 @@ public enum WhatsAppExportService {
         let stagingBase = try localStagingBaseDirectory()
         let stagingDir = try createStagingDirectory(in: stagingBase)
         var didRemoveStaging = false
+        var tempThumbsRoot: URL? = nil
         defer {
+            if let tempThumbsRoot, fm.fileExists(atPath: tempThumbsRoot.path) {
+                try? fm.removeItem(at: tempThumbsRoot)
+            }
             if !didRemoveStaging {
                 try? fm.removeItem(at: stagingDir)
             }
@@ -1671,6 +1910,20 @@ public enum WhatsAppExportService {
         let stagedMD = stagingDir.appendingPathComponent("\(base).md")
         let stagedSidecarHTML = stagingDir.appendingPathComponent("\(base)-sdc.html")
         let stagedSidecarDir = stagingDir.appendingPathComponent(base, isDirectory: true)
+
+        var thumbnailStore: ThumbnailStore? = nil
+        if wantsThumbs, !exportSortedAttachments, !attachmentEntries.isEmpty {
+            let tempRoot = temporaryThumbsWorkspace(baseName: base, chatURL: chatPath, stagingBase: stagingBase)
+            tempThumbsRoot = tempRoot
+            if fm.fileExists(atPath: tempRoot.path) {
+                try? fm.removeItem(at: tempRoot)
+            }
+            try fm.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+            let tempThumbsDir = tempRoot.appendingPathComponent("_thumbs", isDirectory: true)
+            let writeStore = ThumbnailStore(entries: attachmentEntries, thumbsDir: tempThumbsDir, allowWrite: true)
+            await writeStore.precomputeAll()
+            thumbnailStore = ThumbnailStore(entries: attachmentEntries, thumbsDir: tempThumbsDir, allowWrite: false)
+        }
 
         var sidecarOriginalDir: URL? = nil
         var sidecarBaseDir: URL? = nil
@@ -1682,36 +1935,12 @@ public enum WhatsAppExportService {
                 folderName: base,
                 detectedPartnerRaw: "",
                 overridePartnerRaw: nil,
-                originalZipURL: nil
+                originalZipURL: nil,
+                attachmentEntries: attachmentEntries
             )
             sidecarOriginalDir = originalDir
             sidecarBaseDir = originalDir.deletingLastPathComponent()
         }
-
-        try await renderHTML(
-            msgs: msgs,
-            chatURL: chatPath,
-            outHTML: stagedHTML,
-            meName: meName,
-            enablePreviews: enablePreviews,
-            embedAttachments: embedAttachments,
-            embedAttachmentThumbnailsOnly: embedAttachmentThumbnailsOnly,
-            perfLabel: "HTML"
-        )
-
-        let mdChatURL = sidecarOriginalDir?.appendingPathComponent(chatPath.lastPathComponent) ?? chatPath
-        let mdAttachmentRelBaseDir: URL? = sidecarOriginalDir != nil ? stagingDir : nil
-
-        try renderMD(
-            msgs: msgs,
-            chatURL: mdChatURL,
-            outMD: stagedMD,
-            meName: meName,
-            enablePreviews: enablePreviews,
-            embedAttachments: embedAttachments,
-            embedAttachmentThumbnailsOnly: embedAttachmentThumbnailsOnly,
-            attachmentRelBaseDir: mdAttachmentRelBaseDir
-        )
 
         var didSidecar = false
         if exportSortedAttachments {
@@ -1719,6 +1948,15 @@ public enum WhatsAppExportService {
                 throw NSError(domain: "WETExport", code: 1, userInfo: [
                     NSLocalizedDescriptionKey: "Sidecar directory missing"
                 ])
+            }
+
+            var sidecarThumbStore: ThumbnailStore? = nil
+            if wantsThumbs, !attachmentEntries.isEmpty {
+                let thumbsDir = sidecarBaseDir.appendingPathComponent("_thumbs", isDirectory: true)
+                let store = ThumbnailStore(entries: attachmentEntries, thumbsDir: thumbsDir, allowWrite: true)
+                await store.precomputeAll()
+                sidecarThumbStore = store
+                thumbnailStore = ThumbnailStore(entries: attachmentEntries, thumbsDir: thumbsDir, allowWrite: false)
             }
 
             // Sidecar HTML: renders like -max but references media in the sidecar folder via relative links.
@@ -1739,6 +1977,7 @@ public enum WhatsAppExportService {
                 externalAttachments: true,
                 externalPreviews: true,
                 externalAssetsDir: sidecarBaseDir,
+                thumbnailStore: sidecarThumbStore,
                 perfLabel: "Sidecar"
             )
 
@@ -1766,6 +2005,32 @@ public enum WhatsAppExportService {
             }
             didSidecar = true
         }
+
+        try await renderHTML(
+            msgs: msgs,
+            chatURL: chatPath,
+            outHTML: stagedHTML,
+            meName: meName,
+            enablePreviews: enablePreviews,
+            embedAttachments: embedAttachments,
+            embedAttachmentThumbnailsOnly: embedAttachmentThumbnailsOnly,
+            thumbnailStore: thumbnailStore,
+            perfLabel: "HTML"
+        )
+
+        let mdChatURL = sidecarOriginalDir?.appendingPathComponent(chatPath.lastPathComponent) ?? chatPath
+        let mdAttachmentRelBaseDir: URL? = sidecarOriginalDir != nil ? stagingDir : nil
+
+        try renderMD(
+            msgs: msgs,
+            chatURL: mdChatURL,
+            outMD: stagedMD,
+            meName: meName,
+            enablePreviews: enablePreviews,
+            embedAttachments: embedAttachments,
+            embedAttachmentThumbnailsOnly: embedAttachmentThumbnailsOnly,
+            attachmentRelBaseDir: mdAttachmentRelBaseDir
+        )
 
         func publishMove(_ src: URL, _ dst: URL) throws {
             try fm.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -1907,6 +2172,7 @@ public enum WhatsAppExportService {
         enablePreviews: Bool,
         embedAttachments: Bool,
         embedAttachmentThumbnailsOnly: Bool,
+        thumbnailStore: ThumbnailStore? = nil,
         perfLabel: String? = nil
     ) async throws -> URL {
         resetStagedAttachmentCache()
@@ -1922,6 +2188,7 @@ public enum WhatsAppExportService {
             enablePreviews: enablePreviews,
             embedAttachments: embedAttachments,
             embedAttachmentThumbnailsOnly: embedAttachmentThumbnailsOnly,
+            thumbnailStore: thumbnailStore,
             perfLabel: perfLabel
         )
 
@@ -1960,7 +2227,8 @@ public enum WhatsAppExportService {
         allowStagingOverwrite: Bool = false,
         detectedPartnerRaw: String,
         overridePartnerRaw: String? = nil,
-        originalZipURL: URL? = nil
+        originalZipURL: URL? = nil,
+        attachmentEntries: [AttachmentCanonicalEntry] = []
     ) async throws -> (sidecarBaseDir: URL?, sidecarHTML: URL, expectedAttachments: Int) {
         resetStagedAttachmentCache()
 
@@ -1992,6 +2260,13 @@ public enum WhatsAppExportService {
             try? fm.removeItem(at: stagingBaseDir)
         }
 
+        let effectiveEntries = attachmentEntries.isEmpty
+            ? buildAttachmentCanonicalEntries(
+                messages: prepared.messages,
+                chatSourceDir: prepared.chatURL.deletingLastPathComponent()
+            )
+            : attachmentEntries
+
         let sidecarOriginalDir = try await exportSortedAttachmentsFolder(
             chatURL: prepared.chatURL,
             messages: prepared.messages,
@@ -1999,10 +2274,19 @@ public enum WhatsAppExportService {
             folderName: prepared.baseName,
             detectedPartnerRaw: detectedPartnerRaw,
             overridePartnerRaw: overridePartnerRaw,
-            originalZipURL: originalZipURL
+            originalZipURL: originalZipURL,
+            attachmentEntries: effectiveEntries
         )
         let sidecarBaseDir = sidecarOriginalDir.deletingLastPathComponent()
         let sidecarChatURL = sidecarOriginalDir.appendingPathComponent(prepared.chatURL.lastPathComponent)
+
+        var thumbStore: ThumbnailStore? = nil
+        if !effectiveEntries.isEmpty {
+            let thumbsDir = sidecarBaseDir.appendingPathComponent("_thumbs", isDirectory: true)
+            let store = ThumbnailStore(entries: effectiveEntries, thumbsDir: thumbsDir, allowWrite: true)
+            await store.precomputeAll()
+            thumbStore = store
+        }
 
         try await renderHTML(
             msgs: prepared.messages,
@@ -2017,6 +2301,7 @@ public enum WhatsAppExportService {
             externalAttachments: true,
             externalPreviews: true,
             externalAssetsDir: sidecarBaseDir,
+            thumbnailStore: thumbStore,
             perfLabel: "Sidecar"
         )
 
@@ -2067,6 +2352,16 @@ public enum WhatsAppExportService {
 
         let base = composeExportBaseName(messages: msgs, chatURL: chatPath, meName: meName)
 
+        let wantsThumbs = exportSortedAttachments
+            || variants.contains(where: { $0 == .embedAll || $0 == .thumbnailsOnly })
+        var attachmentEntries: [AttachmentCanonicalEntry] = []
+        if wantsThumbs && hasAnyAttachmentMarkers(messages: msgs) {
+            attachmentEntries = buildAttachmentCanonicalEntries(
+                messages: msgs,
+                chatSourceDir: chatPath.deletingLastPathComponent()
+            )
+        }
+
         // D1 Attachment index (run-wide, at most once) if attachments are referenced.
         if hasAnyAttachmentMarkers(messages: msgs) {
             prewarmAttachmentIndex(for: chatPath.deletingLastPathComponent())
@@ -2112,7 +2407,11 @@ public enum WhatsAppExportService {
         let stagingBase = try localStagingBaseDirectory()
         let stagingDir = try createStagingDirectory(in: stagingBase)
         var didRemoveStaging = false
+        var tempThumbsRoot: URL? = nil
         defer {
+            if let tempThumbsRoot, fm.fileExists(atPath: tempThumbsRoot.path) {
+                try? fm.removeItem(at: tempThumbsRoot)
+            }
             if !didRemoveStaging {
                 try? fm.removeItem(at: stagingDir)
             }
@@ -2127,6 +2426,20 @@ public enum WhatsAppExportService {
         let stagedSidecarHTML = stagingDir.appendingPathComponent("\(base)-sdc.html")
         let stagedSidecarDir = stagingDir.appendingPathComponent(base, isDirectory: true)
 
+        var thumbnailStore: ThumbnailStore? = nil
+        if wantsThumbs, !exportSortedAttachments, !attachmentEntries.isEmpty {
+            let tempRoot = temporaryThumbsWorkspace(baseName: base, chatURL: chatPath, stagingBase: stagingBase)
+            tempThumbsRoot = tempRoot
+            if fm.fileExists(atPath: tempRoot.path) {
+                try? fm.removeItem(at: tempRoot)
+            }
+            try fm.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+            let tempThumbsDir = tempRoot.appendingPathComponent("_thumbs", isDirectory: true)
+            let writeStore = ThumbnailStore(entries: attachmentEntries, thumbsDir: tempThumbsDir, allowWrite: true)
+            await writeStore.precomputeAll()
+            thumbnailStore = ThumbnailStore(entries: attachmentEntries, thumbsDir: tempThumbsDir, allowWrite: false)
+        }
+
         var sidecarOriginalDir: URL? = nil
         var sidecarBaseDir: URL? = nil
         if exportSortedAttachments {
@@ -2136,40 +2449,12 @@ public enum WhatsAppExportService {
                 outDir: stagingDir,
                 folderName: base,
                 detectedPartnerRaw: "",
-                overridePartnerRaw: nil
+                overridePartnerRaw: nil,
+                attachmentEntries: attachmentEntries
             )
             sidecarOriginalDir = originalDir
             sidecarBaseDir = originalDir.deletingLastPathComponent()
         }
-
-        // Render all HTML variants
-        for v in variants {
-            guard let outHTML = stagedHTMLByVariant[v] else { continue }
-            try await renderHTML(
-                msgs: msgs,
-                chatURL: chatPath,
-                outHTML: outHTML,
-                meName: meName,
-                enablePreviews: v.enablePreviews,
-                embedAttachments: v.embedAttachments,
-                embedAttachmentThumbnailsOnly: v.embedAttachmentThumbnailsOnly,
-                perfLabel: v.perfLabel
-            )
-        }
-
-        // Render one Markdown (portable)
-        let mdChatURL = sidecarOriginalDir?.appendingPathComponent(chatPath.lastPathComponent) ?? chatPath
-        let mdAttachmentRelBaseDir: URL? = sidecarOriginalDir != nil ? stagingDir : nil
-        try renderMD(
-            msgs: msgs,
-            chatURL: mdChatURL,
-            outMD: stagedMD,
-            meName: meName,
-            enablePreviews: true,
-            embedAttachments: false,
-            embedAttachmentThumbnailsOnly: false,
-            attachmentRelBaseDir: mdAttachmentRelBaseDir
-        )
 
         var didSidecar = false
         if exportSortedAttachments {
@@ -2177,6 +2462,15 @@ public enum WhatsAppExportService {
                 throw NSError(domain: "WETExport", code: 2, userInfo: [
                     NSLocalizedDescriptionKey: "Sidecar directory missing"
                 ])
+            }
+
+            var sidecarThumbStore: ThumbnailStore? = nil
+            if wantsThumbs, !attachmentEntries.isEmpty {
+                let thumbsDir = sidecarBaseDir.appendingPathComponent("_thumbs", isDirectory: true)
+                let store = ThumbnailStore(entries: attachmentEntries, thumbsDir: thumbsDir, allowWrite: true)
+                await store.precomputeAll()
+                sidecarThumbStore = store
+                thumbnailStore = ThumbnailStore(entries: attachmentEntries, thumbsDir: thumbsDir, allowWrite: false)
             }
 
             // Sidecar HTML: renders like -max but references media in the sidecar folder via relative links.
@@ -2197,6 +2491,7 @@ public enum WhatsAppExportService {
                 externalAttachments: true,
                 externalPreviews: true,
                 externalAssetsDir: sidecarBaseDir,
+                thumbnailStore: sidecarThumbStore,
                 perfLabel: "Sidecar"
             )
 
@@ -2224,6 +2519,36 @@ public enum WhatsAppExportService {
             }
             didSidecar = true
         }
+
+        // Render all HTML variants
+        for v in variants {
+            guard let outHTML = stagedHTMLByVariant[v] else { continue }
+            try await renderHTML(
+                msgs: msgs,
+                chatURL: chatPath,
+                outHTML: outHTML,
+                meName: meName,
+                enablePreviews: v.enablePreviews,
+                embedAttachments: v.embedAttachments,
+                embedAttachmentThumbnailsOnly: v.embedAttachmentThumbnailsOnly,
+                thumbnailStore: thumbnailStore,
+                perfLabel: v.perfLabel
+            )
+        }
+
+        // Render one Markdown (portable)
+        let mdChatURL = sidecarOriginalDir?.appendingPathComponent(chatPath.lastPathComponent) ?? chatPath
+        let mdAttachmentRelBaseDir: URL? = sidecarOriginalDir != nil ? stagingDir : nil
+        try renderMD(
+            msgs: msgs,
+            chatURL: mdChatURL,
+            outMD: stagedMD,
+            meName: meName,
+            enablePreviews: true,
+            embedAttachments: false,
+            embedAttachmentThumbnailsOnly: false,
+            attachmentRelBaseDir: mdAttachmentRelBaseDir
+        )
 
         var moveItems: [(src: URL, dst: URL)] = []
         for v in variants {
@@ -2868,7 +3193,13 @@ public enum WhatsAppExportService {
 
     nonisolated private static func deterministicInputWorkspace(for zipURL: URL) -> URL {
         let fm = FileManager.default
-        let base = fm.temporaryDirectory.appendingPathComponent("wa_export_input", isDirectory: true)
+        let base: URL = {
+            if let override = ProcessInfo.processInfo.environment["WET_TMPDIR"], !override.isEmpty {
+                return URL(fileURLWithPath: override, isDirectory: true)
+                    .appendingPathComponent("wa_export_input", isDirectory: true)
+            }
+            return fm.temporaryDirectory.appendingPathComponent("wa_export_input", isDirectory: true)
+        }()
         let attrs = (try? fm.attributesOfItem(atPath: zipURL.path)) ?? [:]
         let size = attrs[.size] as? UInt64 ?? 0
         let mtime = (attrs[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
@@ -2937,9 +3268,18 @@ public enum WhatsAppExportService {
         try fm.createDirectory(at: url, withIntermediateDirectories: true)
     }
 
+    private enum ZipTimestampSource: String {
+        case dos
+        case utCentral
+        case ntfsCentral
+        case utLocal
+        case ntfsLocal
+    }
+
     private struct ZipTimestampEntry {
         let path: String
         let date: Date
+        let source: ZipTimestampSource
     }
 
     private enum ZipTimestampError: Error {
@@ -3031,6 +3371,17 @@ public enum WhatsAppExportService {
                 return nil
             }
 
+            func adjustedDate(for entry: ZipTimestampEntry, existingMTime: Date?) -> (Date, Bool) {
+                guard entry.source == .dos, let existingMTime else { return (entry.date, false) }
+                let offset = TimePolicy.canonicalTimeZone.secondsFromGMT(for: entry.date)
+                if offset == 0 { return (entry.date, false) }
+                let delta = Int((entry.date.timeIntervalSince1970 - existingMTime.timeIntervalSince1970).rounded())
+                if abs(delta) == abs(offset) {
+                    return (existingMTime, true)
+                }
+                return (entry.date, false)
+            }
+
             for entry in entries {
                 var rel = entry.path.replacingOccurrences(of: "\\", with: "/")
                 if rel.hasPrefix("./") { rel.removeFirst(2) }
@@ -3049,14 +3400,17 @@ public enum WhatsAppExportService {
                 let targetPath = target.path
                 guard targetPath.hasPrefix(rootPath), fm.fileExists(atPath: targetPath) else { continue }
 
+                let existingMTime = (try? fm.attributesOfItem(atPath: targetPath))?[.modificationDate] as? Date
+                let (appliedDate, didAdjust) = adjustedDate(for: entry, existingMTime: existingMTime)
                 do {
-                    try fm.setAttributes([.creationDate: entry.date, .modificationDate: entry.date], ofItemAtPath: targetPath)
+                    try fm.setAttributes([.creationDate: appliedDate, .modificationDate: appliedDate], ofItemAtPath: targetPath)
                 } catch {
-                    try? fm.setAttributes([.modificationDate: entry.date], ofItemAtPath: targetPath)
+                    try? fm.setAttributes([.modificationDate: appliedDate], ofItemAtPath: targetPath)
                 }
                 if debugEnabled, targetPath.lowercased().hasSuffix(".pdf") {
-                    let epoch = Int(entry.date.timeIntervalSince1970.rounded())
-                    print("WET-DBG: ZIP PDF mtime epoch=\(epoch) path=\(targetPath)")
+                    let epoch = Int(appliedDate.timeIntervalSince1970.rounded())
+                    let source = didAdjust ? "\(entry.source.rawValue)+adj" : entry.source.rawValue
+                    print("WET-DBG: ZIP PDF mtime epoch=\(epoch) source=\(source) path=\(targetPath)")
                 }
             }
         } catch {
@@ -3108,6 +3462,14 @@ public enum WhatsAppExportService {
             return b0 | b1 | b2 | b3
         }
 
+        func readU64(_ data: Data, _ offset: Int) -> UInt64 {
+            var out: UInt64 = 0
+            for i in 0..<8 {
+                out |= UInt64(data[offset + i]) << UInt64(i * 8)
+            }
+            return out
+        }
+
         let totalEntries = readU16(tail, eocdIndex + 10)
         let cdSize = readU32(tail, eocdIndex + 12)
         let cdOffset = readU32(tail, eocdIndex + 16)
@@ -3118,6 +3480,78 @@ public enum WhatsAppExportService {
 
         try handle.seek(toOffset: UInt64(cdOffset))
         let cdData = try handle.read(upToCount: Int(cdSize)) ?? Data()
+
+        func parseExtendedTimestamp(_ data: Data) -> Date? {
+            guard data.count >= 5 else { return nil }
+            let flags = data[0]
+            guard (flags & 0x01) != 0 else { return nil }
+            let epoch = readU32(data, 1)
+            return Date(timeIntervalSince1970: TimeInterval(epoch))
+        }
+
+        func parseNTFSTimestamp(_ data: Data) -> Date? {
+            guard data.count >= 4 else { return nil }
+            var offset = 4
+            while offset + 4 <= data.count {
+                let tag = readU16(data, offset)
+                let size = Int(readU16(data, offset + 2))
+                offset += 4
+                if offset + size > data.count { break }
+                if tag == 0x0001, size >= 24 {
+                    let fileTime = readU64(data, offset)
+                    let unixEpoch: UInt64 = 116444736000000000
+                    if fileTime >= unixEpoch {
+                        let interval = Double(fileTime - unixEpoch) / 10_000_000
+                        return Date(timeIntervalSince1970: interval)
+                    }
+                }
+                offset += size
+            }
+            return nil
+        }
+
+        func parseExtraTimestamp(
+            _ data: Data,
+            utSource: ZipTimestampSource,
+            ntfsSource: ZipTimestampSource
+        ) -> (Date, ZipTimestampSource)? {
+            var idx = 0
+            while idx + 4 <= data.count {
+                let headerID = readU16(data, idx)
+                let dataSize = Int(readU16(data, idx + 2))
+                idx += 4
+                if idx + dataSize > data.count { break }
+                let field = data.subdata(in: idx..<(idx + dataSize))
+                if headerID == 0x5455, let date = parseExtendedTimestamp(field) {
+                    return (date, utSource)
+                }
+                if headerID == 0x000a, let date = parseNTFSTimestamp(field) {
+                    return (date, ntfsSource)
+                }
+                idx += dataSize
+            }
+            return nil
+        }
+
+        func readLocalExtraField(offset: UInt32) -> Data? {
+            if offset == 0xFFFFFFFF { return nil }
+            let start = UInt64(offset)
+            if start + 30 > fileSize { return nil }
+            do {
+                try handle.seek(toOffset: start)
+                let header = try handle.read(upToCount: 30) ?? Data()
+                guard header.count >= 30, readU32(header, 0) == 0x04034b50 else { return nil }
+                let nameLen = Int(readU16(header, 26))
+                let extraLen = Int(readU16(header, 28))
+                if nameLen > 0 {
+                    _ = try handle.read(upToCount: nameLen)
+                }
+                guard extraLen > 0 else { return nil }
+                return try handle.read(upToCount: extraLen) ?? Data()
+            } catch {
+                return nil
+            }
+        }
 
         var entries: [ZipTimestampEntry] = []
         entries.reserveCapacity(Int(totalEntries))
@@ -3132,6 +3566,7 @@ public enum WhatsAppExportService {
             let nameLen = Int(readU16(cdData, offset + 28))
             let extraLen = Int(readU16(cdData, offset + 30))
             let commentLen = Int(readU16(cdData, offset + 32))
+            let localHeaderOffset = readU32(cdData, offset + 42)
 
             let nameStart = offset + 46
             let nameEnd = nameStart + nameLen
@@ -3157,8 +3592,20 @@ public enum WhatsAppExportService {
                 return String(decoding: nameData, as: UTF8.self)
             }()
 
-            if let date = TimePolicy.dateFromMSDOSTimestamp(date: modDate, time: modTime) {
-                entries.append(ZipTimestampEntry(path: name, date: date))
+            let extraStart = nameEnd
+            let extraEnd = extraStart + extraLen
+            var chosen: (Date, ZipTimestampSource)? = nil
+            if extraLen > 0, extraEnd <= cdData.count {
+                let extraData = cdData.subdata(in: extraStart..<extraEnd)
+                chosen = parseExtraTimestamp(extraData, utSource: .utCentral, ntfsSource: .ntfsCentral)
+            }
+            if chosen == nil, let localExtra = readLocalExtraField(offset: localHeaderOffset) {
+                chosen = parseExtraTimestamp(localExtra, utSource: .utLocal, ntfsSource: .ntfsLocal)
+            }
+            if let chosen {
+                entries.append(ZipTimestampEntry(path: name, date: chosen.0, source: chosen.1))
+            } else if let date = TimePolicy.dateFromMSDOSTimestamp(date: modDate, time: modTime) {
+                entries.append(ZipTimestampEntry(path: name, date: date, source: .dos))
             }
 
             offset = nameEnd + extraLen + commentLen
@@ -3623,11 +4070,19 @@ public enum WhatsAppExportService {
     // Sorted attachments folder (standalone export)
     // ---------------------------
 
-    private enum SortedAttachmentBucket: String {
+    enum SortedAttachmentBucket: String {
         case images
         case videos
         case audios
         case documents
+    }
+
+    struct AttachmentCanonicalEntry: Sendable {
+        let fileName: String
+        let sourceURL: URL
+        let bucket: SortedAttachmentBucket
+        let destName: String
+        let canonicalRelPath: String
     }
 
     nonisolated private static func bucketForExtension(_ ext: String) -> SortedAttachmentBucket {
@@ -3642,6 +4097,58 @@ public enum WhatsAppExportService {
         default:
             return .documents
         }
+    }
+
+    nonisolated static func buildAttachmentCanonicalEntries(
+        messages: [WAMessage],
+        chatSourceDir: URL
+    ) -> [AttachmentCanonicalEntry] {
+        var earliestDateByFile: [String: Date] = [:]
+        earliestDateByFile.reserveCapacity(64)
+
+        for m in messages {
+            let fns = findAttachments(m.text)
+            if fns.isEmpty { continue }
+            for fn in fns {
+                if let existing = earliestDateByFile[fn] {
+                    if m.ts < existing { earliestDateByFile[fn] = m.ts }
+                } else {
+                    earliestDateByFile[fn] = m.ts
+                }
+            }
+        }
+
+        if earliestDateByFile.isEmpty { return [] }
+
+        let df = DateFormatter()
+        df.locale = canonicalLocale
+        df.timeZone = canonicalTimeZone
+        df.dateFormat = "yyyy MM dd HH mm ss"
+
+        let ordered = earliestDateByFile.sorted(by: { $0.key < $1.key })
+        var entries: [AttachmentCanonicalEntry] = []
+        entries.reserveCapacity(ordered.count)
+
+        let chatDir = chatSourceDir.standardizedFileURL
+
+        for (fn, ts) in ordered {
+            guard let src = resolveAttachmentURL(fileName: fn, sourceDir: chatDir) else {
+                continue
+            }
+            let bucket = bucketForExtension(src.pathExtension)
+            let prefix = df.string(from: ts)
+            let destName = "\(prefix) \(fn)"
+            let canonicalRelPath = "\(bucket.rawValue)/\(destName)"
+            entries.append(AttachmentCanonicalEntry(
+                fileName: fn,
+                sourceURL: src,
+                bucket: bucket,
+                destName: destName,
+                canonicalRelPath: canonicalRelPath
+            ))
+        }
+
+        return entries
     }
 
     nonisolated private static func buildAttachmentIndexSnapshot(for sourceDir: URL) -> AttachmentIndexSnapshot {
@@ -3736,7 +4243,8 @@ public enum WhatsAppExportService {
         folderName: String,
         detectedPartnerRaw: String,
         overridePartnerRaw: String? = nil,
-        originalZipURL: URL? = nil
+        originalZipURL: URL? = nil,
+        attachmentEntries: [AttachmentCanonicalEntry]? = nil
     ) async throws -> URL {
         let fm = FileManager.default
         let sidecarDebugEnabled = ProcessInfo.processInfo.environment["WET_SIDECAR_DEBUG"] == "1"
@@ -3825,37 +4333,16 @@ public enum WhatsAppExportService {
         let audiosDir = baseFolderURL.appendingPathComponent(SortedAttachmentBucket.audios.rawValue, isDirectory: true)
         let docsDir = baseFolderURL.appendingPathComponent(SortedAttachmentBucket.documents.rawValue, isDirectory: true)
 
-        // Build: filename -> earliest timestamp
-        var earliestDateByFile: [String: Date] = [:]
-        earliestDateByFile.reserveCapacity(64)
-
-        for m in messages {
-            try Task.checkCancellation()
-            let fns = findAttachments(m.text)
-            if fns.isEmpty { continue }
-
-            for fn in fns {
-                try Task.checkCancellation()
-                if let existing = earliestDateByFile[fn] {
-                    if m.ts < existing { earliestDateByFile[fn] = m.ts }
-                } else {
-                    earliestDateByFile[fn] = m.ts
-                }
-            }
-        }
+        let chatSourceDir = chatURL.deletingLastPathComponent()
+        let entries = attachmentEntries ?? buildAttachmentCanonicalEntries(
+            messages: messages,
+            chatSourceDir: chatSourceDir
+        )
 
         // If there are no attachments, keep the bucket folders absent.
-        if earliestDateByFile.isEmpty { return originalCopyDir }
+        if entries.isEmpty { return originalCopyDir }
 
         var bucketsWithContent = Set<SortedAttachmentBucket>()
-
-        let df = DateFormatter()
-        df.locale = canonicalLocale
-        df.timeZone = canonicalTimeZone
-        // Filename prefix: YYYY MM DD HH MM SS (spaces, no dashes)
-        df.dateFormat = "yyyy MM dd HH mm ss"
-
-        let chatSourceDir = chatURL.deletingLastPathComponent()
 
         struct SidecarAttachmentJob {
             let src: URL
@@ -3863,18 +4350,14 @@ public enum WhatsAppExportService {
             let bucket: SortedAttachmentBucket
         }
 
-        let ordered = earliestDateByFile.sorted(by: { $0.key < $1.key })
         var jobs: [SidecarAttachmentJob] = []
-        jobs.reserveCapacity(ordered.count)
+        jobs.reserveCapacity(entries.count)
         var dstSeen = Set<String>()
 
-        for (fn, ts) in ordered {
+        for entry in entries {
             try Task.checkCancellation()
-            guard let src = resolveAttachmentURL(fileName: fn, sourceDir: chatSourceDir) else {
-                continue
-            }
-
-            let bucket = bucketForExtension(src.pathExtension)
+            let src = entry.sourceURL
+            let bucket = entry.bucket
             let dstFolder: URL = {
                 switch bucket {
                 case .images: return imagesDir
@@ -3883,10 +4366,7 @@ public enum WhatsAppExportService {
                 case .documents: return docsDir
                 }
             }()
-
-            let prefix = df.string(from: ts)
-            let dstName = "\(prefix) \(fn)"
-            let dst = dstFolder.appendingPathComponent(dstName)
+            let dst = dstFolder.appendingPathComponent(entry.destName)
             if !dstSeen.insert(dst.path).inserted {
                 throw OutputCollisionError(url: dst)
             }
@@ -5351,6 +5831,7 @@ nonisolated private static func stageThumbnailForExport(
         externalAttachments: Bool = false,
         externalPreviews: Bool = false,
         externalAssetsDir: URL? = nil,
+        thumbnailStore: ThumbnailStore? = nil,
         perfLabel: String? = nil
     ) async throws {
 
@@ -5714,11 +6195,9 @@ nonisolated private static func stageThumbnailForExport(
 
         let chatDir = chatURL.deletingLastPathComponent().standardizedFileURL
         let externalAssetsRoot = externalAssetsDir?.standardizedFileURL
-        let externalThumbsDir = externalAssetsRoot?.appendingPathComponent("_thumbs", isDirectory: true)
         let externalPreviewsDir = externalAssetsRoot?.appendingPathComponent("_previews", isDirectory: true)
         if ProcessInfo.processInfo.environment["WET_SIDECAR_DEBUG"] == "1", let externalAssetsRoot {
             print("WET-DBG: externalAssetsRoot: \(externalAssetsRoot.path)")
-            if let externalThumbsDir { print("WET-DBG: externalThumbsDir: \(externalThumbsDir.path)") }
             if let externalPreviewsDir { print("WET-DBG: externalPreviewsDir: \(externalPreviewsDir.path)") }
         }
 
@@ -5772,68 +6251,8 @@ nonisolated private static func stageThumbnailForExport(
             }
         }
 
-        var stagedThumbsByPath: [String: String] = [:]
-        if externalAttachments, !disableThumbStaging, let thumbsDir = externalThumbsDir {
-            struct ThumbJob {
-                let src: URL
-                let dest: URL
-            }
-            var jobs: [ThumbJob] = []
-            jobs.reserveCapacity(64)
-            var seenDest = Set<String>()
-            var seenSrc = Set<String>()
-            for m in msgs {
-                try Task.checkCancellation()
-                let fns = findAttachments(m.text)
-                if fns.isEmpty { continue }
-                for fn in fns {
-                    guard let src = resolveAttachmentURL(fileName: fn, sourceDir: chatDir) else { continue }
-                    let srcPath = src.path
-                    if !seenSrc.insert(srcPath).inserted { continue }
-                    let baseName = src.deletingPathExtension().lastPathComponent
-                    let dest = thumbsDir.appendingPathComponent(baseName).appendingPathExtension("jpg")
-                    if seenDest.insert(dest.path).inserted {
-                        jobs.append(ThumbJob(src: src, dest: dest))
-                    }
-                }
-            }
-            if !jobs.isEmpty {
-                let thumbCap = min(caps.io, 4)
-                if perfEnabled {
-                    print("WET-PERF: thumbs cap=\(thumbCap) jobs=\(jobs.count)")
-                }
-                let limiter = AsyncLimiter(thumbCap)
-                var results = Array<(String, String?)?>(repeating: nil, count: jobs.count)
-                try await withThrowingTaskGroup(of: (Int, String, String?).self) { group in
-                    for (idx, job) in jobs.enumerated() {
-                        group.addTask {
-                            try Task.checkCancellation()
-                            return try await limiter.withPermit {
-                                try Task.checkCancellation()
-                                let href = await stageThumbnailForExport(
-                                    source: job.src,
-                                    thumbsDir: thumbsDir,
-                                    relativeTo: attachmentRelBaseDir
-                                )
-                                return (idx, job.src.path, href)
-                            }
-                        }
-                    }
-                    for try await (idx, srcPath, href) in group {
-                        results[idx] = (srcPath, href)
-                    }
-                }
-                for item in results {
-                    guard let (srcPath, href) = item else { continue }
-                    if let href {
-                        stagedThumbsByPath[srcPath] = href
-                    }
-                }
-            }
-        }
-
         let previewByURLSnapshot = previewByURL
-        let stagedThumbsByPathSnapshot = stagedThumbsByPath
+        let thumbnailStoreRef = thumbnailStore
 
         let dayHeaders: [String?] = {
             var headers = Array<String?>(repeating: nil, count: msgs.count)
@@ -5959,7 +6378,7 @@ nonisolated private static func stageThumbnailForExport(
                     // - Embed ONLY a lightweight thumbnail as a data: URL.
                     // - Do NOT wrap thumbnails in <a href=...> and do NOT print any file link/text line.
 
-                    if let thumbDataURL = await inlineThumbnailDataURL(p) {
+                    if let thumbDataURL = await thumbnailStoreRef?.thumbnailDataURL(fileName: fn, allowOriginalFallback: true) {
                         let isImage = ["jpg","jpeg","png","gif","webp","heic","heif"].contains(ext)
                         mediaBlocks.append(
                             "<div class='media\(isImage ? " media-img" : "")'><img alt='' src='\(htmlEscape(thumbDataURL))'></div>"
@@ -5979,7 +6398,7 @@ nonisolated private static func stageThumbnailForExport(
                     // Keep the download link (waDownloadEmbed) as requested.
                     if ["mp4", "mov", "m4v"].contains(ext) {
                         let mime = guessMime(fromName: fn)
-                        let poster = await attachmentPreviewDataURL(p)
+                        let poster = await thumbnailStoreRef?.thumbnailDataURL(fileName: fn)
 
                         if let fmData = try? Data(contentsOf: p) {
                             embedCounter += 1
@@ -6037,7 +6456,7 @@ nonisolated private static func stageThumbnailForExport(
                     // For PDF/DOC/DOCX: preview thumbnail, clickable with waOpenEmbed.
                     if ["pdf", "doc", "docx"].contains(ext) {
                         let mime = guessMime(fromName: fn)
-                        let previewDataURL = await attachmentPreviewDataURL(p)
+                        let previewDataURL = await thumbnailStoreRef?.thumbnailDataURL(fileName: fn)
                         let fileData = try? Data(contentsOf: p)
                         if let previewDataURL, let fileData {
                             embedCounter += 1
@@ -6132,20 +6551,9 @@ nonisolated private static func stageThumbnailForExport(
                     if ["mp4", "mov", "m4v"].contains(ext) {
                         let mime = guessMime(fromName: fn)
                         var posterAttr = ""
-                        if !disableThumbStaging, let thumbsDir = externalThumbsDir {
-                            let poster: String?
-                            if let cached = stagedThumbsByPathSnapshot[p.path] {
-                                poster = cached
-                            } else {
-                                poster = await stageThumbnailForExport(
-                                    source: p,
-                                    thumbsDir: thumbsDir,
-                                    relativeTo: attachmentRelBaseDir
-                                )
-                            }
-                            if let poster {
-                                posterAttr = " poster='\(htmlEscape(poster))'"
-                            }
+                        if !disableThumbStaging,
+                           let poster = await thumbnailStoreRef?.thumbnailHref(fileName: fn, relativeTo: attachmentRelBaseDir) {
+                            posterAttr = " poster='\(htmlEscape(poster))'"
                         }
                         mediaBlocks.append(
                             "<div class='media'><video controls preload='metadata' playsinline\(posterAttr)><source src='\(safeHref)' type='\(htmlEscape(mime))'>Dein Browser kann dieses Video nicht abspielen. <a href='\(safeHref)'>Video öffnen</a>.</video></div>"
@@ -6166,16 +6574,8 @@ nonisolated private static func stageThumbnailForExport(
 
                     if ["pdf", "doc", "docx"].contains(ext) {
                         var thumbHref: String? = nil
-                        if !disableThumbStaging, let thumbsDir = externalThumbsDir {
-                            if let cached = stagedThumbsByPathSnapshot[p.path] {
-                                thumbHref = cached
-                            } else {
-                                thumbHref = await stageThumbnailForExport(
-                                    source: p,
-                                    thumbsDir: thumbsDir,
-                                    relativeTo: attachmentRelBaseDir
-                                )
-                            }
+                        if !disableThumbStaging {
+                            thumbHref = await thumbnailStoreRef?.thumbnailHref(fileName: fn, relativeTo: attachmentRelBaseDir)
                         }
                         if let thumbHref {
                             mediaBlocks.append(
@@ -6213,7 +6613,7 @@ nonisolated private static func stageThumbnailForExport(
                 // Use a portable relative path (./attachments/...) when available.
                 if ["mp4", "mov", "m4v"].contains(ext), let href {
                     let mime = guessMime(fromName: fn)
-                    let poster = await attachmentPreviewDataURL(stagedURL ?? p) // Quick Look thumbnail when available
+                    let poster = await thumbnailStoreRef?.thumbnailDataURL(fileName: fn)
 
                     var posterAttr = ""
                     if let poster {
@@ -6237,12 +6637,19 @@ nonisolated private static func stageThumbnailForExport(
                     continue
                 }
 
-                if let dataURL = await attachmentPreviewDataURL(stagedURL ?? p) {
-                    let isImage = ["jpg","jpeg","png","gif","webp","heic","heif"].contains(ext)
+                var previewDataURL: String? = nil
+                var isImage = false
+                if ["jpg","jpeg","png","gif","webp","heic","heif"].contains(ext) {
+                    previewDataURL = fileToDataURL(stagedURL ?? p)
+                    isImage = true
+                } else if ext == "pdf" {
+                    previewDataURL = await thumbnailStoreRef?.thumbnailDataURL(fileName: fn)
+                }
 
+                if let previewDataURL {
                     if let href {
                         mediaBlocks.append(
-                            "<div class='media\(isImage ? " media-img" : "")'><a href='\(htmlEscape(href))' target='_blank' rel='noopener'><img alt='' src='\(dataURL)'></a></div>"
+                            "<div class='media\(isImage ? " media-img" : "")'><a href='\(htmlEscape(href))' target='_blank' rel='noopener'><img alt='' src='\(previewDataURL)'></a></div>"
                         )
                         if !isImage {
                             mediaBlocks.append(
@@ -6250,7 +6657,7 @@ nonisolated private static func stageThumbnailForExport(
                             )
                         }
                     } else {
-                        mediaBlocks.append("<div class='media\(isImage ? " media-img" : "")'><img alt='' src='\(dataURL)'></div>")
+                        mediaBlocks.append("<div class='media\(isImage ? " media-img" : "")'><img alt='' src='\(previewDataURL)'></div>")
                         if !isImage {
                             mediaBlocks.append("<div class='fileline'>📎 \(htmlEscape(fn))</div>")
                         }
@@ -6725,11 +7132,30 @@ nonisolated private static func stageThumbnailForExport(
 
     nonisolated static func localStagingBaseDirectory() throws -> URL {
         let fm = FileManager.default
+        if let override = ProcessInfo.processInfo.environment["WET_TMPDIR"], !override.isEmpty {
+            let root = URL(fileURLWithPath: override, isDirectory: true)
+            let base = root.appendingPathComponent("whatsapp-export-tools", isDirectory: true)
+            if !fm.fileExists(atPath: base.path) {
+                try fm.createDirectory(at: base, withIntermediateDirectories: true)
+            }
+            return base.standardizedFileURL
+        }
         let base = fm.temporaryDirectory.appendingPathComponent("whatsapp-export-tools", isDirectory: true)
         if !fm.fileExists(atPath: base.path) {
             try fm.createDirectory(at: base, withIntermediateDirectories: true)
         }
         return base.standardizedFileURL
+    }
+
+    nonisolated static func temporaryThumbsWorkspace(
+        baseName: String,
+        chatURL: URL,
+        stagingBase: URL
+    ) -> URL {
+        let base = stagingBase.standardizedFileURL
+        let key = "\(baseName)|\(chatURL.standardizedFileURL.path)"
+        let hash = stableHashHex(key)
+        return base.appendingPathComponent(".wa_thumbs_\(hash)", isDirectory: true)
     }
 
     nonisolated static func isLikelyICloudBacked(_ url: URL) -> Bool {
