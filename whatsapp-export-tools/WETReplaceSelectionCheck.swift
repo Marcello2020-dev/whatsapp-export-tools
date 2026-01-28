@@ -87,6 +87,16 @@ struct WETReplaceSelectionCheck {
 
         let sidecarDir = root.appendingPathComponent(baseName, isDirectory: true)
         try fm.createDirectory(at: sidecarDir, withIntermediateDirectories: true)
+        let imagesDir = sidecarDir.appendingPathComponent("images", isDirectory: true)
+        let videosDir = sidecarDir.appendingPathComponent("videos", isDirectory: true)
+        let audiosDir = sidecarDir.appendingPathComponent("audios", isDirectory: true)
+        let docsDir = sidecarDir.appendingPathComponent("documents", isDirectory: true)
+        let thumbsDir = sidecarDir.appendingPathComponent("_thumbs", isDirectory: true)
+        try fm.createDirectory(at: imagesDir, withIntermediateDirectories: true)
+        try fm.createDirectory(at: videosDir, withIntermediateDirectories: true)
+        try fm.createDirectory(at: audiosDir, withIntermediateDirectories: true)
+        try fm.createDirectory(at: docsDir, withIntermediateDirectories: true)
+        try fm.createDirectory(at: thumbsDir, withIntermediateDirectories: true)
 
         let seedFiles: [(String, String)] = [
             ("\(baseName)-max.html", "dummy max"),
@@ -100,14 +110,8 @@ struct WETReplaceSelectionCheck {
             try content.write(to: url, atomically: true, encoding: .utf8)
         }
 
-        let sidecarFiles: [(String, String)] = [
-            ("media-index.json", "dummy sidecar index"),
-            ("media_0001.jpg", "dummy asset")
-        ]
-        for (name, content) in sidecarFiles {
-            let url = sidecarDir.appendingPathComponent(name)
-            try content.write(to: url, atomically: true, encoding: .utf8)
-        }
+        let sidecarFile = imagesDir.appendingPathComponent("media_0001.jpg")
+        try "dummy asset".write(to: sidecarFile, atomically: true, encoding: .utf8)
     }
 
     private static func runReplace(root: URL, baseName: String) throws {
@@ -151,8 +155,7 @@ struct WETReplaceSelectionCheck {
             root.appendingPathComponent("\(baseName)-min.html"),
             root.appendingPathComponent("\(baseName).md"),
             root.appendingPathComponent("\(baseName)-sdc.html"),
-            root.appendingPathComponent("\(baseName)/media-index.json"),
-            root.appendingPathComponent("\(baseName)/media_0001.jpg")
+            root.appendingPathComponent("\(baseName)/images/media_0001.jpg")
         ]
 
         var snapshot: [String: FileInfo] = [:]
@@ -213,8 +216,7 @@ struct WETReplaceSelectionCheck {
         expectPreserved("\(baseName)-min.html")
         expectPreserved("\(baseName).md")
         expectPreserved("\(baseName)-sdc.html")
-        expectPreserved("\(baseName)/media-index.json")
-        expectPreserved("\(baseName)/media_0001.jpg")
+        expectPreserved("\(baseName)/images/media_0001.jpg")
 
         return failures
     }

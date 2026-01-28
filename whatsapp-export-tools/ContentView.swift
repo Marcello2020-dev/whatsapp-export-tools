@@ -2724,15 +2724,6 @@ struct ContentView: View {
         }
 
         let sidecarDebugEnabled = debugEnabled || ProcessInfo.processInfo.environment["WET_SIDECAR_DEBUG"] == "1"
-        let sidecarSourceDir = prepared.chatURL.deletingLastPathComponent()
-        let sidecarOriginalNameBefore = context.provenance.originalZipURL?
-            .deletingPathExtension()
-            .lastPathComponent ?? sidecarSourceDir.lastPathComponent
-        let sidecarOriginalFolderName = WhatsAppExportService.applyPartnerOverrideToName(
-            originalName: sidecarOriginalNameBefore,
-            detectedPartnerRaw: context.detectedPartnerRaw,
-            overridePartnerRaw: context.overridePartnerRaw
-        )
 
         func logSidecarTree(root: URL, label: String) {
             guard sidecarDebugEnabled else { return }
@@ -2825,33 +2816,20 @@ struct ContentView: View {
         }
 
         func finalizeSidecarTimestamps(sidecarBaseDir: URL, logMismatches: Bool) {
-            let sourceDir = sidecarSourceDir
-            let finalSidecarOriginalDir = sidecarBaseDir.appendingPathComponent(
-                sidecarOriginalFolderName,
-                isDirectory: true
-            )
             if debugEnabled {
-                debugLog("TIMESTAMP SYNC: \(finalSidecarOriginalDir.path)")
+                debugLog("TIMESTAMP SYNC: \(sidecarBaseDir.path)")
             }
+            if attachmentEntries.isEmpty { return }
             if sidecarDebugEnabled || logMismatches {
-                WhatsAppExportService.normalizeOriginalCopyTimestamps(
-                    sourceDir: sourceDir,
-                    destDir: finalSidecarOriginalDir,
-                    skippingPathPrefixes: [
-                        context.outDir.standardizedFileURL.path,
-                        sidecarBaseDir.standardizedFileURL.path
-                    ]
+                WhatsAppExportService.normalizeSidecarMediaTimestamps(
+                    entries: attachmentEntries,
+                    sidecarBaseDir: sidecarBaseDir
                 )
                 if logMismatches {
-                    let mismatches = WhatsAppExportService.sampleTimestampMismatches(
-                        sourceDir: sourceDir,
-                        destDir: finalSidecarOriginalDir,
-                        maxFiles: 3,
-                        maxDirs: 2,
-                        skippingPathPrefixes: [
-                            context.outDir.standardizedFileURL.path,
-                            sidecarBaseDir.standardizedFileURL.path
-                        ]
+                    let mismatches = WhatsAppExportService.sampleSidecarMediaTimestampMismatches(
+                        entries: attachmentEntries,
+                        sidecarBaseDir: sidecarBaseDir,
+                        maxFiles: 3
                     )
                     if !mismatches.isEmpty {
                         log("WARN: Zeitstempelabweichung bei \(mismatches.count) Element(en).")
@@ -2945,7 +2923,6 @@ struct ContentView: View {
         var htmlByVariant: [HTMLVariant: URL] = [:]
         var finalMD: URL? = nil
         var finalSidecarBaseDir: URL? = nil
-        var finalSidecarOriginalDir: URL? = nil
         var sidecarSnapshot: SidecarTimestampSnapshot? = nil
         var sidecarImmutabilityWarnings: Set<String> = []
         var stagedSidecarHTML: URL? = nil
@@ -2977,11 +2954,6 @@ struct ContentView: View {
                 let stepStart = ProcessInfo.processInfo.systemUptime
                 switch step {
                 case .sidecar:
-                    let sourceDir = sidecarSourceDir
-                    if debugEnabled {
-                        debugLog("SIDECAR ORIGINAL NAME BEFORE: \"\(sidecarOriginalNameBefore)\"")
-                        debugLog("SIDECAR ORIGINAL NAME AFTER: \"\(sidecarOriginalFolderName)\"")
-                    }
                     let sidecarResult = try await Self.debugMeasureAsync("generate sidecar") {
                         try await WhatsAppExportService.renderSidecar(
                             prepared: prepared,
@@ -3030,10 +3002,6 @@ struct ContentView: View {
                                 debugLog("STAGE PATH: \(stagedSidecarBaseDir.path)")
                             }
                         }
-                        let stagedSidecarOriginalDir = stagedSidecarBaseDir.appendingPathComponent(
-                            sidecarOriginalFolderName,
-                            isDirectory: true
-                        )
                         if debugEnabled {
                             debugLog("SIDE: create assets dir: \(stagedSidecarBaseDir.path)")
                             let fm = FileManager.default
@@ -3061,29 +3029,6 @@ struct ContentView: View {
                         logFirstLevelEntries(stagedSidecarBaseDir, label: "Sidecar staging dir entries (all)", skipHidden: false)
                         try ensureNonEmptyArtifact(stagedSidecarBaseDir, artifact: .sidecar)
                         try WhatsAppExportService.validateSidecarLayout(sidecarBaseDir: stagedSidecarBaseDir)
-                        if sidecarDebugEnabled {
-                            WhatsAppExportService.normalizeOriginalCopyTimestamps(
-                                sourceDir: sourceDir,
-                                destDir: stagedSidecarOriginalDir,
-                                skippingPathPrefixes: [
-                                    context.outDir.standardizedFileURL.path,
-                                    stagedSidecarBaseDir.standardizedFileURL.path
-                                ]
-                            )
-                            let mismatches = WhatsAppExportService.sampleTimestampMismatches(
-                                sourceDir: sourceDir,
-                                destDir: stagedSidecarOriginalDir,
-                                maxFiles: 3,
-                                maxDirs: 3,
-                                skippingPathPrefixes: [
-                                    context.outDir.standardizedFileURL.path,
-                                    stagedSidecarBaseDir.standardizedFileURL.path
-                                ]
-                            )
-                            if !mismatches.isEmpty {
-                                debugLog("WARN: Zeitstempelabweichung bei \(mismatches.count) Element(en).")
-                            }
-                        }
                     }
                     guard let stagedSidecarHTML else {
                         throw EmptyArtifactError(url: stagingDir, reason: "sidecar HTML missing")
@@ -3151,10 +3096,6 @@ struct ContentView: View {
                                 debugLog("THUMBS SIDECR: \(thumbsDir.path)")
                             }
                         }
-                        finalSidecarOriginalDir = finalSidecarDir.appendingPathComponent(
-                            sidecarOriginalFolderName,
-                            isDirectory: true
-                        )
                         sidecarSnapshot = captureSidecarTimestampSnapshot(sidecarBaseDir: finalSidecarDir)
                     }
                 case .html(let variant):
@@ -3217,15 +3158,24 @@ struct ContentView: View {
                     }
                     htmlByVariant[variant] = finalHTML
                 case .markdown:
-                    let mdChatURL = finalSidecarOriginalDir?
-                        .appendingPathComponent(prepared.chatURL.lastPathComponent) ?? prepared.chatURL
-                    let mdAttachmentRelBaseDir: URL? = finalSidecarOriginalDir != nil ? exportDir : nil
+                    let mdChatURL = prepared.chatURL
+                    let mdAttachmentRelBaseDir: URL? = finalSidecarBaseDir != nil ? exportDir : nil
+                    let mdAttachmentOverrides: [String: URL]? = {
+                        guard let finalSidecarBaseDir, !attachmentEntries.isEmpty else { return nil }
+                        var map: [String: URL] = [:]
+                        map.reserveCapacity(attachmentEntries.count)
+                        for entry in attachmentEntries {
+                            map[entry.fileName] = finalSidecarBaseDir.appendingPathComponent(entry.canonicalRelPath)
+                        }
+                        return map
+                    }()
                     let stagedMDURL = try Self.debugMeasure("generate Markdown") {
                         try WhatsAppExportService.renderMarkdown(
                             prepared: prepared,
                             outDir: stagingDir,
                             chatURLOverride: mdChatURL,
-                            attachmentRelBaseDir: mdAttachmentRelBaseDir
+                            attachmentRelBaseDir: mdAttachmentRelBaseDir,
+                            attachmentOverrideByName: mdAttachmentOverrides
                         )
                     }
                     if verboseDebug {
@@ -3340,31 +3290,6 @@ struct ContentView: View {
         }
 
         if debugEnabled, let finalSidecarBaseDir {
-            let sourceDir = prepared.chatURL.deletingLastPathComponent()
-            let originalNameBefore: String
-            if let originalZipURL = context.provenance.originalZipURL {
-                originalNameBefore = originalZipURL.deletingPathExtension().lastPathComponent
-            } else {
-                originalNameBefore = sourceDir.lastPathComponent
-            }
-            let originalNameAfter = WhatsAppExportService.applyPartnerOverrideToName(
-                originalName: originalNameBefore,
-                detectedPartnerRaw: context.detectedPartnerRaw,
-                overridePartnerRaw: context.overridePartnerRaw
-            )
-            debugLog("SIDECAR ORIGINAL NAME BEFORE: \"\(originalNameBefore)\"")
-            debugLog("SIDECAR ORIGINAL NAME AFTER: \"\(originalNameAfter)\"")
-
-            if let (zipBefore, zipAfter) = WhatsAppExportService.resolvedSidecarZipName(
-                sourceDir: sourceDir,
-                detectedPartnerRaw: context.detectedPartnerRaw,
-                overridePartnerRaw: context.overridePartnerRaw,
-                originalZipURL: context.provenance.originalZipURL
-            ) {
-                debugLog("SIDECAR ZIP NAME BEFORE: \"\(zipBefore)\"")
-                debugLog("SIDECAR ZIP NAME AFTER: \"\(zipAfter)\"")
-            }
-
             let thumbsDir = finalSidecarBaseDir.appendingPathComponent("_thumbs", isDirectory: true)
             var isDir = ObjCBool(false)
             let exists = fm.fileExists(atPath: thumbsDir.path, isDirectory: &isDir)

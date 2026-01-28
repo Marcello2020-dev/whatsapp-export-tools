@@ -267,10 +267,34 @@ public enum WAExportError: Error, LocalizedError {
 
 struct SidecarValidationError: Error, LocalizedError, Sendable {
     let suffixArtifacts: [String]
+    let unexpectedEntries: [String]
+    let missingRequiredDirectories: [String]
+
+    init(
+        suffixArtifacts: [String] = [],
+        unexpectedEntries: [String] = [],
+        missingRequiredDirectories: [String] = []
+    ) {
+        self.suffixArtifacts = suffixArtifacts
+        self.unexpectedEntries = unexpectedEntries
+        self.missingRequiredDirectories = missingRequiredDirectories
+    }
 
     var errorDescription: String? {
-        let joined = suffixArtifacts.joined(separator: ", ")
-        return "Sidecar contains forbidden suffix artifacts: \(joined)"
+        var parts: [String] = []
+        if !suffixArtifacts.isEmpty {
+            parts.append("forbidden suffix artifacts: \(suffixArtifacts.joined(separator: ", "))")
+        }
+        if !unexpectedEntries.isEmpty {
+            parts.append("unexpected entries: \(unexpectedEntries.joined(separator: ", "))")
+        }
+        if !missingRequiredDirectories.isEmpty {
+            parts.append("missing required directories: \(missingRequiredDirectories.joined(separator: ", "))")
+        }
+        if parts.isEmpty {
+            return "Sidecar validation failed."
+        }
+        return "Sidecar validation failed: \(parts.joined(separator: "; "))"
     }
 }
 
@@ -1970,10 +1994,10 @@ public enum WhatsAppExportService {
             thumbnailStore = thumbContext.reader
         }
 
-        var sidecarOriginalDir: URL? = nil
         var sidecarBaseDir: URL? = nil
+        var sidecarAttachmentOverride: [String: URL]? = nil
         if exportSortedAttachments {
-            let originalDir = try await exportSortedAttachmentsFolder(
+            let sidecarTree = try await exportSortedAttachmentsFolder(
                 chatURL: chatPath,
                 messages: msgs,
                 outDir: stagingDir,
@@ -1983,13 +2007,13 @@ public enum WhatsAppExportService {
                 originalZipURL: nil,
                 attachmentEntries: attachmentEntries
             )
-            sidecarOriginalDir = originalDir
-            sidecarBaseDir = originalDir.deletingLastPathComponent()
+            sidecarBaseDir = sidecarTree.baseDir
+            sidecarAttachmentOverride = sidecarTree.attachmentURLByName
         }
 
         var didSidecar = false
         if exportSortedAttachments {
-            guard let sidecarOriginalDir, let sidecarBaseDir else {
+            guard let sidecarBaseDir else {
                 throw NSError(domain: "WETExport", code: 1, userInfo: [
                     NSLocalizedDescriptionKey: "Sidecar directory missing"
                 ])
@@ -2008,7 +2032,7 @@ public enum WhatsAppExportService {
             }
 
             // Sidecar HTML: renders like -max but references media in the sidecar folder via relative links.
-            let sidecarChatURL = sidecarOriginalDir.appendingPathComponent(chatPath.lastPathComponent)
+            let sidecarChatURL = chatPath
             // Write sidecar HTML next to the other outputs (root of outDir) and name it consistently.
 
             try await renderHTML(
@@ -2021,36 +2045,16 @@ public enum WhatsAppExportService {
                 embedAttachments: false,
                 embedAttachmentThumbnailsOnly: false,
                 attachmentRelBaseDir: stagingDir,
+                attachmentOverrideByName: sidecarAttachmentOverride,
                 disableThumbStaging: false,
                 externalAttachments: true,
-                externalPreviews: true,
+                externalPreviews: false,
                 externalAssetsDir: sidecarBaseDir,
                 thumbnailStore: sidecarThumbStore,
                 perfLabel: "Sidecar"
             )
 
             try validateSidecarLayout(sidecarBaseDir: sidecarBaseDir)
-            normalizeOriginalCopyTimestamps(
-                sourceDir: chatPath.deletingLastPathComponent(),
-                destDir: sidecarOriginalDir,
-                skippingPathPrefixes: [
-                    outPath.standardizedFileURL.path,
-                    sidecarBaseDir.standardizedFileURL.path
-                ]
-            )
-            let mismatches = sampleTimestampMismatches(
-                sourceDir: chatPath.deletingLastPathComponent(),
-                destDir: sidecarOriginalDir,
-                maxFiles: 3,
-                maxDirs: 3,
-                skippingPathPrefixes: [
-                    outPath.standardizedFileURL.path,
-                    sidecarBaseDir.standardizedFileURL.path
-                ]
-            )
-            if !mismatches.isEmpty {
-                print("WARN: Zeitstempelabweichung bei \(mismatches.count) Element(en).")
-            }
             didSidecar = true
         }
 
@@ -2068,8 +2072,8 @@ public enum WhatsAppExportService {
             perfLabel: "HTML"
         )
 
-        let mdChatURL = sidecarOriginalDir?.appendingPathComponent(chatPath.lastPathComponent) ?? chatPath
-        let mdAttachmentRelBaseDir: URL? = sidecarOriginalDir != nil ? stagingDir : nil
+        let mdChatURL = chatPath
+        let mdAttachmentRelBaseDir: URL? = sidecarBaseDir != nil ? stagingDir : nil
 
         try renderMD(
             msgs: msgs,
@@ -2079,7 +2083,8 @@ public enum WhatsAppExportService {
             enablePreviews: enablePreviews,
             embedAttachments: embedAttachments,
             embedAttachmentThumbnailsOnly: embedAttachmentThumbnailsOnly,
-            attachmentRelBaseDir: mdAttachmentRelBaseDir
+            attachmentRelBaseDir: mdAttachmentRelBaseDir,
+            attachmentOverrideByName: sidecarAttachmentOverride
         )
 
         func publishMove(_ src: URL, _ dst: URL) throws {
@@ -2224,6 +2229,7 @@ public enum WhatsAppExportService {
         embedAttachmentThumbnailsOnly: Bool,
         thumbnailsUseStoreHref: Bool = false,
         attachmentRelBaseDir: URL? = nil,
+        attachmentOverrideByName: [String: URL]? = nil,
         thumbnailStore: ThumbnailStore? = nil,
         perfLabel: String? = nil
     ) async throws -> URL {
@@ -2242,6 +2248,7 @@ public enum WhatsAppExportService {
             embedAttachmentThumbnailsOnly: embedAttachmentThumbnailsOnly,
             thumbnailsUseStoreHref: thumbnailsUseStoreHref,
             attachmentRelBaseDir: attachmentRelBaseDir,
+            attachmentOverrideByName: attachmentOverrideByName,
             thumbnailStore: thumbnailStore,
             perfLabel: perfLabel
         )
@@ -2253,7 +2260,8 @@ public enum WhatsAppExportService {
         prepared: PreparedExport,
         outDir: URL,
         chatURLOverride: URL? = nil,
-        attachmentRelBaseDir: URL? = nil
+        attachmentRelBaseDir: URL? = nil,
+        attachmentOverrideByName: [String: URL]? = nil
     ) throws -> URL {
         resetStagedAttachmentCache()
 
@@ -2269,7 +2277,8 @@ public enum WhatsAppExportService {
             enablePreviews: true,
             embedAttachments: false,
             embedAttachmentThumbnailsOnly: false,
-            attachmentRelBaseDir: attachmentRelBaseDir
+            attachmentRelBaseDir: attachmentRelBaseDir,
+            attachmentOverrideByName: attachmentOverrideByName
         )
 
         return outMD
@@ -2321,7 +2330,7 @@ public enum WhatsAppExportService {
             )
             : attachmentEntries
 
-        let sidecarOriginalDir = try await exportSortedAttachmentsFolder(
+        let sidecarTree = try await exportSortedAttachmentsFolder(
             chatURL: prepared.chatURL,
             messages: prepared.messages,
             outDir: outPath,
@@ -2331,8 +2340,8 @@ public enum WhatsAppExportService {
             originalZipURL: originalZipURL,
             attachmentEntries: effectiveEntries
         )
-        let sidecarBaseDir = sidecarOriginalDir.deletingLastPathComponent()
-        let sidecarChatURL = sidecarOriginalDir.appendingPathComponent(prepared.chatURL.lastPathComponent)
+        let sidecarBaseDir = sidecarTree.baseDir
+        let sidecarChatURL = prepared.chatURL
 
         var thumbStore: ThumbnailStore? = nil
         if !effectiveEntries.isEmpty {
@@ -2354,9 +2363,10 @@ public enum WhatsAppExportService {
             embedAttachments: false,
             embedAttachmentThumbnailsOnly: false,
             attachmentRelBaseDir: outPath,
+            attachmentOverrideByName: sidecarTree.attachmentURLByName,
             disableThumbStaging: false,
             externalAttachments: true,
-            externalPreviews: true,
+            externalPreviews: false,
             externalAssetsDir: sidecarBaseDir,
             thumbnailStore: thumbStore,
             perfLabel: "Sidecar"
@@ -2494,10 +2504,10 @@ public enum WhatsAppExportService {
             thumbnailStore = thumbContext.reader
         }
 
-        var sidecarOriginalDir: URL? = nil
         var sidecarBaseDir: URL? = nil
+        var sidecarAttachmentOverride: [String: URL]? = nil
         if exportSortedAttachments {
-            let originalDir = try await exportSortedAttachmentsFolder(
+            let sidecarTree = try await exportSortedAttachmentsFolder(
                 chatURL: chatPath,
                 messages: msgs,
                 outDir: stagingDir,
@@ -2506,13 +2516,13 @@ public enum WhatsAppExportService {
                 overridePartnerRaw: nil,
                 attachmentEntries: attachmentEntries
             )
-            sidecarOriginalDir = originalDir
-            sidecarBaseDir = originalDir.deletingLastPathComponent()
+            sidecarBaseDir = sidecarTree.baseDir
+            sidecarAttachmentOverride = sidecarTree.attachmentURLByName
         }
 
         var didSidecar = false
         if exportSortedAttachments {
-            guard let sidecarOriginalDir, let sidecarBaseDir else {
+            guard let sidecarBaseDir else {
                 throw NSError(domain: "WETExport", code: 2, userInfo: [
                     NSLocalizedDescriptionKey: "Sidecar directory missing"
                 ])
@@ -2531,7 +2541,7 @@ public enum WhatsAppExportService {
             }
 
             // Sidecar HTML: renders like -max but references media in the sidecar folder via relative links.
-            let sidecarChatURL = sidecarOriginalDir.appendingPathComponent(chatPath.lastPathComponent)
+            let sidecarChatURL = chatPath
             // Write sidecar HTML next to the other outputs (root of outDir) and name it consistently.
 
             try await renderHTML(
@@ -2544,36 +2554,16 @@ public enum WhatsAppExportService {
                 embedAttachments: false,
                 embedAttachmentThumbnailsOnly: false,
                 attachmentRelBaseDir: stagingDir,
+                attachmentOverrideByName: sidecarAttachmentOverride,
                 disableThumbStaging: false,
                 externalAttachments: true,
-                externalPreviews: true,
+                externalPreviews: false,
                 externalAssetsDir: sidecarBaseDir,
                 thumbnailStore: sidecarThumbStore,
                 perfLabel: "Sidecar"
             )
 
             try validateSidecarLayout(sidecarBaseDir: sidecarBaseDir)
-            normalizeOriginalCopyTimestamps(
-                sourceDir: chatPath.deletingLastPathComponent(),
-                destDir: sidecarOriginalDir,
-                skippingPathPrefixes: [
-                    outPath.standardizedFileURL.path,
-                    sidecarBaseDir.standardizedFileURL.path
-                ]
-            )
-            let mismatches = sampleTimestampMismatches(
-                sourceDir: chatPath.deletingLastPathComponent(),
-                destDir: sidecarOriginalDir,
-                maxFiles: 3,
-                maxDirs: 3,
-                skippingPathPrefixes: [
-                    outPath.standardizedFileURL.path,
-                    sidecarBaseDir.standardizedFileURL.path
-                ]
-            )
-            if !mismatches.isEmpty {
-                print("WARN: Zeitstempelabweichung bei \(mismatches.count) Element(en).")
-            }
             didSidecar = true
         }
 
@@ -2597,8 +2587,8 @@ public enum WhatsAppExportService {
         }
 
         // Render one Markdown (portable)
-        let mdChatURL = sidecarOriginalDir?.appendingPathComponent(chatPath.lastPathComponent) ?? chatPath
-        let mdAttachmentRelBaseDir: URL? = sidecarOriginalDir != nil ? stagingDir : nil
+        let mdChatURL = chatPath
+        let mdAttachmentRelBaseDir: URL? = sidecarBaseDir != nil ? stagingDir : nil
         try renderMD(
             msgs: msgs,
             chatURL: mdChatURL,
@@ -2607,7 +2597,8 @@ public enum WhatsAppExportService {
             enablePreviews: true,
             embedAttachments: false,
             embedAttachmentThumbnailsOnly: false,
-            attachmentRelBaseDir: mdAttachmentRelBaseDir
+            attachmentRelBaseDir: mdAttachmentRelBaseDir,
+            attachmentOverrideByName: sidecarAttachmentOverride
         )
 
         var moveItems: [(src: URL, dst: URL)] = []
@@ -4398,6 +4389,11 @@ public enum WhatsAppExportService {
         let canonicalRelPath: String
     }
 
+    struct SidecarFolderTree: Sendable {
+        let baseDir: URL
+        let attachmentURLByName: [String: URL]
+    }
+
     nonisolated private static func bucketForExtension(_ ext: String) -> SortedAttachmentBucket {
         let e = ext.lowercased()
         switch e {
@@ -4554,20 +4550,13 @@ public enum WhatsAppExportService {
         messages: [WAMessage],
         outDir: URL,
         folderName: String,
-        detectedPartnerRaw: String,
-        overridePartnerRaw: String? = nil,
-        originalZipURL: URL? = nil,
+        detectedPartnerRaw _: String,
+        overridePartnerRaw _: String? = nil,
+        originalZipURL _: URL? = nil,
         attachmentEntries: [AttachmentCanonicalEntry]? = nil
-    ) async throws -> URL {
+    ) async throws -> SidecarFolderTree {
         let fm = FileManager.default
         let sidecarDebugEnabled = ProcessInfo.processInfo.environment["WET_SIDECAR_DEBUG"] == "1"
-
-        struct SidecarMediaCounts {
-            var images: Int = 0
-            var videos: Int = 0
-            var audios: Int = 0
-            var documents: Int = 0
-        }
 
         let baseFolderURL = outDir.appendingPathComponent(folderName, isDirectory: true)
         if fm.fileExists(atPath: baseFolderURL.path) {
@@ -4578,73 +4567,17 @@ public enum WhatsAppExportService {
             print("DEBUG: SIDE: created sidecar base dir: \(baseFolderURL.path)")
         }
 
-        let sentinelURL = baseFolderURL.appendingPathComponent("media-index.json")
-        func writeSidecarSentinel(_ counts: SidecarMediaCounts) throws {
-            let json = """
-            {
-              "schemaVersion": 1,
-              "mediaCounts": {
-                "images": \(counts.images),
-                "videos": \(counts.videos),
-                "audios": \(counts.audios),
-                "documents": \(counts.documents)
-              }
-            }
-            """
-            try json.write(to: sentinelURL, atomically: true, encoding: .utf8)
-        }
-
-        var mediaCounts = SidecarMediaCounts()
-        try writeSidecarSentinel(mediaCounts)
-
-        // Additionally copy the original WhatsApp export folder (the folder that contains chat.txt)
-        // into the sorted attachments folder, preserving the original folder name.
-        // Example: <out>/<folderName>/<OriginalExportFolderName>/chat.txt
-        let sourceDir = chatURL.deletingLastPathComponent().standardizedFileURL
-        let originalNameBefore: String
-        if let originalZipURL {
-            originalNameBefore = originalZipURL.deletingPathExtension().lastPathComponent
-        } else {
-            originalNameBefore = sourceDir.lastPathComponent
-        }
-        let originalFolderName = applyPartnerOverrideToName(
-            originalName: originalNameBefore,
-            detectedPartnerRaw: detectedPartnerRaw,
-            overridePartnerRaw: overridePartnerRaw
-        )
-        let originalCopyDir = baseFolderURL.appendingPathComponent(originalFolderName, isDirectory: true)
-        if fm.fileExists(atPath: originalCopyDir.path) {
-            throw OutputCollisionError(url: originalCopyDir)
-        }
-        try fm.createDirectory(at: originalCopyDir, withIntermediateDirectories: true)
-
-        // Copy recursively, but avoid recursion if the chosen output directory is inside the source directory.
-        // (e.g. user selects the same folder or a subfolder as output)
-        let outDirPath = outDir.standardizedFileURL.path
-        let baseFolderPath = baseFolderURL.standardizedFileURL.path
-        var skipPrefixes = [outDirPath, baseFolderPath]
-        if outDir.lastPathComponent.hasPrefix(".wa_export_tmp_") {
-            let parent = outDir.deletingLastPathComponent().standardizedFileURL.path
-            skipPrefixes.append(parent)
-        }
-        try copyDirectoryPreservingStructure(
-            from: sourceDir,
-            to: originalCopyDir,
-            skippingPathPrefixes: skipPrefixes
-        )
-        
-        try copySiblingZipIfPresent(
-            sourceDir: sourceDir,
-            destParentDir: baseFolderURL,
-            detectedPartnerRaw: detectedPartnerRaw,
-            overridePartnerRaw: overridePartnerRaw,
-            originalZipURL: originalZipURL
-        )
-
         let imagesDir = baseFolderURL.appendingPathComponent(SortedAttachmentBucket.images.rawValue, isDirectory: true)
         let videosDir = baseFolderURL.appendingPathComponent(SortedAttachmentBucket.videos.rawValue, isDirectory: true)
         let audiosDir = baseFolderURL.appendingPathComponent(SortedAttachmentBucket.audios.rawValue, isDirectory: true)
         let docsDir = baseFolderURL.appendingPathComponent(SortedAttachmentBucket.documents.rawValue, isDirectory: true)
+        let thumbsDir = baseFolderURL.appendingPathComponent("_thumbs", isDirectory: true)
+
+        try fm.createDirectory(at: imagesDir, withIntermediateDirectories: true)
+        try fm.createDirectory(at: videosDir, withIntermediateDirectories: true)
+        try fm.createDirectory(at: audiosDir, withIntermediateDirectories: true)
+        try fm.createDirectory(at: docsDir, withIntermediateDirectories: true)
+        try fm.createDirectory(at: thumbsDir, withIntermediateDirectories: true)
 
         let chatSourceDir = chatURL.deletingLastPathComponent()
         let entries = attachmentEntries ?? buildAttachmentCanonicalEntries(
@@ -4652,10 +4585,9 @@ public enum WhatsAppExportService {
             chatSourceDir: chatSourceDir
         )
 
-        // If there are no attachments, keep the bucket folders absent.
-        if entries.isEmpty { return originalCopyDir }
-
-        var bucketsWithContent = Set<SortedAttachmentBucket>()
+        if entries.isEmpty {
+            return SidecarFolderTree(baseDir: baseFolderURL, attachmentURLByName: [:])
+        }
 
         struct SidecarAttachmentJob {
             let src: URL
@@ -4666,6 +4598,8 @@ public enum WhatsAppExportService {
         var jobs: [SidecarAttachmentJob] = []
         jobs.reserveCapacity(entries.count)
         var dstSeen = Set<String>()
+        var attachmentURLByName: [String: URL] = [:]
+        attachmentURLByName.reserveCapacity(entries.count)
 
         for entry in entries {
             try Task.checkCancellation()
@@ -4683,21 +4617,9 @@ public enum WhatsAppExportService {
             if !dstSeen.insert(dst.path).inserted {
                 throw OutputCollisionError(url: dst)
             }
+            attachmentURLByName[entry.fileName] = dst
 
             jobs.append(SidecarAttachmentJob(src: src, dst: dst, bucket: bucket))
-        }
-
-        let bucketsToCreate = Set(jobs.map(\.bucket))
-        for bucket in bucketsToCreate {
-            let dstFolder: URL = {
-                switch bucket {
-                case .images: return imagesDir
-                case .videos: return videosDir
-                case .audios: return audiosDir
-                case .documents: return docsDir
-                }
-            }()
-            try fm.createDirectory(at: dstFolder, withIntermediateDirectories: true)
         }
 
         let caps = wetConcurrencyCaps
@@ -4732,62 +4654,7 @@ public enum WhatsAppExportService {
                 results[idx] = bucket
             }
         }
-
-        for bucket in results.compactMap({ $0 }) {
-            bucketsWithContent.insert(bucket)
-            switch bucket {
-            case .images:
-                mediaCounts.images += 1
-            case .videos:
-                mediaCounts.videos += 1
-            case .audios:
-                mediaCounts.audios += 1
-            case .documents:
-                mediaCounts.documents += 1
-            }
-        }
-
-        let bucketDirs: [SortedAttachmentBucket: URL] = [
-            .images: imagesDir,
-            .videos: videosDir,
-            .audios: audiosDir,
-            .documents: docsDir
-        ]
-        for bucket in bucketsToCreate where !bucketsWithContent.contains(bucket) {
-            if let dir = bucketDirs[bucket], isDirectoryEmptyRecursive(dir) {
-                if sidecarDebugEnabled {
-                    print("WET-DBG: removeItem: \(dir.path)")
-                }
-                try? fm.removeItem(at: dir)
-            }
-        }
-
-        try writeSidecarSentinel(mediaCounts)
-
-        if isDirectoryEmptyFirstLevel(baseFolderURL) {
-            if sidecarDebugEnabled {
-                print("DEBUG: SIDE: base dir empty after staging; re-seeding sentinel/original copy")
-            }
-            if !fm.fileExists(atPath: baseFolderURL.path) {
-                try fm.createDirectory(at: baseFolderURL, withIntermediateDirectories: true)
-            }
-            if !fm.fileExists(atPath: sentinelURL.path) {
-                try writeSidecarSentinel(mediaCounts)
-            }
-            if !fm.fileExists(atPath: originalCopyDir.path) {
-                try fm.createDirectory(at: originalCopyDir, withIntermediateDirectories: true)
-            }
-        }
-
-        let thumbsDir = baseFolderURL.appendingPathComponent("_thumbs", isDirectory: true)
-        if fm.fileExists(atPath: thumbsDir.path), isDirectoryEmptyRecursive(thumbsDir) {
-            if sidecarDebugEnabled {
-                print("WET-DBG: removeItem: \(thumbsDir.path)")
-            }
-            try? fm.removeItem(at: thumbsDir)
-        }
-
-        return originalCopyDir
+        return SidecarFolderTree(baseDir: baseFolderURL, attachmentURLByName: attachmentURLByName)
     }
 
     nonisolated private static func stripAttachmentMarkers(_ text: String) -> String {
@@ -6141,6 +6008,7 @@ nonisolated private static func stageThumbnailForExport(
         embedAttachmentThumbnailsOnly: Bool,
         thumbnailsUseStoreHref: Bool = false,
         attachmentRelBaseDir: URL? = nil,
+        attachmentOverrideByName: [String: URL]? = nil,
         disableThumbStaging: Bool = false,
         externalAttachments: Bool = false,
         externalPreviews: Bool = false,
@@ -6680,10 +6548,12 @@ nonisolated private static func stageThumbnailForExport(
             var embedCounter = 0
             for fn in attachments {
                 try Task.checkCancellation()
+                let override = attachmentOverrideByName?[fn]
                 let direct = chatDir.appendingPathComponent(fn).standardizedFileURL
-                let p = FileManager.default.fileExists(atPath: direct.path)
+                let resolved = FileManager.default.fileExists(atPath: direct.path)
                     ? direct
                     : (resolveAttachmentURL(fileName: fn, sourceDir: chatDir) ?? direct)
+                let p = (override != nil && FileManager.default.fileExists(atPath: override!.path)) ? override! : resolved
                 let ext = p.pathExtension.lowercased()
 
                 if embedAttachmentThumbnailsOnly {
@@ -7115,7 +6985,8 @@ nonisolated private static func stageThumbnailForExport(
         enablePreviews: Bool,
         embedAttachments: Bool,
         embedAttachmentThumbnailsOnly: Bool,
-        attachmentRelBaseDir: URL? = nil
+        attachmentRelBaseDir: URL? = nil,
+        attachmentOverrideByName: [String: URL]? = nil
     ) throws {
 
         var authors: [String] = []
@@ -7231,7 +7102,9 @@ nonisolated private static func stageThumbnailForExport(
                     }
 
                     // Resolve file location (direct or Media/ or recursive)
-                    guard let src = resolveAttachmentURL(fileName: fn, sourceDir: sourceDir) else {
+                    let override = attachmentOverrideByName?[fn]
+                    let resolved = resolveAttachmentURL(fileName: fn, sourceDir: sourceDir)
+                    guard let src = override ?? resolved else {
                         out.append("- \(emoji) \(fn)")
                         continue
                     }
@@ -7528,7 +7401,8 @@ nonisolated private static func stageThumbnailForExport(
     nonisolated static func validateSidecarLayout(sidecarBaseDir: URL) throws {
         let fm = FileManager.default
         let base = sidecarBaseDir.standardizedFileURL
-        let debugEnabled = ProcessInfo.processInfo.environment["WET_SIDECAR_DEBUG"] == "1"
+        try cleanupTemporaryExportFolders(in: base)
+
         guard let contents = try? fm.contentsOfDirectory(
             at: base,
             includingPropertiesForKeys: [.isDirectoryKey],
@@ -7537,45 +7411,41 @@ nonisolated private static func stageThumbnailForExport(
             return
         }
 
-        try cleanupTemporaryExportFolders(in: base)
-
-        var dirURLs: [String: URL] = [:]
-        for u in contents {
-            let rv = try? u.resourceValues(forKeys: [.isDirectoryKey])
-            if rv?.isDirectory == true {
-                dirURLs[u.lastPathComponent] = u
-            }
-        }
-
-        // Do not auto-delete _thumbs/_previews: they may be populated during rendering and must be published when present.
-        let knownBuckets = ["images", "videos", "audios", "documents"]
-        for name in knownBuckets {
-            if let url = dirURLs[name], isDirectoryEmptyRecursive(url) {
-                if debugEnabled {
-                    print("WET-DBG: removeItem: \(url.path)")
-                }
-                try? fm.removeItem(at: url)
-                dirURLs.removeValue(forKey: name)
-            }
-        }
-
-        let transcriptCandidates = ["Chat.txt", "_chat.txt"]
-        let originalFolderName: String? = dirURLs.first(where: { element in
-            transcriptCandidates.contains { candidate in
-                fm.fileExists(atPath: element.value.appendingPathComponent(candidate).path)
-            }
-        })?.key
+        let requiredDirs: Set<String> = [
+            "images",
+            "videos",
+            "audios",
+            "documents",
+            "_thumbs"
+        ]
 
         var suffixArtifacts: [String] = []
-        for name in dirURLs.keys {
-            if name == originalFolderName { continue }
+        var unexpectedEntries: [String] = []
+        var foundRequired: Set<String> = []
+        for u in contents {
+            let name = u.lastPathComponent
             if suffixBaseNameIfPresent(name) != nil {
                 suffixArtifacts.append(name)
             }
+            if requiredDirs.contains(name) {
+                let isDir = (try? u.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+                if isDir {
+                    foundRequired.insert(name)
+                } else {
+                    unexpectedEntries.append(name)
+                }
+            } else {
+                unexpectedEntries.append(name)
+            }
         }
 
-        if !suffixArtifacts.isEmpty {
-            throw SidecarValidationError(suffixArtifacts: suffixArtifacts.sorted())
+        let missingRequired = requiredDirs.subtracting(foundRequired)
+        if !suffixArtifacts.isEmpty || !unexpectedEntries.isEmpty || !missingRequired.isEmpty {
+            throw SidecarValidationError(
+                suffixArtifacts: suffixArtifacts.sorted(),
+                unexpectedEntries: unexpectedEntries.sorted(),
+                missingRequiredDirectories: missingRequired.sorted()
+            )
         }
     }
 
@@ -7740,6 +7610,50 @@ nonisolated private static func stageThumbnailForExport(
             if fileCount >= maxFiles && dirCount >= maxDirs { break }
         }
 
+        return mismatches
+    }
+
+    nonisolated static func normalizeSidecarMediaTimestamps(
+        entries: [AttachmentCanonicalEntry],
+        sidecarBaseDir: URL
+    ) {
+        let fm = FileManager.default
+        let base = sidecarBaseDir.standardizedFileURL
+        guard fm.fileExists(atPath: base.path) else { return }
+
+        for entry in entries {
+            let dst = base.appendingPathComponent(entry.canonicalRelPath)
+            guard fm.fileExists(atPath: dst.path) else { continue }
+            syncFileSystemTimestamps(from: entry.sourceURL, to: dst)
+        }
+    }
+
+    nonisolated static func sampleSidecarMediaTimestampMismatches(
+        entries: [AttachmentCanonicalEntry],
+        sidecarBaseDir: URL,
+        maxFiles: Int
+    ) -> [String] {
+        let fm = FileManager.default
+        let base = sidecarBaseDir.standardizedFileURL
+        guard fm.fileExists(atPath: base.path) else { return [] }
+
+        var mismatches: [String] = []
+        var count = 0
+        for entry in entries {
+            if count >= maxFiles { break }
+            let dst = base.appendingPathComponent(entry.canonicalRelPath)
+            guard fm.fileExists(atPath: dst.path) else {
+                mismatches.append(entry.canonicalRelPath)
+                count += 1
+                continue
+            }
+            let srcAttrs = try? fm.attributesOfItem(atPath: entry.sourceURL.path)
+            let dstAttrs = try? fm.attributesOfItem(atPath: dst.path)
+            if !timestampsMatch(srcAttrs, dstAttrs) {
+                mismatches.append(entry.canonicalRelPath)
+            }
+            count += 1
+        }
         return mismatches
     }
 
