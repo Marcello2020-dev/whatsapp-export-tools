@@ -153,7 +153,7 @@ struct ContentView: View {
 
         /// Whether to fetch/render online link previews.
         /// Per requirement: disabled only for the minimal text-only variant.
-        var enablePreviews: Bool {
+        nonisolated var enablePreviews: Bool {
             switch self {
             case .textOnly: return false
             case .embedAll, .thumbnailsOnly: return true
@@ -161,7 +161,7 @@ struct ContentView: View {
         }
 
         /// Whether to embed any attachment representation into the HTML.
-        var embedAttachments: Bool {
+        nonisolated var embedAttachments: Bool {
             switch self {
             case .textOnly: return false
             case .embedAll, .thumbnailsOnly: return true
@@ -169,7 +169,7 @@ struct ContentView: View {
         }
 
         /// If attachments are embedded, whether to embed thumbnails only (no full attachment payload).
-        var thumbnailsOnly: Bool {
+        nonisolated var thumbnailsOnly: Bool {
             switch self {
             case .embedAll: return false
             case .thumbnailsOnly: return true
@@ -3158,6 +3158,8 @@ struct ContentView: View {
                         sidecarSnapshot = captureSidecarTimestampSnapshot(sidecarBaseDir: finalSidecarDir)
                     }
                 case .html(let variant):
+                    let useThumbHrefs = context.wantsSidecar && variant.thumbnailsOnly
+                    let thumbRelBaseDir = useThumbHrefs ? exportDir : nil
                     let stagedHTML = try await Self.debugMeasureAsync("generate \(artifactLabel(.html(variant)))") {
                         try await WhatsAppExportService.renderHTMLPrepared(
                             prepared: prepared,
@@ -3166,6 +3168,8 @@ struct ContentView: View {
                             enablePreviews: variant.enablePreviews,
                             embedAttachments: variant.embedAttachments,
                             embedAttachmentThumbnailsOnly: variant.thumbnailsOnly,
+                            thumbnailsUseStoreHref: useThumbHrefs,
+                            attachmentRelBaseDir: thumbRelBaseDir,
                             thumbnailStore: thumbnailStore,
                             perfLabel: artifactLabel(.html(variant))
                         )

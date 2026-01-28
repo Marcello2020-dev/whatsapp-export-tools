@@ -2062,6 +2062,8 @@ public enum WhatsAppExportService {
             enablePreviews: enablePreviews,
             embedAttachments: embedAttachments,
             embedAttachmentThumbnailsOnly: embedAttachmentThumbnailsOnly,
+            thumbnailsUseStoreHref: exportSortedAttachments && embedAttachmentThumbnailsOnly,
+            attachmentRelBaseDir: (exportSortedAttachments && embedAttachmentThumbnailsOnly) ? stagingDir : nil,
             thumbnailStore: thumbnailStore,
             perfLabel: "HTML"
         )
@@ -2220,6 +2222,8 @@ public enum WhatsAppExportService {
         enablePreviews: Bool,
         embedAttachments: Bool,
         embedAttachmentThumbnailsOnly: Bool,
+        thumbnailsUseStoreHref: Bool = false,
+        attachmentRelBaseDir: URL? = nil,
         thumbnailStore: ThumbnailStore? = nil,
         perfLabel: String? = nil
     ) async throws -> URL {
@@ -2236,6 +2240,8 @@ public enum WhatsAppExportService {
             enablePreviews: enablePreviews,
             embedAttachments: embedAttachments,
             embedAttachmentThumbnailsOnly: embedAttachmentThumbnailsOnly,
+            thumbnailsUseStoreHref: thumbnailsUseStoreHref,
+            attachmentRelBaseDir: attachmentRelBaseDir,
             thumbnailStore: thumbnailStore,
             perfLabel: perfLabel
         )
@@ -2574,6 +2580,7 @@ public enum WhatsAppExportService {
         // Render all HTML variants
         for v in variants {
             guard let outHTML = stagedHTMLByVariant[v] else { continue }
+            let useThumbHrefs = exportSortedAttachments && v.embedAttachmentThumbnailsOnly
             try await renderHTML(
                 msgs: msgs,
                 chatURL: chatPath,
@@ -2582,6 +2589,8 @@ public enum WhatsAppExportService {
                 enablePreviews: v.enablePreviews,
                 embedAttachments: v.embedAttachments,
                 embedAttachmentThumbnailsOnly: v.embedAttachmentThumbnailsOnly,
+                thumbnailsUseStoreHref: useThumbHrefs,
+                attachmentRelBaseDir: useThumbHrefs ? stagingDir : nil,
                 thumbnailStore: thumbnailStore,
                 perfLabel: v.perfLabel
             )
@@ -6130,6 +6139,7 @@ nonisolated private static func stageThumbnailForExport(
         enablePreviews: Bool,
         embedAttachments: Bool,
         embedAttachmentThumbnailsOnly: Bool,
+        thumbnailsUseStoreHref: Bool = false,
         attachmentRelBaseDir: URL? = nil,
         disableThumbStaging: Bool = false,
         externalAttachments: Bool = false,
@@ -6679,15 +6689,25 @@ nonisolated private static func stageThumbnailForExport(
                 if embedAttachmentThumbnailsOnly {
                     // Thumbnails-only mode must produce a standalone HTML (no ./attachments folder):
                     // - Do NOT stage/copy attachments to disk.
-                    // - Embed ONLY a lightweight thumbnail as a data: URL.
+                    // - Embed ONLY a lightweight thumbnail (data: URL) or reference shared thumbs.
                     // - Do NOT wrap thumbnails in <a href=...> and do NOT print any file link/text line.
 
-                    if let thumbDataURL = await thumbnailStoreRef?.thumbnailDataURL(fileName: fn, allowOriginalFallback: true) {
-                        let isImage = ["jpg","jpeg","png","gif","webp","heic","heif"].contains(ext)
-                        mediaBlocks.append(
-                            "<div class='media\(isImage ? " media-img" : "")'><img alt='' src='\(htmlEscape(thumbDataURL))'></div>"
-                        )
-                        continue
+                    if thumbnailsUseStoreHref {
+                        if let thumbHref = await thumbnailStoreRef?.thumbnailHref(fileName: fn, relativeTo: attachmentRelBaseDir) {
+                            let isImage = ["jpg","jpeg","png","gif","webp","heic","heif"].contains(ext)
+                            mediaBlocks.append(
+                                "<div class='media\(isImage ? " media-img" : "")'><img alt='' src='\(htmlEscape(thumbHref))'></div>"
+                            )
+                            continue
+                        }
+                    } else {
+                        if let thumbDataURL = await thumbnailStoreRef?.thumbnailDataURL(fileName: fn, allowOriginalFallback: true) {
+                            let isImage = ["jpg","jpeg","png","gif","webp","heic","heif"].contains(ext)
+                            mediaBlocks.append(
+                                "<div class='media\(isImage ? " media-img" : "")'><img alt='' src='\(htmlEscape(thumbDataURL))'></div>"
+                            )
+                            continue
+                        }
                     }
 
                     // Fallback (no thumbnail available): show a non-clickable filename line.
