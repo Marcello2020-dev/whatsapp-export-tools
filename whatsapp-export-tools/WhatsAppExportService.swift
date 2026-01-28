@@ -1158,6 +1158,47 @@ public enum WhatsAppExportService {
         }
     }
 
+    struct ThumbnailStoreContext {
+        let writer: ThumbnailStore?
+        let reader: ThumbnailStore?
+        let tempRoot: URL?
+    }
+
+    enum ThumbnailStoreMode {
+        case temp(baseName: String, chatURL: URL, stagingBase: URL)
+        case sidecar(thumbsDir: URL)
+    }
+
+    nonisolated static func prepareThumbnailStoreContext(
+        wantsThumbs: Bool,
+        attachmentEntries: [AttachmentCanonicalEntry],
+        mode: ThumbnailStoreMode
+    ) async throws -> ThumbnailStoreContext {
+        guard wantsThumbs, !attachmentEntries.isEmpty else {
+            return ThumbnailStoreContext(writer: nil, reader: nil, tempRoot: nil)
+        }
+
+        let fm = FileManager.default
+        switch mode {
+        case .temp(let baseName, let chatURL, let stagingBase):
+            let tempRoot = temporaryThumbsWorkspace(baseName: baseName, chatURL: chatURL, stagingBase: stagingBase)
+            if fm.fileExists(atPath: tempRoot.path) {
+                try? fm.removeItem(at: tempRoot)
+            }
+            try fm.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+            let tempThumbsDir = tempRoot.appendingPathComponent("_thumbs", isDirectory: true)
+            let writeStore = ThumbnailStore(entries: attachmentEntries, thumbsDir: tempThumbsDir, allowWrite: true)
+            await writeStore.precomputeAll()
+            let readStore = ThumbnailStore(entries: attachmentEntries, thumbsDir: tempThumbsDir, allowWrite: false)
+            return ThumbnailStoreContext(writer: nil, reader: readStore, tempRoot: tempRoot)
+        case .sidecar(let thumbsDir):
+            let writeStore = ThumbnailStore(entries: attachmentEntries, thumbsDir: thumbsDir, allowWrite: true)
+            await writeStore.precomputeAll()
+            let readStore = ThumbnailStore(entries: attachmentEntries, thumbsDir: thumbsDir, allowWrite: false)
+            return ThumbnailStoreContext(writer: writeStore, reader: readStore, tempRoot: nil)
+        }
+    }
+
     // ---------------------------
     // Public API
     // ---------------------------
@@ -1919,17 +1960,14 @@ public enum WhatsAppExportService {
         let stagedSidecarDir = stagingDir.appendingPathComponent(base, isDirectory: true)
 
         var thumbnailStore: ThumbnailStore? = nil
-        if wantsThumbs, !exportSortedAttachments, !attachmentEntries.isEmpty {
-            let tempRoot = temporaryThumbsWorkspace(baseName: base, chatURL: chatPath, stagingBase: stagingBase)
-            tempThumbsRoot = tempRoot
-            if fm.fileExists(atPath: tempRoot.path) {
-                try? fm.removeItem(at: tempRoot)
-            }
-            try fm.createDirectory(at: tempRoot, withIntermediateDirectories: true)
-            let tempThumbsDir = tempRoot.appendingPathComponent("_thumbs", isDirectory: true)
-            let writeStore = ThumbnailStore(entries: attachmentEntries, thumbsDir: tempThumbsDir, allowWrite: true)
-            await writeStore.precomputeAll()
-            thumbnailStore = ThumbnailStore(entries: attachmentEntries, thumbsDir: tempThumbsDir, allowWrite: false)
+        if wantsThumbs, !exportSortedAttachments {
+            let thumbContext = try await prepareThumbnailStoreContext(
+                wantsThumbs: wantsThumbs,
+                attachmentEntries: attachmentEntries,
+                mode: .temp(baseName: base, chatURL: chatPath, stagingBase: stagingBase)
+            )
+            tempThumbsRoot = thumbContext.tempRoot
+            thumbnailStore = thumbContext.reader
         }
 
         var sidecarOriginalDir: URL? = nil
@@ -1960,10 +1998,13 @@ public enum WhatsAppExportService {
             var sidecarThumbStore: ThumbnailStore? = nil
             if wantsThumbs, !attachmentEntries.isEmpty {
                 let thumbsDir = sidecarBaseDir.appendingPathComponent("_thumbs", isDirectory: true)
-                let store = ThumbnailStore(entries: attachmentEntries, thumbsDir: thumbsDir, allowWrite: true)
-                await store.precomputeAll()
-                sidecarThumbStore = store
-                thumbnailStore = ThumbnailStore(entries: attachmentEntries, thumbsDir: thumbsDir, allowWrite: false)
+                let thumbContext = try await prepareThumbnailStoreContext(
+                    wantsThumbs: wantsThumbs,
+                    attachmentEntries: attachmentEntries,
+                    mode: .sidecar(thumbsDir: thumbsDir)
+                )
+                sidecarThumbStore = thumbContext.writer
+                thumbnailStore = thumbContext.reader
             }
 
             // Sidecar HTML: renders like -max but references media in the sidecar folder via relative links.
@@ -2290,9 +2331,12 @@ public enum WhatsAppExportService {
         var thumbStore: ThumbnailStore? = nil
         if !effectiveEntries.isEmpty {
             let thumbsDir = sidecarBaseDir.appendingPathComponent("_thumbs", isDirectory: true)
-            let store = ThumbnailStore(entries: effectiveEntries, thumbsDir: thumbsDir, allowWrite: true)
-            await store.precomputeAll()
-            thumbStore = store
+            let thumbContext = try await prepareThumbnailStoreContext(
+                wantsThumbs: true,
+                attachmentEntries: effectiveEntries,
+                mode: .sidecar(thumbsDir: thumbsDir)
+            )
+            thumbStore = thumbContext.writer
         }
 
         try await renderHTML(
@@ -2434,17 +2478,14 @@ public enum WhatsAppExportService {
         let stagedSidecarDir = stagingDir.appendingPathComponent(base, isDirectory: true)
 
         var thumbnailStore: ThumbnailStore? = nil
-        if wantsThumbs, !exportSortedAttachments, !attachmentEntries.isEmpty {
-            let tempRoot = temporaryThumbsWorkspace(baseName: base, chatURL: chatPath, stagingBase: stagingBase)
-            tempThumbsRoot = tempRoot
-            if fm.fileExists(atPath: tempRoot.path) {
-                try? fm.removeItem(at: tempRoot)
-            }
-            try fm.createDirectory(at: tempRoot, withIntermediateDirectories: true)
-            let tempThumbsDir = tempRoot.appendingPathComponent("_thumbs", isDirectory: true)
-            let writeStore = ThumbnailStore(entries: attachmentEntries, thumbsDir: tempThumbsDir, allowWrite: true)
-            await writeStore.precomputeAll()
-            thumbnailStore = ThumbnailStore(entries: attachmentEntries, thumbsDir: tempThumbsDir, allowWrite: false)
+        if wantsThumbs, !exportSortedAttachments {
+            let thumbContext = try await prepareThumbnailStoreContext(
+                wantsThumbs: wantsThumbs,
+                attachmentEntries: attachmentEntries,
+                mode: .temp(baseName: base, chatURL: chatPath, stagingBase: stagingBase)
+            )
+            tempThumbsRoot = thumbContext.tempRoot
+            thumbnailStore = thumbContext.reader
         }
 
         var sidecarOriginalDir: URL? = nil
@@ -2474,10 +2515,13 @@ public enum WhatsAppExportService {
             var sidecarThumbStore: ThumbnailStore? = nil
             if wantsThumbs, !attachmentEntries.isEmpty {
                 let thumbsDir = sidecarBaseDir.appendingPathComponent("_thumbs", isDirectory: true)
-                let store = ThumbnailStore(entries: attachmentEntries, thumbsDir: thumbsDir, allowWrite: true)
-                await store.precomputeAll()
-                sidecarThumbStore = store
-                thumbnailStore = ThumbnailStore(entries: attachmentEntries, thumbsDir: thumbsDir, allowWrite: false)
+                let thumbContext = try await prepareThumbnailStoreContext(
+                    wantsThumbs: wantsThumbs,
+                    attachmentEntries: attachmentEntries,
+                    mode: .sidecar(thumbsDir: thumbsDir)
+                )
+                sidecarThumbStore = thumbContext.writer
+                thumbnailStore = thumbContext.reader
             }
 
             // Sidecar HTML: renders like -max but references media in the sidecar folder via relative links.

@@ -2953,30 +2953,16 @@ struct ContentView: View {
         var expectedSidecarAttachments = 0
         var didPublishExternalAssets = false
 
-        if wantsThumbStore, !context.wantsSidecar, !attachmentEntries.isEmpty {
-            let tempRoot = WhatsAppExportService.temporaryThumbsWorkspace(
-                baseName: baseName,
-                chatURL: prepared.chatURL,
-                stagingBase: stagingBase
+        if wantsThumbStore, !context.wantsSidecar {
+            let thumbContext = try await WhatsAppExportService.prepareThumbnailStoreContext(
+                wantsThumbs: wantsThumbStore,
+                attachmentEntries: attachmentEntries,
+                mode: .temp(baseName: baseName, chatURL: prepared.chatURL, stagingBase: stagingBase)
             )
-            tempThumbsRoot = tempRoot
-            if fm.fileExists(atPath: tempRoot.path) {
-                try? fm.removeItem(at: tempRoot)
-            }
-            try fm.createDirectory(at: tempRoot, withIntermediateDirectories: true)
-            let tempThumbsDir = tempRoot.appendingPathComponent("_thumbs", isDirectory: true)
-            let writeStore = WhatsAppExportService.ThumbnailStore(
-                entries: attachmentEntries,
-                thumbsDir: tempThumbsDir,
-                allowWrite: true
-            )
-            await writeStore.precomputeAll()
-            thumbnailStore = WhatsAppExportService.ThumbnailStore(
-                entries: attachmentEntries,
-                thumbsDir: tempThumbsDir,
-                allowWrite: false
-            )
-            if debugEnabled {
+            tempThumbsRoot = thumbContext.tempRoot
+            thumbnailStore = thumbContext.reader
+            if debugEnabled, let tempThumbsRoot {
+                let tempThumbsDir = tempThumbsRoot.appendingPathComponent("_thumbs", isDirectory: true)
                 debugLog("THUMBS TEMP: \(tempThumbsDir.path)")
             }
         }
