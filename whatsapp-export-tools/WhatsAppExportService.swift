@@ -3426,31 +3426,27 @@ public enum WhatsAppExportService {
             return out.joined(separator: "/")
         }
 
-        func offsetMismatchInfo(candidate: Date, dos: Date) -> (delta: Int, offset: Int, dst: Int)? {
-            let delta = Int((candidate.timeIntervalSince1970 - dos.timeIntervalSince1970).rounded())
-            let offset = TimePolicy.canonicalTimeZone.secondsFromGMT(for: dos)
-            let dst = Int(TimePolicy.canonicalTimeZone.daylightSavingTimeOffset(for: dos).rounded())
-            let diffOffset = abs(abs(delta) - abs(offset))
-            if offset != 0, diffOffset <= 2 {
-                return (delta, offset, dst)
-            }
-            let diffDst = abs(abs(delta) - abs(dst))
-            if dst != 0, diffDst <= 2 {
-                return (delta, offset, dst)
-            }
+        func selectCandidate(_ entry: ZipTimestampEntry) -> (Date, ZipTimestampSource)? {
+            if let d = entry.utLocal { return (d, .utLocal) }
+            if let d = entry.utCentral { return (d, .utCentral) }
+            if let d = entry.ntfsLocal { return (d, .ntfsLocal) }
+            if let d = entry.ntfsCentral { return (d, .ntfsCentral) }
+            if let d = entry.dosDateLocal ?? entry.dosDateCentral { return (d, .dos) }
             return nil
         }
 
-        func pickCandidate(_ date: Date?, source: ZipTimestampSource, dos: Date?, rel: String) -> (Date, ZipTimestampSource)? {
-            guard let date else { return nil }
-            if let dos, let mismatch = offsetMismatchInfo(candidate: date, dos: dos) {
-                if debugEnabled {
-                    let relSanitized = sanitizeDebugPath(rel)
-                    print("WET-DBG: ZIP mtime skip path=\(relSanitized) source=\(source.rawValue) delta=\(mismatch.delta)s offset=\(mismatch.offset)s dst=\(mismatch.dst)s")
-                }
-                return nil
+        func offsetMismatch(candidate: Date, extracted: Date) -> (delta: Int, offset: Int)? {
+            let delta = Int((candidate.timeIntervalSince1970 - extracted.timeIntervalSince1970).rounded())
+            let offset = TimeZone.current.secondsFromGMT(for: extracted)
+            let diffOffset = abs(abs(delta) - abs(offset))
+            if offset != 0, diffOffset <= 2 {
+                return (delta, offset)
             }
-            return (date, source)
+            let diff3600 = abs(abs(delta) - 3600)
+            if diff3600 <= 2 {
+                return (delta, offset)
+            }
+            return nil
         }
 
         for entry in entries {
@@ -3460,51 +3456,84 @@ public enum WhatsAppExportService {
             if rel.hasSuffix("/") { rel.removeLast() }
             if rel.isEmpty { continue }
 
-            let candidate = URL(fileURLWithPath: rel, relativeTo: root).standardizedFileURL
-            let candidatePath = candidate.path
+            let candidateURL = URL(fileURLWithPath: rel, relativeTo: root).standardizedFileURL
+            let candidatePath = candidateURL.path
             guard candidatePath.hasPrefix(rootPath) else { continue }
             let target: URL = {
-                if fm.fileExists(atPath: candidatePath) { return candidate }
+                if fm.fileExists(atPath: candidatePath) { return candidateURL }
                 if let fallback = fallbackURL(for: rel) { return fallback.standardizedFileURL }
-                return candidate
+                return candidateURL
             }()
             let targetPath = target.path
             guard targetPath.hasPrefix(rootPath), fm.fileExists(atPath: targetPath) else { continue }
 
-            let dosRef = entry.dosDateLocal ?? entry.dosDateCentral
-            let chosen: (Date, ZipTimestampSource)? =
-                pickCandidate(entry.utLocal, source: .utLocal, dos: dosRef, rel: rel)
-                ?? pickCandidate(entry.utCentral, source: .utCentral, dos: dosRef, rel: rel)
-                ?? pickCandidate(entry.ntfsLocal, source: .ntfsLocal, dos: dosRef, rel: rel)
-                ?? pickCandidate(entry.ntfsCentral, source: .ntfsCentral, dos: dosRef, rel: rel)
-                ?? pickCandidate(dosRef, source: .dos, dos: nil, rel: rel)
+            let extractedMTime = (try? fm.attributesOfItem(atPath: targetPath))?[.modificationDate] as? Date
+            let candidate = selectCandidate(entry)
 
-            guard let (appliedDate, source) = chosen else { continue }
-            do {
-                try fm.setAttributes([.modificationDate: appliedDate], ofItemAtPath: targetPath)
-            } catch {
-                if debugEnabled {
-                    print("WET-DBG: ZIP mtime apply failed for \(sanitizeDebugPath(rel))")
+            var appliedDate: Date
+            var appliedSource: ZipTimestampSource
+            var appliedAction: String
+
+            if let extracted = extractedMTime, let (candidateDate, source) = candidate {
+                let delta = abs(candidateDate.timeIntervalSince1970 - extracted.timeIntervalSince1970)
+                if delta <= 2.0 {
+                    appliedDate = candidateDate
+                    appliedSource = source
+                    appliedAction = "override"
+                } else {
+                    appliedDate = extracted
+                    appliedSource = source
+                    appliedAction = "keep-extracted"
+                    if debugEnabled, let mismatch = offsetMismatch(candidate: candidateDate, extracted: extracted) {
+                        let relSanitized = sanitizeDebugPath(rel)
+                        print("WET-DBG: ZIP mtime keep path=\(relSanitized) source=\(source.rawValue) delta=\(mismatch.delta)s offset=\(mismatch.offset)s")
+                    }
                 }
-                throw ZipTimestampError.timestampApplyFailed
+            } else if let extracted = extractedMTime {
+                appliedDate = extracted
+                appliedSource = candidate?.1 ?? .dos
+                appliedAction = "keep-extracted"
+            } else if let (candidateDate, source) = candidate {
+                appliedDate = candidateDate
+                appliedSource = source
+                appliedAction = "zip-metadata"
+            } else {
+                continue
+            }
+
+            do {
+                try fm.setAttributes([.creationDate: appliedDate, .modificationDate: appliedDate], ofItemAtPath: targetPath)
+            } catch {
+                do {
+                    try fm.setAttributes([.modificationDate: appliedDate], ofItemAtPath: targetPath)
+                    if debugEnabled {
+                        let relSanitized = sanitizeDebugPath(rel)
+                        print("WET-DBG: ZIP mtime apply partial path=\(relSanitized)")
+                    }
+                } catch {
+                    if debugEnabled {
+                        print("WET-DBG: ZIP mtime apply failed for \(sanitizeDebugPath(rel))")
+                    }
+                    throw ZipTimestampError.timestampApplyFailed
+                }
             }
 
             if debugEnabled {
                 let isPDF = rel.lowercased().hasSuffix(".pdf")
                 if isPDF {
                     let epoch = Int(appliedDate.timeIntervalSince1970.rounded())
-                    print("WET-DBG: ZIP mtime set path=\(sanitizeDebugPath(rel)) source=\(source.rawValue) epoch=\(epoch)")
+                    print("WET-DBG: ZIP mtime set path=\(sanitizeDebugPath(rel)) source=\(appliedSource.rawValue) action=\(appliedAction) epoch=\(epoch)")
                 }
                 if let actual = (try? fm.attributesOfItem(atPath: targetPath))?[.modificationDate] as? Date {
                     let delta = abs(actual.timeIntervalSince1970 - appliedDate.timeIntervalSince1970)
                     if delta > 2.0 {
                         let intendedEpoch = Int(appliedDate.timeIntervalSince1970.rounded())
                         let actualEpoch = Int(actual.timeIntervalSince1970.rounded())
-                        print("WET-DBG: ZIP mtime verify path=\(sanitizeDebugPath(rel)) source=\(source.rawValue) intended=\(intendedEpoch) actual=\(actualEpoch)")
+                        print("WET-DBG: ZIP mtime verify path=\(sanitizeDebugPath(rel)) source=\(appliedSource.rawValue) intended=\(intendedEpoch) actual=\(actualEpoch)")
                     }
                 } else {
                     let intendedEpoch = Int(appliedDate.timeIntervalSince1970.rounded())
-                    print("WET-DBG: ZIP mtime verify path=\(sanitizeDebugPath(rel)) source=\(source.rawValue) intended=\(intendedEpoch) actual=-1")
+                    print("WET-DBG: ZIP mtime verify path=\(sanitizeDebugPath(rel)) source=\(appliedSource.rawValue) intended=\(intendedEpoch) actual=-1")
                 }
             }
         }
