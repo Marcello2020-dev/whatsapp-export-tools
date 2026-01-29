@@ -1927,6 +1927,29 @@ struct ContentView: View {
 
         var entries: [String: FileTimestamps] = [:]
 
+        let allowedDirs: Set<String> = [
+            "images",
+            "videos",
+            "audios",
+            "documents"
+        ]
+
+        if let firstLevel = try? fm.contentsOfDirectory(
+            at: base,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) {
+            for entry in firstLevel {
+                let isDir = (try? entry.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+                guard isDir else { continue }
+                let relPath = entry.lastPathComponent
+                guard allowedDirs.contains(relPath) else { continue }
+                if let stamp = timestamps(for: entry) {
+                    entries[relPath] = stamp
+                }
+            }
+        }
+
         guard let en = fm.enumerator(
             at: base,
             includingPropertiesForKeys: [.isRegularFileKey],
@@ -1935,7 +1958,6 @@ struct ContentView: View {
             return SidecarTimestampSnapshot(entries: entries)
         }
 
-        // Track files only to avoid noisy directory timestamp drift (e.g., Finder metadata).
         var fileCount = 0
 
         for case let url as URL in en {
@@ -1945,6 +1967,12 @@ struct ContentView: View {
             fileCount += 1
 
             let relPath = url.path.replacingOccurrences(of: base.path + "/", with: "")
+            guard relPath.hasPrefix("images/")
+                || relPath.hasPrefix("videos/")
+                || relPath.hasPrefix("audios/")
+                || relPath.hasPrefix("documents/") else {
+                continue
+            }
             if let stamp = timestamps(for: url) {
                 entries[relPath] = stamp
             }
@@ -1963,6 +1991,7 @@ struct ContentView: View {
         let base = sidecarBaseDir.standardizedFileURL
 
         func datesClose(_ a: Date?, _ b: Date?) -> Bool {
+            if a == nil && b == nil { return true }
             guard let a, let b else { return false }
             return abs(a.timeIntervalSinceReferenceDate - b.timeIntervalSinceReferenceDate) <= tolerance
         }
@@ -2820,20 +2849,18 @@ struct ContentView: View {
                 debugLog("TIMESTAMP SYNC: \(sidecarBaseDir.path)")
             }
             if attachmentEntries.isEmpty { return }
-            if sidecarDebugEnabled || logMismatches {
-                WhatsAppExportService.normalizeSidecarMediaTimestamps(
+            WhatsAppExportService.normalizeSidecarMediaTimestamps(
+                entries: attachmentEntries,
+                sidecarBaseDir: sidecarBaseDir
+            )
+            if logMismatches {
+                let mismatches = WhatsAppExportService.sampleSidecarMediaTimestampMismatches(
                     entries: attachmentEntries,
-                    sidecarBaseDir: sidecarBaseDir
+                    sidecarBaseDir: sidecarBaseDir,
+                    maxFiles: 3
                 )
-                if logMismatches {
-                    let mismatches = WhatsAppExportService.sampleSidecarMediaTimestampMismatches(
-                        entries: attachmentEntries,
-                        sidecarBaseDir: sidecarBaseDir,
-                        maxFiles: 3
-                    )
-                    if !mismatches.isEmpty {
-                        log("WARN: Zeitstempelabweichung bei \(mismatches.count) Element(en).")
-                    }
+                if !mismatches.isEmpty {
+                    log("WARN: Zeitstempelabweichung bei \(mismatches.count) Element(en).")
                 }
             }
         }

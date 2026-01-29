@@ -1996,6 +1996,7 @@ public enum WhatsAppExportService {
 
         var sidecarBaseDir: URL? = nil
         var sidecarAttachmentOverride: [String: URL]? = nil
+        var sidecarSnapshot: SidecarTimestampSnapshot? = nil
         if exportSortedAttachments {
             let sidecarTree = try await exportSortedAttachmentsFolder(
                 chatURL: chatPath,
@@ -2058,6 +2059,23 @@ public enum WhatsAppExportService {
             didSidecar = true
         }
 
+        if exportSortedAttachments, let sidecarBaseDir {
+            normalizeSidecarMediaTimestamps(entries: attachmentEntries, sidecarBaseDir: sidecarBaseDir)
+            sidecarSnapshot = captureSidecarTimestampSnapshot(sidecarBaseDir: sidecarBaseDir)
+        }
+
+        func verifySidecarImmutabilityIfNeeded() {
+            guard let sidecarBaseDir, let snapshot = sidecarSnapshot else { return }
+            let mismatches = sidecarTimestampMismatches(
+                snapshot: snapshot,
+                sidecarBaseDir: sidecarBaseDir
+            )
+            guard !mismatches.isEmpty else { return }
+            print("WARN: Sidecar immutability drift detected (\(mismatches.count) item(s)).")
+            normalizeSidecarMediaTimestamps(entries: attachmentEntries, sidecarBaseDir: sidecarBaseDir)
+            sidecarSnapshot = captureSidecarTimestampSnapshot(sidecarBaseDir: sidecarBaseDir)
+        }
+
         try await renderHTML(
             msgs: msgs,
             chatURL: chatPath,
@@ -2071,6 +2089,7 @@ public enum WhatsAppExportService {
             thumbnailStore: thumbnailStore,
             perfLabel: "HTML"
         )
+        verifySidecarImmutabilityIfNeeded()
 
         let mdChatURL = chatPath
         let mdAttachmentRelBaseDir: URL? = sidecarBaseDir != nil ? stagingDir : nil
@@ -2086,6 +2105,7 @@ public enum WhatsAppExportService {
             attachmentRelBaseDir: mdAttachmentRelBaseDir,
             attachmentOverrideByName: sidecarAttachmentOverride
         )
+        verifySidecarImmutabilityIfNeeded()
 
         func publishMove(_ src: URL, _ dst: URL) throws {
             try fm.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -2131,6 +2151,10 @@ public enum WhatsAppExportService {
         } catch {
             for u in moved { try? fm.removeItem(at: u) }
             throw error
+        }
+
+        if didSidecar {
+            normalizeSidecarMediaTimestamps(entries: attachmentEntries, sidecarBaseDir: sortedFolderURL)
         }
 
         try? fm.removeItem(at: stagingDir)
@@ -2506,6 +2530,7 @@ public enum WhatsAppExportService {
 
         var sidecarBaseDir: URL? = nil
         var sidecarAttachmentOverride: [String: URL]? = nil
+        var sidecarSnapshot: SidecarTimestampSnapshot? = nil
         if exportSortedAttachments {
             let sidecarTree = try await exportSortedAttachmentsFolder(
                 chatURL: chatPath,
@@ -2567,6 +2592,23 @@ public enum WhatsAppExportService {
             didSidecar = true
         }
 
+        if exportSortedAttachments, let sidecarBaseDir {
+            normalizeSidecarMediaTimestamps(entries: attachmentEntries, sidecarBaseDir: sidecarBaseDir)
+            sidecarSnapshot = captureSidecarTimestampSnapshot(sidecarBaseDir: sidecarBaseDir)
+        }
+
+        func verifySidecarImmutabilityIfNeeded() {
+            guard let sidecarBaseDir, let snapshot = sidecarSnapshot else { return }
+            let mismatches = sidecarTimestampMismatches(
+                snapshot: snapshot,
+                sidecarBaseDir: sidecarBaseDir
+            )
+            guard !mismatches.isEmpty else { return }
+            print("WARN: Sidecar immutability drift detected (\(mismatches.count) item(s)).")
+            normalizeSidecarMediaTimestamps(entries: attachmentEntries, sidecarBaseDir: sidecarBaseDir)
+            sidecarSnapshot = captureSidecarTimestampSnapshot(sidecarBaseDir: sidecarBaseDir)
+        }
+
         // Render all HTML variants
         for v in variants {
             guard let outHTML = stagedHTMLByVariant[v] else { continue }
@@ -2584,6 +2626,7 @@ public enum WhatsAppExportService {
                 thumbnailStore: thumbnailStore,
                 perfLabel: v.perfLabel
             )
+            verifySidecarImmutabilityIfNeeded()
         }
 
         // Render one Markdown (portable)
@@ -2600,6 +2643,7 @@ public enum WhatsAppExportService {
             attachmentRelBaseDir: mdAttachmentRelBaseDir,
             attachmentOverrideByName: sidecarAttachmentOverride
         )
+        verifySidecarImmutabilityIfNeeded()
 
         var moveItems: [(src: URL, dst: URL)] = []
         for v in variants {
@@ -2648,6 +2692,10 @@ public enum WhatsAppExportService {
         } catch {
             for u in moved { try? fm.removeItem(at: u) }
             throw error
+        }
+
+        if didSidecar {
+            normalizeSidecarMediaTimestamps(entries: attachmentEntries, sidecarBaseDir: sortedFolderURL)
         }
 
         try? fm.removeItem(at: stagingDir)
@@ -7621,10 +7669,40 @@ nonisolated private static func stageThumbnailForExport(
         let base = sidecarBaseDir.standardizedFileURL
         guard fm.fileExists(atPath: base.path) else { return }
 
+        var representativeSourceDirByBucket: [SortedAttachmentBucket: URL] = [:]
         for entry in entries {
             let dst = base.appendingPathComponent(entry.canonicalRelPath)
             guard fm.fileExists(atPath: dst.path) else { continue }
             syncFileSystemTimestamps(from: entry.sourceURL, to: dst)
+            if representativeSourceDirByBucket[entry.bucket] == nil {
+                representativeSourceDirByBucket[entry.bucket] = entry.sourceURL.deletingLastPathComponent()
+            }
+        }
+
+        let bucketDirs: [SortedAttachmentBucket: URL] = [
+            .images: base.appendingPathComponent(SortedAttachmentBucket.images.rawValue, isDirectory: true),
+            .videos: base.appendingPathComponent(SortedAttachmentBucket.videos.rawValue, isDirectory: true),
+            .audios: base.appendingPathComponent(SortedAttachmentBucket.audios.rawValue, isDirectory: true),
+            .documents: base.appendingPathComponent(SortedAttachmentBucket.documents.rawValue, isDirectory: true)
+        ]
+        for (bucket, destDir) in bucketDirs {
+            guard let srcDir = representativeSourceDirByBucket[bucket] else { continue }
+            guard fm.fileExists(atPath: srcDir.path) else { continue }
+            syncFileSystemTimestamps(from: srcDir, to: destDir)
+        }
+
+        let thumbsDir = base.appendingPathComponent("_thumbs", isDirectory: true)
+        var isDir = ObjCBool(false)
+        if fm.fileExists(atPath: thumbsDir.path, isDirectory: &isDir), isDir.boolValue {
+            let files = (try? fm.contentsOfDirectory(
+                at: thumbsDir,
+                includingPropertiesForKeys: [.isRegularFileKey],
+                options: [.skipsHiddenFiles]
+            )) ?? []
+            let thumbFiles = files.filter { (try? $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true }
+            if let firstThumb = thumbFiles.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }).first {
+                syncFileSystemTimestamps(from: firstThumb, to: thumbsDir)
+            }
         }
     }
 
@@ -7639,7 +7717,11 @@ nonisolated private static func stageThumbnailForExport(
 
         var mismatches: [String] = []
         var count = 0
+        var representativeSourceDirByBucket: [SortedAttachmentBucket: URL] = [:]
         for entry in entries {
+            if representativeSourceDirByBucket[entry.bucket] == nil {
+                representativeSourceDirByBucket[entry.bucket] = entry.sourceURL.deletingLastPathComponent()
+            }
             if count >= maxFiles { break }
             let dst = base.appendingPathComponent(entry.canonicalRelPath)
             guard fm.fileExists(atPath: dst.path) else {
@@ -7653,6 +7735,136 @@ nonisolated private static func stageThumbnailForExport(
                 mismatches.append(entry.canonicalRelPath)
             }
             count += 1
+        }
+
+        let bucketDirs: [SortedAttachmentBucket: URL] = [
+            .images: base.appendingPathComponent(SortedAttachmentBucket.images.rawValue, isDirectory: true),
+            .videos: base.appendingPathComponent(SortedAttachmentBucket.videos.rawValue, isDirectory: true),
+            .audios: base.appendingPathComponent(SortedAttachmentBucket.audios.rawValue, isDirectory: true),
+            .documents: base.appendingPathComponent(SortedAttachmentBucket.documents.rawValue, isDirectory: true)
+        ]
+        for (bucket, destDir) in bucketDirs {
+            guard let srcDir = representativeSourceDirByBucket[bucket] else { continue }
+            guard fm.fileExists(atPath: srcDir.path), fm.fileExists(atPath: destDir.path) else { continue }
+            let srcAttrs = try? fm.attributesOfItem(atPath: srcDir.path)
+            let dstAttrs = try? fm.attributesOfItem(atPath: destDir.path)
+            if !timestampsMatch(srcAttrs, dstAttrs) {
+                mismatches.append(destDir.lastPathComponent)
+            }
+        }
+        return mismatches
+    }
+
+    private struct SidecarTimestampSnapshot: Sendable {
+        let entries: [String: FileTimestamps]
+    }
+
+    private struct FileTimestamps: Sendable {
+        let created: Date?
+        let modified: Date?
+    }
+
+    nonisolated private static func captureSidecarTimestampSnapshot(
+        sidecarBaseDir: URL,
+        maxFiles: Int = 8
+    ) -> SidecarTimestampSnapshot {
+        let fm = FileManager.default
+        let base = sidecarBaseDir.standardizedFileURL
+        guard fm.fileExists(atPath: base.path) else {
+            return SidecarTimestampSnapshot(entries: [:])
+        }
+
+        func timestamps(for url: URL) -> FileTimestamps? {
+            guard let attrs = try? fm.attributesOfItem(atPath: url.path) else { return nil }
+            return FileTimestamps(
+                created: attrs[.creationDate] as? Date,
+                modified: attrs[.modificationDate] as? Date
+            )
+        }
+
+        var entries: [String: FileTimestamps] = [:]
+        let allowedDirs: Set<String> = [
+            "images",
+            "videos",
+            "audios",
+            "documents"
+        ]
+        if let firstLevel = try? fm.contentsOfDirectory(
+            at: base,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) {
+            for entry in firstLevel {
+                let isDir = (try? entry.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+                guard isDir else { continue }
+                let relPath = entry.lastPathComponent
+                guard allowedDirs.contains(relPath) else { continue }
+                if let stamp = timestamps(for: entry) {
+                    entries[relPath] = stamp
+                }
+            }
+        }
+
+        guard let en = fm.enumerator(
+            at: base,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else {
+            return SidecarTimestampSnapshot(entries: entries)
+        }
+
+        var fileCount = 0
+        for case let url as URL in en {
+            let rv = try? url.resourceValues(forKeys: [.isRegularFileKey])
+            guard rv?.isRegularFile == true else { continue }
+            if fileCount >= maxFiles { continue }
+            fileCount += 1
+
+            let relPath = url.path.replacingOccurrences(of: base.path + "/", with: "")
+            guard relPath.hasPrefix("images/")
+                || relPath.hasPrefix("videos/")
+                || relPath.hasPrefix("audios/")
+                || relPath.hasPrefix("documents/") else {
+                continue
+            }
+            if let stamp = timestamps(for: url) {
+                entries[relPath] = stamp
+            }
+            if fileCount >= maxFiles { break }
+        }
+
+        return SidecarTimestampSnapshot(entries: entries)
+    }
+
+    nonisolated private static func sidecarTimestampMismatches(
+        snapshot: SidecarTimestampSnapshot,
+        sidecarBaseDir: URL,
+        tolerance: TimeInterval = 1.0
+    ) -> [String] {
+        let fm = FileManager.default
+        let base = sidecarBaseDir.standardizedFileURL
+
+        func datesClose(_ a: Date?, _ b: Date?) -> Bool {
+            if a == nil && b == nil { return true }
+            guard let a, let b else { return false }
+            return abs(a.timeIntervalSinceReferenceDate - b.timeIntervalSinceReferenceDate) <= tolerance
+        }
+
+        var mismatches: [String] = []
+        for (relPath, recorded) in snapshot.entries {
+            let url = relPath == "." ? base : base.appendingPathComponent(relPath)
+            guard let attrs = try? fm.attributesOfItem(atPath: url.path) else {
+                mismatches.append(relPath)
+                continue
+            }
+            let current = FileTimestamps(
+                created: attrs[.creationDate] as? Date,
+                modified: attrs[.modificationDate] as? Date
+            )
+            if !datesClose(recorded.created, current.created)
+                || !datesClose(recorded.modified, current.modified) {
+                mismatches.append(relPath)
+            }
         }
         return mismatches
     }
