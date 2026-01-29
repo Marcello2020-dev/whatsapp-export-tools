@@ -395,6 +395,218 @@ public struct SidecarVerificationResult: Sendable {
     }
 }
 
+// MARK: - SourceOps (Raw Archive + Delete Originals)
+
+struct SourceOpsVerificationResult: Sendable {
+    let originalExportDir: URL
+    let copiedExportDir: URL?
+    let originalZip: URL?
+    let copiedZip: URL?
+    let exportDirMatches: Bool
+    let zipMatches: Bool?
+
+    var deletableOriginals: [URL] {
+        var out: [URL] = []
+        if exportDirMatches { out.append(originalExportDir) }
+        if let zip = originalZip, zipMatches == true { out.append(zip) }
+        return out
+    }
+}
+
+enum SourceOpsError: Error, LocalizedError, Sendable {
+    case missingSourceDir(url: URL)
+
+    var errorDescription: String? {
+        switch self {
+        case .missingSourceDir(let url):
+            return "Quellordner fehlt (Raw-Archiv): \(url.lastPathComponent)"
+        }
+    }
+}
+
+enum SourceOps {
+    struct RawArchiveCopyResult: Sendable {
+        let rawArchiveDir: URL
+        let copiedExportDir: URL
+        let copiedZip: URL?
+    }
+
+    struct DeleteResult: Sendable {
+        let deleted: [URL]
+        let failed: [URL]
+    }
+
+    nonisolated static func rawArchiveDirectory(baseName: String, in exportDir: URL) -> URL {
+        exportDir.appendingPathComponent("\(baseName)__raw", isDirectory: true)
+    }
+
+    nonisolated static func copyRawArchive(
+        baseName: String,
+        exportDir: URL,
+        provenance: WETSourceProvenance,
+        allowOverwrite: Bool,
+        debugEnabled: Bool,
+        debugLog: ((String) -> Void)? = nil
+    ) throws -> RawArchiveCopyResult {
+        let fm = FileManager.default
+        let sourceDir = provenance.detectedFolderURL.standardizedFileURL
+        var isDir = ObjCBool(false)
+        guard fm.fileExists(atPath: sourceDir.path, isDirectory: &isDir), isDir.boolValue else {
+            throw SourceOpsError.missingSourceDir(url: sourceDir)
+        }
+
+        let stagingBase = try WhatsAppExportService.localStagingBaseDirectory()
+        let stagingDir = try WhatsAppExportService.createStagingDirectory(in: stagingBase)
+        var didRemoveStaging = false
+        defer {
+            if !didRemoveStaging, fm.fileExists(atPath: stagingDir.path) {
+                if debugEnabled { debugLog?("REMOVE: \(stagingDir.path)") }
+                try? fm.removeItem(at: stagingDir)
+            }
+        }
+
+        let stagedRawRoot = stagingDir.appendingPathComponent("\(baseName)__raw", isDirectory: true)
+        try fm.createDirectory(at: stagedRawRoot, withIntermediateDirectories: true)
+
+        let stagedExportDir = stagedRawRoot.appendingPathComponent(sourceDir.lastPathComponent, isDirectory: true)
+        try fm.copyItem(at: sourceDir, to: stagedExportDir)
+
+        var stagedZip: URL? = nil
+        if let originalZip = provenance.originalZipURL, fm.fileExists(atPath: originalZip.path) {
+            let zipDest = stagedRawRoot.appendingPathComponent(originalZip.lastPathComponent)
+            try fm.copyItem(at: originalZip, to: zipDest)
+            stagedZip = zipDest
+        }
+
+        let finalRawArchiveDir = rawArchiveDirectory(baseName: baseName, in: exportDir.standardizedFileURL)
+        if debugEnabled {
+            debugLog?("RAW ARCHIVE STAGED: \(stagedRawRoot.path)")
+            debugLog?("RAW ARCHIVE TARGET: \(finalRawArchiveDir.path)")
+        }
+
+        try publishMove(
+            from: stagedRawRoot,
+            to: finalRawArchiveDir,
+            allowOverwrite: allowOverwrite,
+            debugEnabled: debugEnabled,
+            debugLog: debugLog
+        )
+        didRemoveStaging = true
+        if fm.fileExists(atPath: stagingDir.path) {
+            if debugEnabled { debugLog?("REMOVE: \(stagingDir.path)") }
+            try? fm.removeItem(at: stagingDir)
+        }
+
+        let finalExportDir = finalRawArchiveDir.appendingPathComponent(sourceDir.lastPathComponent, isDirectory: true)
+        let finalZip = stagedZip.map { finalRawArchiveDir.appendingPathComponent($0.lastPathComponent) }
+        return RawArchiveCopyResult(
+            rawArchiveDir: finalRawArchiveDir,
+            copiedExportDir: finalExportDir,
+            copiedZip: finalZip
+        )
+    }
+
+    nonisolated static func verifyRawArchive(
+        baseName: String,
+        exportDir: URL,
+        provenance: WETSourceProvenance
+    ) -> SourceOpsVerificationResult {
+        let originalDir = provenance.detectedFolderURL.standardizedFileURL
+        let rawRoot = rawArchiveDirectory(baseName: baseName, in: exportDir.standardizedFileURL)
+        let copiedDir = rawRoot.appendingPathComponent(originalDir.lastPathComponent, isDirectory: true)
+
+        let exportDirMatches = WhatsAppExportService.directoriesEqual(src: originalDir, dst: copiedDir)
+
+        let originalZip = provenance.originalZipURL
+        var copiedZip: URL? = nil
+        var zipMatches: Bool? = nil
+
+        if let zip = originalZip, FileManager.default.fileExists(atPath: zip.path) {
+            copiedZip = rawRoot.appendingPathComponent(zip.lastPathComponent)
+            if let copiedZip, FileManager.default.fileExists(atPath: copiedZip.path) {
+                zipMatches = WhatsAppExportService.filesEqual(zip, copiedZip)
+            } else {
+                zipMatches = false
+            }
+        }
+
+        return SourceOpsVerificationResult(
+            originalExportDir: originalDir,
+            copiedExportDir: copiedDir,
+            originalZip: originalZip,
+            copiedZip: copiedZip,
+            exportDirMatches: exportDirMatches,
+            zipMatches: zipMatches
+        )
+    }
+
+    nonisolated static func deleteOriginalItems(_ items: [URL], tempWorkspaceURL: URL?) -> DeleteResult {
+        let fm = FileManager.default
+        var targets = items
+        if let tempWorkspaceURL {
+            if !targets.contains(tempWorkspaceURL) {
+                targets.append(tempWorkspaceURL)
+            }
+        }
+
+        var deleted: [URL] = []
+        var failed: [URL] = []
+        for url in targets {
+            guard fm.fileExists(atPath: url.path) else { continue }
+            do {
+                try fm.removeItem(at: url)
+                deleted.append(url)
+            } catch {
+                failed.append(url)
+            }
+        }
+
+        return DeleteResult(deleted: deleted, failed: failed)
+    }
+
+    nonisolated private static func publishMove(
+        from staged: URL,
+        to final: URL,
+        allowOverwrite: Bool,
+        debugEnabled: Bool,
+        debugLog: ((String) -> Void)?
+    ) throws {
+        let fm = FileManager.default
+        try fm.createDirectory(at: final.deletingLastPathComponent(), withIntermediateDirectories: true)
+
+        if fm.fileExists(atPath: final.path) {
+            if allowOverwrite {
+                let isDir = (try? final.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+                let backup = final
+                    .deletingLastPathComponent()
+                    .appendingPathComponent(".wa_backup_\(UUID().uuidString)", isDirectory: isDir)
+                if debugEnabled {
+                    debugLog?("OVERWRITE: backup existing -> \(backup.path)")
+                    debugLog?("PUBLISH REPLACE: \(final.path)")
+                }
+                try fm.moveItem(at: final, to: backup)
+                do {
+                    try fm.moveItem(at: staged, to: final)
+                    try? fm.removeItem(at: backup)
+                } catch {
+                    if fm.fileExists(atPath: backup.path) {
+                        try? fm.moveItem(at: backup, to: final)
+                    }
+                    throw error
+                }
+            } else {
+                throw OutputCollisionError(url: final)
+            }
+        } else {
+            try fm.moveItem(at: staged, to: final)
+        }
+
+        if debugEnabled {
+            debugLog?("PUBLISH OK: \(final.path)")
+        }
+    }
+}
+
 
 // MARK: - Service
 
@@ -8117,7 +8329,7 @@ nonisolated private static func stageThumbnailForExport(
             ?? candidates.first
     }
 
-    private nonisolated static func filesEqual(_ a: URL, _ b: URL) -> Bool {
+    fileprivate nonisolated static func filesEqual(_ a: URL, _ b: URL) -> Bool {
         let fm = FileManager.default
         guard fm.fileExists(atPath: a.path), fm.fileExists(atPath: b.path) else { return false }
 
@@ -8193,7 +8405,7 @@ nonisolated private static func stageThumbnailForExport(
         return out
     }
 
-    private nonisolated static func directoriesEqual(src: URL, dst: URL) -> Bool {
+    fileprivate nonisolated static func directoriesEqual(src: URL, dst: URL) -> Bool {
         guard let srcFiles = listRegularFiles(in: src) else { return false }
         guard let dstFiles = listRegularFiles(in: dst) else { return false }
 

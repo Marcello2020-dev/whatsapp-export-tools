@@ -15,6 +15,7 @@ struct ContentView: View {
         let chatURL: URL
         let outDir: URL
         let exportDir: URL
+        let tempWorkspaceURL: URL?
         let allowOverwrite: Bool
         let isOverwriteRetry: Bool
         let preflight: OutputPreflight?
@@ -32,6 +33,7 @@ struct ContentView: View {
         let plan: RunPlan
         let wantsMD: Bool
         let wantsSidecar: Bool
+        let wantsRawArchiveCopy: Bool
         let wantsDeleteOriginals: Bool
         let htmlLabel: String
     }
@@ -269,6 +271,7 @@ struct ContentView: View {
     // NEW: Optional "Sidecar" folder export (sorted attachments) next to the HTML/MD export.
     // IMPORTANT: HTML outputs must remain standalone and must NOT depend on the Sidecar folder.
     @State private var exportSortedAttachments: Bool = true
+    @State private var includeRawArchive: Bool = false
     @State private var deleteOriginalsAfterSidecar: Bool = false
     @State private var wetDebugLoggingEnabled: Bool = false
 
@@ -301,6 +304,7 @@ struct ContentView: View {
     @State private var pendingPreparedExport: WhatsAppExportService.PreparedExport? = nil
     @State private var showDeleteOriginalsAlert: Bool = false
     @State private var deleteOriginalCandidates: [URL] = []
+    @State private var deleteOriginalTempWorkspaceURL: URL? = nil
     @State private var didSetInitialWindowSize: Bool = false
     @State private var exportTask: Task<Void, Never>? = nil
     @State private var cancelRequested: Bool = false
@@ -343,16 +347,19 @@ struct ContentView: View {
         .alert("Originaldaten löschen?", isPresented: $showDeleteOriginalsAlert) {
             Button("Abbrechen", role: .cancel) {
                 deleteOriginalCandidates = []
+                deleteOriginalTempWorkspaceURL = nil
             }
             Button("Originale löschen", role: .destructive) {
                 let items = deleteOriginalCandidates
                 deleteOriginalCandidates = []
-                Task { await deleteOriginalItems(items) }
+                let tempWorkspace = deleteOriginalTempWorkspaceURL
+                deleteOriginalTempWorkspaceURL = nil
+                Task { await deleteOriginalItems(items, tempWorkspaceURL: tempWorkspace) }
             }
         } message: {
             let lines = deleteOriginalCandidates.map { $0.path }.joined(separator: "\n")
             Text(
-                "Die Sidecar-Kopie wurde geprüft. Diese Originale können gelöscht werden:\n" +
+                "Die Roharchiv-Kopie wurde geprüft. Diese Originale können gelöscht werden:\n" +
                 lines
             )
         }
@@ -507,6 +514,7 @@ struct ContentView: View {
                 .padding(.vertical, 1)
 
             sidecarToggle
+            rawArchiveToggle
             deleteOriginalsToggle
             debugLoggingToggle
         }
@@ -608,12 +616,26 @@ struct ContentView: View {
         Toggle(isOn: $deleteOriginalsAfterSidecar) {
             HStack(spacing: 6) {
                 Text("Originaldaten nach Sidecar-Erstellung löschen (optional, nach Prüfung)")
-                helpIcon("Vergleicht Sidecar und Original. Löschen nur nach identischer Prüfung.")
+                helpIcon("Vergleicht Roharchiv und Original. Löschen nur nach identischer Prüfung.")
             }
         }
         .accessibilityLabel("Originaldaten löschen")
         .disabled(isRunning || !exportSortedAttachments)
         .onChange(of: deleteOriginalsAfterSidecar) {
+            persistExportSettings()
+        }
+    }
+
+    private var rawArchiveToggle: some View {
+        Toggle(isOn: $includeRawArchive) {
+            HStack(spacing: 6) {
+                Text("Roharchiv der Originaldaten kopieren")
+                helpIcon("Legt eine Kopie des WhatsApp-Exports als <ExportBase>__raw/ neben die Ausgaben.")
+            }
+        }
+        .accessibilityLabel("Roharchiv kopieren")
+        .disabled(isRunning)
+        .onChange(of: includeRawArchive) {
             persistExportSettings()
         }
     }
@@ -1658,6 +1680,7 @@ struct ContentView: View {
                      "E-Mail=\(onOff(context.selectedVariantsInOrder.contains(.textOnly))) " +
                      "Markdown=\(onOff(context.wantsMD)) " +
                      "Sidecar=\(onOff(context.wantsSidecar)) " +
+                     "Roharchiv=\(onOff(context.wantsRawArchiveCopy)) " +
                      "Originale löschen=\(onOff(context.wantsDeleteOriginals))")
         lines.append("- Total: \(Self.formatDuration(totalDuration))")
         lines.append("")
@@ -1807,11 +1830,16 @@ struct ContentView: View {
         dir.appendingPathComponent(baseName, isDirectory: true)
     }
 
+    nonisolated private static func outputRawArchiveDir(baseName: String, in dir: URL) -> URL {
+        SourceOps.rawArchiveDirectory(baseName: baseName, in: dir)
+    }
+
     nonisolated static func replaceDeleteTargets(
         baseName: String,
         variantSuffixes: [String],
         wantsMarkdown: Bool,
         wantsSidecar: Bool,
+        wantsRawArchive: Bool,
         in dir: URL
     ) -> [URL] {
         var urls: [URL] = []
@@ -1842,6 +1870,13 @@ struct ContentView: View {
             }
         }
 
+        if wantsRawArchive {
+            let rawDir = outputRawArchiveDir(baseName: baseName, in: dir)
+            if seen.insert(rawDir.lastPathComponent).inserted {
+                urls.append(rawDir)
+            }
+        }
+
         return urls
     }
 
@@ -1866,12 +1901,21 @@ struct ContentView: View {
 
         func isSidecarDir(_ name: String) -> Bool {
             guard !name.hasSuffix(".html"), !name.hasSuffix(".md") else { return false }
+            if name.hasPrefix("\(baseName)__raw") { return false }
             return name.hasPrefix(baseName)
+        }
+
+        func isRawArchive(_ name: String) -> Bool {
+            if name.hasPrefix("\(baseName)__raw") { return true }
+            return false
         }
 
         for name in existingNames {
             if isSidecarHTML(name) || isSidecarDir(name) {
                 labels.insert("Sidecar")
+            }
+            if isRawArchive(name) {
+                labels.insert("Raw-Archiv")
             }
             if isVariantHTML(name, suffix: "-max") {
                 labels.insert("Max")
@@ -1887,7 +1931,7 @@ struct ContentView: View {
             }
         }
 
-        let ordered = ["Sidecar", "Max", "Kompakt", "E-Mail", "Markdown"]
+        let ordered = ["Sidecar", "Raw-Archiv", "Max", "Kompakt", "E-Mail", "Markdown"]
         return ordered.filter { labels.contains($0) }
     }
 
@@ -2019,6 +2063,7 @@ struct ContentView: View {
         variants: [HTMLVariant],
         wantsMarkdown: Bool,
         wantsSidecar: Bool,
+        wantsRawArchive: Bool,
         in dir: URL
     ) -> [String] {
         let fm = FileManager.default
@@ -2041,6 +2086,9 @@ struct ContentView: View {
         if wantsSidecar {
             expected.append("\(baseName)-sdc.html")
             expected.append(baseName)
+        }
+        if wantsRawArchive {
+            expected.append("\(baseName)__raw")
         }
 
         func isSuffixedVariant(expectedName: String, actualName: String) -> Bool {
@@ -2204,6 +2252,9 @@ struct ContentView: View {
         let wantsMD = exportMarkdown
         let wantsSidecar = exportSortedAttachments
         let wantsDeleteOriginals = wantsSidecar && deleteOriginalsAfterSidecar
+        let env = ProcessInfo.processInfo.environment
+        let wantsRawArchiveExplicit = includeRawArchive || env["WET_INCLUDE_RAW_ARCHIVE"] == "1"
+        let wantsRawArchiveCopy = wantsRawArchiveExplicit || wantsDeleteOriginals
 
         let htmlLabel: String = {
             var parts: [String] = []
@@ -2231,8 +2282,7 @@ struct ContentView: View {
             wantsMD: wantsMD,
             wantsSidecar: wantsSidecar
         )
-
-        let env = ProcessInfo.processInfo.environment
+        
         let debugEnabled = wetDebugLoggingEnabled
             || env["WET_SIDECAR_DEBUG"] == "1"
             || env["WET_DEBUG"] == "1"
@@ -2277,6 +2327,7 @@ struct ContentView: View {
             chatURL: resolvedChatURL,
             outDir: outDir,
             exportDir: exportDir,
+            tempWorkspaceURL: snapshot.tempWorkspaceURL,
             allowOverwrite: allowOverwrite,
             isOverwriteRetry: isOverwriteRetry,
             preflight: preflight,
@@ -2294,6 +2345,7 @@ struct ContentView: View {
             plan: plan,
             wantsMD: wantsMD,
             wantsSidecar: wantsSidecar,
+            wantsRawArchiveCopy: wantsRawArchiveCopy,
             wantsDeleteOriginals: wantsDeleteOriginals,
             htmlLabel: htmlLabel
         )
@@ -2384,6 +2436,7 @@ struct ContentView: View {
             "E-Mail=\(onOff(context.selectedVariantsInOrder.contains(.textOnly))) " +
             "Markdown=\(onOff(context.wantsMD)) " +
             "Sidecar=\(onOff(context.wantsSidecar)) " +
+            "Roharchiv=\(onOff(context.wantsRawArchiveCopy)) " +
             "Originale löschen=\(onOff(context.wantsDeleteOriginals))"
         )
         debugLog("RUN START: \(Self.formatClockTime(runStartWall))")
@@ -2396,6 +2449,7 @@ struct ContentView: View {
                  "E-Mail=\(onOff(context.selectedVariantsInOrder.contains(.textOnly))) " +
                  "Markdown=\(onOff(context.wantsMD)) " +
                  "Sidecar=\(onOff(context.wantsSidecar)) " +
+                 "RawArchive=\(onOff(context.wantsRawArchiveCopy)) " +
                  "DeleteOriginals=\(onOff(context.wantsDeleteOriginals))")
         if perfEnabled {
             let caps = WhatsAppExportService.concurrencyCaps()
@@ -2453,14 +2507,26 @@ struct ContentView: View {
                 md: workResult.md
             )
 
+            if context.wantsRawArchiveCopy {
+                logger.log("Start Roharchiv")
+                _ = try await Task.detached(priority: .utility) {
+                    try SourceOps.copyRawArchive(
+                        baseName: baseName,
+                        exportDir: workResult.exportDir,
+                        provenance: context.provenance,
+                        allowOverwrite: context.allowOverwrite,
+                        debugEnabled: debugEnabled,
+                        debugLog: debugLog
+                    )
+                }.value
+                logger.log("Done Roharchiv")
+            }
+
             if context.wantsDeleteOriginals {
-                await offerSidecarDeletionIfPossible(
-                    chatURL: context.chatURL,
-                    outDir: workResult.exportDir,
-                    baseHTMLName: workResult.baseHTMLName,
-                    detectedPartnerRaw: context.detectedPartnerRaw,
-                    overridePartnerRaw: context.overridePartnerRaw,
-                    originalZipURL: context.provenance.originalZipURL
+                await offerSourceDeletionIfPossible(
+                    context: context,
+                    baseName: baseName,
+                    exportDir: workResult.exportDir
                 )
             }
 
@@ -2468,6 +2534,7 @@ struct ContentView: View {
             logger.log("Abgeschlossen: \(Self.formatDuration(totalDuration))")
             var published: [String] = []
             if context.wantsSidecar { published.append("Sidecar") }
+            if context.wantsRawArchiveCopy { published.append("Roharchiv") }
             published.append(contentsOf: context.plan.variants.map { Self.htmlVariantLogLabel(for: $0) })
             if context.wantsMD { published.append("Markdown") }
             debugLog("RUN DONE: \(Self.formatDuration(totalDuration)) published=\(published.joined(separator: ", "))")
@@ -2498,6 +2565,7 @@ struct ContentView: View {
                         variantSuffixes: variantSuffixes,
                         wantsMarkdown: context.wantsMD,
                         wantsSidecar: context.wantsSidecar,
+                        wantsRawArchive: context.wantsRawArchiveCopy,
                         in: exportDir
                     )
                     let suffixArtifacts = Self.outputSuffixArtifacts(
@@ -2505,6 +2573,7 @@ struct ContentView: View {
                         variants: context.plan.variants,
                         wantsMarkdown: context.wantsMD,
                         wantsSidecar: context.wantsSidecar,
+                        wantsRawArchive: context.wantsRawArchiveCopy,
                         in: exportDir
                     )
                     let fm = FileManager.default
@@ -2546,6 +2615,11 @@ struct ContentView: View {
         let sidecarHTML = Self.outputSidecarHTML(baseName: baseName, in: exportDir)
         if existingNames.contains(sidecarHTML.lastPathComponent) { existing.append(sidecarHTML) }
 
+        if context.wantsRawArchiveCopy {
+            let rawDir = Self.outputRawArchiveDir(baseName: baseName, in: exportDir)
+            if existingNames.contains(rawDir.lastPathComponent) { existing.append(rawDir) }
+        }
+
         for variant in context.plan.variants {
             let variantURL = Self.outputHTMLURL(baseName: baseName, variant: variant, in: exportDir)
             if existingNames.contains(variantURL.lastPathComponent) { existing.append(variantURL) }
@@ -2556,6 +2630,7 @@ struct ContentView: View {
             variants: context.plan.variants,
             wantsMarkdown: context.wantsMD,
             wantsSidecar: context.wantsSidecar,
+            wantsRawArchive: context.wantsRawArchiveCopy,
             in: exportDir
         )
         if !suffixArtifacts.isEmpty {
@@ -3275,6 +3350,7 @@ struct ContentView: View {
                 variants: plan.variants,
                 wantsMarkdown: context.wantsMD,
                 wantsSidecar: context.wantsSidecar,
+                wantsRawArchive: context.wantsRawArchiveCopy,
                 in: exportDir
             )
             if !suffixArtifacts.isEmpty {
@@ -3310,6 +3386,7 @@ struct ContentView: View {
             variants: plan.variants,
             wantsMarkdown: context.wantsMD,
             wantsSidecar: context.wantsSidecar,
+            wantsRawArchive: context.wantsRawArchiveCopy,
             in: exportDir
         )
         if !suffixArtifacts.isEmpty {
@@ -3336,25 +3413,16 @@ struct ContentView: View {
     }
 
     @MainActor
-    private func offerSidecarDeletionIfPossible(
-        chatURL: URL,
-        outDir: URL,
-        baseHTMLName: String,
-        detectedPartnerRaw: String,
-        overridePartnerRaw: String?,
-        originalZipURL: URL?
+    private func offerSourceDeletionIfPossible(
+        context: ExportContext,
+        baseName: String,
+        exportDir: URL
     ) async {
-        let baseStem = (baseHTMLName as NSString).deletingPathExtension
-        let sidecarBaseDir = outDir.appendingPathComponent(baseStem, isDirectory: true)
-        let originalDir = chatURL.deletingLastPathComponent()
-
         let verification = await Task.detached(priority: .utility) {
-            WhatsAppExportService.verifySidecarCopies(
-                originalExportDir: originalDir,
-                sidecarBaseDir: sidecarBaseDir,
-                detectedPartnerRaw: detectedPartnerRaw,
-                overridePartnerRaw: overridePartnerRaw,
-                originalZipURL: originalZipURL
+            SourceOps.verifyRawArchive(
+                baseName: baseName,
+                exportDir: exportDir,
+                provenance: context.provenance
             )
         }.value
 
@@ -3364,28 +3432,17 @@ struct ContentView: View {
         }
 
         deleteOriginalCandidates = candidates
+        deleteOriginalTempWorkspaceURL = context.tempWorkspaceURL
         showDeleteOriginalsAlert = true
     }
 
     @MainActor
-    private func deleteOriginalItems(_ items: [URL]) async {
+    private func deleteOriginalItems(_ items: [URL], tempWorkspaceURL: URL?) async {
         let result = await Task.detached(priority: .utility) {
-            var deleted: [URL] = []
-            var failed: [URL] = []
-            let fm = FileManager.default
-
-            for u in items {
-                do {
-                    try fm.removeItem(at: u)
-                    deleted.append(u)
-                } catch {
-                    failed.append(u)
-                }
-            }
-            return (deleted, failed)
+            SourceOps.deleteOriginalItems(items, tempWorkspaceURL: tempWorkspaceURL)
         }.value
 
-        let (_, failed) = result
+        let failed = result.failed
         if !failed.isEmpty {
             appendLog("ERROR: Löschen fehlgeschlagen: \(failed.map { $0.path }.joined(separator: ", "))")
         }
@@ -3404,6 +3461,7 @@ struct ContentView: View {
         exportHTMLMin = snapshot.exportHTMLMin
         exportMarkdown = snapshot.exportMarkdown
         exportSortedAttachments = snapshot.exportSortedAttachments
+        includeRawArchive = snapshot.includeRawArchive
         deleteOriginalsAfterSidecar = snapshot.deleteOriginalsAfterSidecar
         wetDebugLoggingEnabled = snapshot.wetDebugLoggingEnabled
 
@@ -3437,6 +3495,7 @@ struct ContentView: View {
             exportHTMLMin: exportHTMLMin,
             exportMarkdown: exportMarkdown,
             exportSortedAttachments: exportSortedAttachments,
+            includeRawArchive: includeRawArchive,
             deleteOriginalsAfterSidecar: deleteOriginalsAfterSidecar,
             wetDebugLoggingEnabled: wetDebugLoggingEnabled
         )
@@ -3575,7 +3634,7 @@ private final class SecurityScopedURL {
 }
 
 private struct WETExportSettingsSnapshot: Codable {
-    static let currentVersion = 2
+    static let currentVersion = 3
 
     let schemaVersion: Int
     let chatBookmark: Data?
@@ -3585,6 +3644,7 @@ private struct WETExportSettingsSnapshot: Codable {
     let exportHTMLMin: Bool
     let exportMarkdown: Bool
     let exportSortedAttachments: Bool
+    let includeRawArchive: Bool
     let deleteOriginalsAfterSidecar: Bool
     let wetDebugLoggingEnabled: Bool
 
@@ -3597,6 +3657,7 @@ private struct WETExportSettingsSnapshot: Codable {
         case exportHTMLMin
         case exportMarkdown
         case exportSortedAttachments
+        case includeRawArchive
         case deleteOriginalsAfterSidecar
         case wetDebugLoggingEnabled
     }
@@ -3610,6 +3671,7 @@ private struct WETExportSettingsSnapshot: Codable {
         exportHTMLMin: Bool,
         exportMarkdown: Bool,
         exportSortedAttachments: Bool,
+        includeRawArchive: Bool,
         deleteOriginalsAfterSidecar: Bool,
         wetDebugLoggingEnabled: Bool = false
     ) {
@@ -3621,6 +3683,7 @@ private struct WETExportSettingsSnapshot: Codable {
         self.exportHTMLMin = exportHTMLMin
         self.exportMarkdown = exportMarkdown
         self.exportSortedAttachments = exportSortedAttachments
+        self.includeRawArchive = includeRawArchive
         self.deleteOriginalsAfterSidecar = deleteOriginalsAfterSidecar
         self.wetDebugLoggingEnabled = wetDebugLoggingEnabled
     }
@@ -3635,6 +3698,7 @@ private struct WETExportSettingsSnapshot: Codable {
         exportHTMLMin = (try? container.decode(Bool.self, forKey: .exportHTMLMin)) ?? true
         exportMarkdown = (try? container.decode(Bool.self, forKey: .exportMarkdown)) ?? true
         exportSortedAttachments = (try? container.decode(Bool.self, forKey: .exportSortedAttachments)) ?? true
+        includeRawArchive = (try? container.decode(Bool.self, forKey: .includeRawArchive)) ?? false
         deleteOriginalsAfterSidecar = (try? container.decode(Bool.self, forKey: .deleteOriginalsAfterSidecar)) ?? false
         wetDebugLoggingEnabled = (try? container.decode(Bool.self, forKey: .wetDebugLoggingEnabled)) ?? false
     }

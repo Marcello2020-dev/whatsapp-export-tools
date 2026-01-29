@@ -122,6 +122,7 @@ struct WETReplaceSelectionCheck {
             variantSuffixes: variantSuffixes,
             wantsMarkdown: false,
             wantsSidecar: false,
+            wantsRawArchive: false,
             in: root
         )
 
