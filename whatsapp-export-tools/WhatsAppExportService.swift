@@ -6624,7 +6624,7 @@ nonisolated private static func stageThumbnailForExport(
                             continue
                         }
                     } else {
-                        if let thumbDataURL = await thumbnailStoreRef?.thumbnailDataURL(fileName: fn, allowOriginalFallback: true) {
+                        if let thumbDataURL = await thumbnailStoreRef?.thumbnailDataURL(fileName: fn, allowOriginalFallback: false) {
                             let isImage = ["jpg","jpeg","png","gif","webp","heic","heif"].contains(ext)
                             mediaBlocks.append(
                                 "<div class='media\(isImage ? " media-img" : "")'><img alt='' src='\(htmlEscape(thumbDataURL))'></div>"
