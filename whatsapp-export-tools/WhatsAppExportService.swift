@@ -6603,6 +6603,11 @@ nonisolated private static func stageThumbnailForExport(
                     : (resolveAttachmentURL(fileName: fn, sourceDir: chatDir) ?? direct)
                 let p = (override != nil && FileManager.default.fileExists(atPath: override!.path)) ? override! : resolved
                 let ext = p.pathExtension.lowercased()
+                let safeFn = htmlEscape(fn)
+                let titleAttr = safeFn.isEmpty ? "" : " title='\(safeFn)'"
+                let openAriaAttr = safeFn.isEmpty ? "" : " aria-label='Open: \(safeFn)'"
+                let downloadAriaAttr = safeFn.isEmpty ? "" : " aria-label='Download: \(safeFn)'"
+                let downloadAttr = safeFn.isEmpty ? " download" : " download='\(safeFn)'"
 
                 if embedAttachmentThumbnailsOnly {
                     // Thumbnails-only mode must produce a standalone HTML (no ./attachments folder):
@@ -6629,7 +6634,7 @@ nonisolated private static func stageThumbnailForExport(
                     }
 
                     // Fallback (no thumbnail available): show a non-clickable filename line.
-                    mediaBlocks.append("<div class='fileline'>\(attachmentEmoji(forExtension: ext)) \(htmlEscape(fn))</div>")
+                    mediaBlocks.append("<div class='fileline'>\(attachmentEmoji(forExtension: ext)) \(safeFn)</div>")
                     continue
                 }
 
@@ -6647,7 +6652,7 @@ nonisolated private static func stageThumbnailForExport(
                             let embedId = "wa-embed-\(index)-\(embedCounter)"
                             let b64 = fmData.base64EncodedString()
                             let safeMime = htmlEscape(mime)
-                            let safeName = htmlEscape(fn)
+                            let safeName = safeFn
 
                             // Store raw bytes once; player loads via Blob URL created in JS.
                             mediaBlocks.append("<script id='\(embedId)' type='application/octet-stream' data-mime='\(safeMime)' data-name='\(safeName)'>\(b64)</script>")
@@ -6658,14 +6663,14 @@ nonisolated private static func stageThumbnailForExport(
                             }
 
                             mediaBlocks.append(
-                                "<div class='media'><video controls preload='metadata' playsinline data-wa-embed='\(embedId)'\(posterAttr)></video></div>"
+                                "<div class='media'><video controls preload='metadata' playsinline data-wa-embed='\(embedId)'\(posterAttr)\(titleAttr)\(openAriaAttr)></video></div>"
                             )
-                            mediaBlocks.append("<div class='fileline'>⬇︎ <a href='javascript:void(0)' onclick=\"return waDownloadEmbed('\(embedId)')\">Video speichern</a></div>")
+                            mediaBlocks.append("<div class='fileline'>⬇︎ <a href='javascript:void(0)'\(titleAttr)\(downloadAriaAttr) onclick=\"return waDownloadEmbed('\(embedId)')\">Video speichern</a></div>")
                         } else {
                             if let poster {
                                 mediaBlocks.append("<div class='media'><img alt='' src='\(htmlEscape(poster))'></div>")
                             }
-                            mediaBlocks.append("<div class='fileline'>🎬 \(htmlEscape(fn))</div>")
+                            mediaBlocks.append("<div class='fileline'>🎬 \(safeFn)</div>")
                         }
                         continue
                     }
@@ -6679,18 +6684,18 @@ nonisolated private static func stageThumbnailForExport(
                             let embedId = "wa-embed-\(index)-\(embedCounter)"
                             let b64 = fmData.base64EncodedString()
                             let safeMime = htmlEscape(mime)
-                            let safeName = htmlEscape(fn)
+                            let safeName = safeFn
 
                             // Store raw bytes once; audio loads via Blob URL created in JS.
                             mediaBlocks.append("<script id='\(embedId)' type='application/octet-stream' data-mime='\(safeMime)' data-name='\(safeName)'>\(b64)</script>")
 
                             mediaBlocks.append(
-                                "<div class='media'><audio controls preload='metadata' data-wa-embed='\(embedId)'></audio></div>"
+                                "<div class='media'><audio controls preload='metadata' data-wa-embed='\(embedId)'\(titleAttr)\(openAriaAttr)></audio></div>"
                             )
-                            mediaBlocks.append("<div class='fileline'>🎧 \(htmlEscape(fn))</div>")
-                            mediaBlocks.append("<div class='fileline'>⬇︎ <a href='javascript:void(0)' onclick=\"return waDownloadEmbed('\(embedId)')\">Audio speichern</a></div>")
+                            mediaBlocks.append("<div class='fileline'>🎧 \(safeFn)</div>")
+                            mediaBlocks.append("<div class='fileline'>⬇︎ <a href='javascript:void(0)'\(titleAttr)\(downloadAriaAttr) onclick=\"return waDownloadEmbed('\(embedId)')\">Audio speichern</a></div>")
                         } else {
-                            mediaBlocks.append("<div class='fileline'>🎧 \(htmlEscape(fn))</div>")
+                            mediaBlocks.append("<div class='fileline'>🎧 \(safeFn)</div>")
                         }
                         continue
                     }
@@ -6705,28 +6710,28 @@ nonisolated private static func stageThumbnailForExport(
                             let embedId = "wa-embed-\(index)-\(embedCounter)"
                             let b64 = fileData.base64EncodedString()
                             let safeMime = htmlEscape(mime)
-                            let safeName = htmlEscape(fn)
+                            let safeName = safeFn
                             // Insert the hidden script tag before the clickable UI.
                             mediaBlocks.append("<script id='\(embedId)' type='application/octet-stream' data-mime='\(safeMime)' data-name='\(safeName)'>\(b64)</script>")
                             // Thumbnail preview wrapped in waOpenEmbed link.
-                            mediaBlocks.append("<div class='media'><a href='javascript:void(0)' onclick=\"return waOpenEmbed('\(embedId)')\"><img alt='' src='\(previewDataURL)'></a></div>")
+                            mediaBlocks.append("<div class='media'><a href='javascript:void(0)'\(titleAttr)\(openAriaAttr) onclick=\"return waOpenEmbed('\(embedId)')\"><img alt='' src='\(previewDataURL)'></a></div>")
                             // Fileline link using waOpenEmbed.
-                            mediaBlocks.append("<div class='fileline'>📎 <a href='javascript:void(0)' onclick=\"return waOpenEmbed('\(embedId)')\">\(htmlEscape(fn))</a></div>")
-                            mediaBlocks.append("<div class='fileline'>⬇︎ <a href='javascript:void(0)' onclick=\"return waDownloadEmbed('\(embedId)')\">Datei speichern</a></div>")
+                            mediaBlocks.append("<div class='fileline'>📎 <a href='javascript:void(0)'\(titleAttr)\(openAriaAttr) onclick=\"return waOpenEmbed('\(embedId)')\">\(safeFn)</a></div>")
+                            mediaBlocks.append("<div class='fileline'>⬇︎ <a href='javascript:void(0)'\(titleAttr)\(downloadAriaAttr) onclick=\"return waDownloadEmbed('\(embedId)')\">Datei speichern</a></div>")
                         } else if let previewDataURL {
                             mediaBlocks.append("<div class='media'><img alt='' src='\(previewDataURL)'></div>")
-                            mediaBlocks.append("<div class='fileline'>📎 \(htmlEscape(fn))</div>")
+                            mediaBlocks.append("<div class='fileline'>📎 \(safeFn)</div>")
                         } else if let fileData {
                             embedCounter += 1
                             let embedId = "wa-embed-\(index)-\(embedCounter)"
                             let b64 = fileData.base64EncodedString()
                             let safeMime = htmlEscape(mime)
-                            let safeName = htmlEscape(fn)
+                            let safeName = safeFn
                             mediaBlocks.append("<script id='\(embedId)' type='application/octet-stream' data-mime='\(safeMime)' data-name='\(safeName)'>\(b64)</script>")
-                            mediaBlocks.append("<div class='fileline'>📎 <a href='javascript:void(0)' onclick=\"return waOpenEmbed('\(embedId)')\">\(htmlEscape(fn))</a></div>")
-                            mediaBlocks.append("<div class='fileline'>⬇︎ <a href='javascript:void(0)' onclick=\"return waDownloadEmbed('\(embedId)')\">Datei speichern</a></div>")
+                            mediaBlocks.append("<div class='fileline'>📎 <a href='javascript:void(0)'\(titleAttr)\(openAriaAttr) onclick=\"return waOpenEmbed('\(embedId)')\">\(safeFn)</a></div>")
+                            mediaBlocks.append("<div class='fileline'>⬇︎ <a href='javascript:void(0)'\(titleAttr)\(downloadAriaAttr) onclick=\"return waDownloadEmbed('\(embedId)')\">Datei speichern</a></div>")
                         } else {
-                            mediaBlocks.append("<div class='fileline'>📎 \(htmlEscape(fn))</div>")
+                            mediaBlocks.append("<div class='fileline'>📎 \(safeFn)</div>")
                         }
                         continue
                     }
@@ -6740,14 +6745,14 @@ nonisolated private static func stageThumbnailForExport(
                             let embedId = "wa-embed-\(index)-\(embedCounter)"
                             let b64 = fileData.base64EncodedString()
                             let safeMime = htmlEscape(mime)
-                            let safeName = htmlEscape(fn)
+                            let safeName = safeFn
 
                             // Store raw bytes once; click opens blob via waOpenEmbed.
                             mediaBlocks.append("<script id='\(embedId)' type='application/octet-stream' data-mime='\(safeMime)' data-name='\(safeName)'>\(b64)</script>")
 
                             let safeSrc = htmlEscape(dataURL)
-                            mediaBlocks.append("<div class='media media-img'><a href='javascript:void(0)' onclick=\"return waOpenEmbed('\(embedId)')\"><img alt='' src='\(safeSrc)'></a></div>")
-                            mediaBlocks.append("<div class='fileline'>⬇︎ <a href='javascript:void(0)' onclick=\"return waDownloadEmbed('\(embedId)')\">Bild speichern</a></div>")
+                            mediaBlocks.append("<div class='media media-img'><a href='javascript:void(0)'\(titleAttr)\(openAriaAttr) onclick=\"return waOpenEmbed('\(embedId)')\"><img alt='' src='\(safeSrc)'></a></div>")
+                            mediaBlocks.append("<div class='fileline'>⬇︎ <a href='javascript:void(0)'\(titleAttr)\(downloadAriaAttr) onclick=\"return waDownloadEmbed('\(embedId)')\">Bild speichern</a></div>")
                             // Kein Dateiname unter eingebetteten Bildern
                         } else if let dataURL = fileToDataURL(p) {
                             // Fallback: show image without click-to-open.
@@ -6755,7 +6760,7 @@ nonisolated private static func stageThumbnailForExport(
                             mediaBlocks.append("<div class='media media-img'><img alt='' src='\(safeSrc)'></div>")
                         } else {
                             // Nur wenn Einbettung fehlschlägt, den Dateinamen anzeigen
-                            mediaBlocks.append("<div class='fileline'>🖼️ \(htmlEscape(fn))</div>")
+                            mediaBlocks.append("<div class='fileline'>🖼️ \(safeFn)</div>")
                         }
                         continue
                     }
@@ -6768,12 +6773,12 @@ nonisolated private static func stageThumbnailForExport(
                         let embedId = "wa-embed-\(index)-\(embedCounter)"
                         let b64 = fileData.base64EncodedString()
                         let safeMime = htmlEscape(mime)
-                        let safeName = htmlEscape(fn)
+                        let safeName = safeFn
                         mediaBlocks.append("<script id='\(embedId)' type='application/octet-stream' data-mime='\(safeMime)' data-name='\(safeName)'>\(b64)</script>")
-                        mediaBlocks.append("<div class='fileline'>📎 <a href='javascript:void(0)' onclick=\"return waOpenEmbed('\(embedId)')\">\(htmlEscape(fn))</a></div>")
-                        mediaBlocks.append("<div class='fileline'>⬇︎ <a href='javascript:void(0)' onclick=\"return waDownloadEmbed('\(embedId)')\">Datei speichern</a></div>")
+                        mediaBlocks.append("<div class='fileline'>📎 <a href='javascript:void(0)'\(titleAttr)\(openAriaAttr) onclick=\"return waOpenEmbed('\(embedId)')\">\(safeFn)</a></div>")
+                        mediaBlocks.append("<div class='fileline'>⬇︎ <a href='javascript:void(0)'\(titleAttr)\(downloadAriaAttr) onclick=\"return waDownloadEmbed('\(embedId)')\">Datei speichern</a></div>")
                     } else {
-                        mediaBlocks.append("<div class='fileline'>📎 \(htmlEscape(fn))</div>")
+                        mediaBlocks.append("<div class='fileline'>📎 \(safeFn)</div>")
                     }
                     continue
                 }
@@ -6785,7 +6790,7 @@ nonisolated private static func stageThumbnailForExport(
                         relativeTo: attachmentRelBaseDir
                     )
                     guard let href = staged?.relHref else {
-                        mediaBlocks.append("<div class='fileline'>\(attachmentEmoji(forExtension: ext)) \(htmlEscape(fn))</div>")
+                        mediaBlocks.append("<div class='fileline'>\(attachmentEmoji(forExtension: ext)) \(safeFn)</div>")
                         continue
                     }
                     let safeHref = htmlEscape(href)
@@ -6798,19 +6803,19 @@ nonisolated private static func stageThumbnailForExport(
                             posterAttr = " poster='\(htmlEscape(poster))'"
                         }
                         mediaBlocks.append(
-                            "<div class='media'><video controls preload='metadata' playsinline\(posterAttr)><source src='\(safeHref)' type='\(htmlEscape(mime))'>Dein Browser kann dieses Video nicht abspielen. <a href='\(safeHref)'>Video öffnen</a>.</video></div>"
+                            "<div class='media'><video controls preload='metadata' playsinline\(posterAttr)\(titleAttr)\(openAriaAttr)><source src='\(safeHref)' type='\(htmlEscape(mime))'>Dein Browser kann dieses Video nicht abspielen. <a href='\(safeHref)'\(titleAttr)\(openAriaAttr)>Video öffnen</a>.</video></div>"
                         )
-                        mediaBlocks.append("<div class='fileline'>⬇︎ <a href='\(safeHref)' download>Video herunterladen</a></div>")
+                        mediaBlocks.append("<div class='fileline'>⬇︎ <a href='\(safeHref)'\(downloadAttr)\(titleAttr)\(downloadAriaAttr)>Video herunterladen</a></div>")
                         continue
                     }
 
                     if ["mp3","m4a","aac","wav","ogg","opus","flac","caf","aiff","aif","amr"].contains(ext) {
                         let mime = guessMime(fromName: fn)
                         mediaBlocks.append(
-                            "<div class='media'><audio controls preload='metadata'><source src='\(safeHref)' type='\(htmlEscape(mime))'>Dein Browser kann dieses Audio nicht abspielen. <a href='\(safeHref)'>Audio öffnen</a>.</audio></div>"
+                            "<div class='media'><audio controls preload='metadata'\(titleAttr)\(openAriaAttr)><source src='\(safeHref)' type='\(htmlEscape(mime))'>Dein Browser kann dieses Audio nicht abspielen. <a href='\(safeHref)'\(titleAttr)\(openAriaAttr)>Audio öffnen</a>.</audio></div>"
                         )
-                        mediaBlocks.append("<div class='fileline'>🎧 \(htmlEscape(fn))</div>")
-                        mediaBlocks.append("<div class='fileline'>⬇︎ <a href='\(safeHref)' download>Audio herunterladen</a></div>")
+                        mediaBlocks.append("<div class='fileline'>🎧 \(safeFn)</div>")
+                        mediaBlocks.append("<div class='fileline'>⬇︎ <a href='\(safeHref)'\(downloadAttr)\(titleAttr)\(downloadAriaAttr)>Audio herunterladen</a></div>")
                         continue
                     }
 
@@ -6821,24 +6826,24 @@ nonisolated private static func stageThumbnailForExport(
                         }
                         if let thumbHref {
                             mediaBlocks.append(
-                                "<div class='media'><a href='\(safeHref)' target='_blank' rel='noopener'><img alt='' src='\(htmlEscape(thumbHref))'></a></div>"
+                                "<div class='media'><a href='\(safeHref)'\(titleAttr)\(openAriaAttr) target='_blank' rel='noopener'><img alt='' src='\(htmlEscape(thumbHref))'></a></div>"
                             )
                         }
-                        mediaBlocks.append("<div class='fileline'>📎 <a href='\(safeHref)' target='_blank' rel='noopener'>\(htmlEscape(fn))</a></div>")
-                        mediaBlocks.append("<div class='fileline'>⬇︎ <a href='\(safeHref)' download>Datei speichern</a></div>")
+                        mediaBlocks.append("<div class='fileline'>📎 <a href='\(safeHref)'\(titleAttr)\(openAriaAttr) target='_blank' rel='noopener'>\(safeFn)</a></div>")
+                        mediaBlocks.append("<div class='fileline'>⬇︎ <a href='\(safeHref)'\(downloadAttr)\(titleAttr)\(downloadAriaAttr)>Datei speichern</a></div>")
                         continue
                     }
 
                     if ["jpg", "jpeg", "png", "gif", "webp", "heic", "heif"].contains(ext) {
                         mediaBlocks.append(
-                            "<div class='media media-img'><a href='\(safeHref)' target='_blank' rel='noopener'><img alt='' src='\(safeHref)'></a></div>"
+                            "<div class='media media-img'><a href='\(safeHref)'\(titleAttr)\(openAriaAttr) target='_blank' rel='noopener'><img alt='' src='\(safeHref)'></a></div>"
                         )
-                        mediaBlocks.append("<div class='fileline'>⬇︎ <a href='\(safeHref)' download>Bild speichern</a></div>")
+                        mediaBlocks.append("<div class='fileline'>⬇︎ <a href='\(safeHref)'\(downloadAttr)\(titleAttr)\(downloadAriaAttr)>Bild speichern</a></div>")
                         continue
                     }
 
-                    mediaBlocks.append("<div class='fileline'>📎 <a href='\(safeHref)' target='_blank' rel='noopener'>\(htmlEscape(fn))</a></div>")
-                    mediaBlocks.append("<div class='fileline'>⬇︎ <a href='\(safeHref)' download>Datei speichern</a></div>")
+                    mediaBlocks.append("<div class='fileline'>📎 <a href='\(safeHref)'\(titleAttr)\(openAriaAttr) target='_blank' rel='noopener'>\(safeFn)</a></div>")
+                    mediaBlocks.append("<div class='fileline'>⬇︎ <a href='\(safeHref)'\(downloadAttr)\(titleAttr)\(downloadAriaAttr)>Datei speichern</a></div>")
                     continue
                 }
 
@@ -6891,26 +6896,26 @@ nonisolated private static func stageThumbnailForExport(
                 if let previewDataURL {
                     if let href {
                         mediaBlocks.append(
-                            "<div class='media\(isImage ? " media-img" : "")'><a href='\(htmlEscape(href))' target='_blank' rel='noopener'><img alt='' src='\(previewDataURL)'></a></div>"
+                            "<div class='media\(isImage ? " media-img" : "")'><a href='\(htmlEscape(href))'\(titleAttr)\(openAriaAttr) target='_blank' rel='noopener'><img alt='' src='\(previewDataURL)'></a></div>"
                         )
                         if !isImage {
                             mediaBlocks.append(
-                                "<div class='fileline'>📎 <a href='\(htmlEscape(href))' target='_blank' rel='noopener'>\(htmlEscape(fn))</a></div>"
+                                "<div class='fileline'>📎 <a href='\(htmlEscape(href))'\(titleAttr)\(openAriaAttr) target='_blank' rel='noopener'>\(safeFn)</a></div>"
                             )
                         }
                     } else {
                         mediaBlocks.append("<div class='media\(isImage ? " media-img" : "")'><img alt='' src='\(previewDataURL)'></div>")
                         if !isImage {
-                            mediaBlocks.append("<div class='fileline'>📎 \(htmlEscape(fn))</div>")
+                            mediaBlocks.append("<div class='fileline'>📎 \(safeFn)</div>")
                         }
                     }
                 } else {
                     if let href {
                         mediaBlocks.append(
-                            "<div class='fileline'>📎 <a href='\(htmlEscape(href))' target='_blank' rel='noopener'>\(htmlEscape(fn))</a></div>"
+                            "<div class='fileline'>📎 <a href='\(htmlEscape(href))'\(titleAttr)\(openAriaAttr) target='_blank' rel='noopener'>\(safeFn)</a></div>"
                         )
                     } else {
-                        mediaBlocks.append("<div class='fileline'>📎 \(htmlEscape(fn))</div>")
+                        mediaBlocks.append("<div class='fileline'>📎 \(safeFn)</div>")
                     }
                 }
             }
