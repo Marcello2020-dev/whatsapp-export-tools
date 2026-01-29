@@ -7210,24 +7210,31 @@ nonisolated private static func stageThumbnailForExport(
                     // Resolve file location (direct or Media/ or recursive)
                     let override = attachmentOverrideByName?[fn]
                     let resolved = resolveAttachmentURL(fileName: fn, sourceDir: sourceDir)
-                    guard let src = override ?? resolved else {
-                        out.append("- \(emoji) \(fn)")
-                        continue
+                    let src = override ?? resolved
+
+                    // For determinism across pipelines, only emit links when we can form a relative href
+                    // under a known base directory (e.g., Sidecar mapping). Avoid absolute file:// paths.
+                    var href: String? = nil
+                    if let src, let baseDir = attachmentRelBaseDir {
+                        let staged = stageAttachmentForExport(
+                            source: src,
+                            attachmentsDir: chatURL.deletingLastPathComponent(),
+                            relativeTo: baseDir
+                        )
+                        if let rel = staged?.relHref, !rel.contains("://") {
+                            href = rel
+                        }
                     }
 
-                    // Stage into ./attachments for portability (wie HTML default Mode B)
-                    let staged = stageAttachmentForExport(
-                        source: src,
-                        attachmentsDir: chatURL.deletingLastPathComponent(),
-                        relativeTo: attachmentRelBaseDir
-                    )
-                    let href = staged?.relHref ?? src.absoluteURL.absoluteString
-
-                    // Images as inline preview, others as links
-                    if ["jpg","jpeg","png","gif","webp","heic","heif"].contains(ext) {
-                        out.append("![\(fn)](\(href))")
+                    // Images as inline preview, others as links (only when href is deterministic)
+                    if let href {
+                        if ["jpg","jpeg","png","gif","webp","heic","heif"].contains(ext) {
+                            out.append("![\(fn)](\(href))")
+                        } else {
+                            out.append("- [\(emoji) \(fn)](\(href))")
+                        }
                     } else {
-                        out.append("- [\(emoji) \(fn)](\(href))")
+                        out.append("- \(emoji) \(fn)")
                     }
                 }
             }
