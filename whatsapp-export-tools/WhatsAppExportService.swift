@@ -4736,6 +4736,41 @@ public enum WhatsAppExportService {
         return lines.joined(separator: "\n")
     }
 
+    /// For E-Mail HTML (text-only): standardized placeholders, no media links.
+    /// Format examples: [Image], [Video], [PDF: name.pdf], [Audio], [File: name.ext]
+    nonisolated private static func emailAttachmentPlaceholderText(forAttachments fns: [String]) -> String {
+        guard !fns.isEmpty else { return "" }
+
+        func kind(for ext: String) -> String {
+            let e = ext.lowercased()
+            if ["jpg","jpeg","png","gif","webp","heic","heif","tiff","tif","bmp"].contains(e) { return "Image" }
+            if ["mp4","mov","m4v","mkv","webm","avi","3gp"].contains(e) { return "Video" }
+            if ["m4a","mp3","wav","aac","caf","ogg","opus","flac","amr","aiff","aif"].contains(e) { return "Audio" }
+            if e == "pdf" { return "PDF" }
+            return "File"
+        }
+
+        var lines: [String] = []
+        lines.reserveCapacity(fns.count)
+
+        for fnRaw in fns {
+            let name = _normSpace(fnRaw)
+            let ext = (name as NSString).pathExtension
+            let k = kind(for: ext)
+            if name.isEmpty {
+                lines.append("[\(k)]")
+            } else if k == "PDF" {
+                lines.append("[PDF: \(name)]")
+            } else if k == "File" {
+                lines.append("[File: \(name)]")
+            } else {
+                lines.append("[\(k): \(name)]")
+            }
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
     private actor AsyncLimiter {
         private var available: Int
         private var waiters: [CheckedContinuation<Void, Never>] = []
@@ -6534,6 +6569,24 @@ nonisolated private static func stageThumbnailForExport(
 
             let textHTML: String = {
                 if urlOnly { return "" }
+
+                let wantsEmailPlaceholders = (!embedAttachments && !embedAttachmentThumbnailsOnly && !externalAttachments)
+
+                if wantsEmailPlaceholders {
+                    var combined = trimmedText
+                    if !attachmentsAll.isEmpty {
+                        let placeholders = emailAttachmentPlaceholderText(forAttachments: attachmentsAll)
+                        if !placeholders.isEmpty {
+                            if combined.isEmpty {
+                                combined = placeholders
+                            } else {
+                                combined += "\n" + placeholders
+                            }
+                        }
+                    }
+                    if combined.isEmpty { return "" }
+                    return htmlEscapeAndLinkifyKeepNewlines(combined, linkify: !enablePreviews)
+                }
 
                 // WICHTIG: Text-only Export soll Attachments sichtbar lassen
                 if trimmedText.isEmpty, !embedAttachments, !embedAttachmentThumbnailsOnly, !externalAttachments, !attachmentsAll.isEmpty {
