@@ -116,14 +116,19 @@ struct ContentView: View {
     }
 
     private static let customChatPartnerTag = "__CUSTOM_CHAT_PARTNER__"
-    private static let labelWidth: CGFloat = 110
+    private enum Layout {
+        static let labelWidth: CGFloat = 110
+        static let chatPartnerWidth: CGFloat = 320
+        static let overviewMaxWidth: CGFloat = 360
+        static let topColumnSpacing: CGFloat = 16
+        static let topLeftMinWidth: CGFloat = 520
+        static let optionsColumnMinWidth: CGFloat = 360
+    }
     private static let designMaxWidth: CGFloat = 1440
     private static let designMaxHeight: CGFloat = 900
     private static let aiMenuBadgeImage: NSImage = AIGlowPalette.menuBadgeImage
-    private static let logLineHeight: CGFloat = 17
+    private static let logEditorHeight: CGFloat = 220
     private static let logPadLinesPerSide: Int = 1
-    private static let logSectionVerticalPadding: CGFloat = 16
-    private static let logMinLinesContent: Int = 8
 
 #if DEBUG
     private static var didRunAIGlowHostStateCheck = false
@@ -324,9 +329,7 @@ struct ContentView: View {
     @State private var lastSidecarHTML: URL? = nil
     @State private var logText: String = ""
     @State private var logLines: [String] = []
-    @State private var logAutoScrollWorkItem: DispatchWorkItem? = nil
-    @State private var logAutoScrollEnabled: Bool = true
-    @State private var logExpanded: Bool = true
+    @State private var logExpanded: Bool = false
 
     @State private var showReplaceAlert: Bool = false
     @State private var replaceExistingNames: [String] = []
@@ -403,58 +406,82 @@ struct ContentView: View {
                 header
                     .waCard()
 
-                inputSection
+                topAreaSection
+
+                optionsSection
+
+                runSection
                     .waCard()
 
-                outputSection
-                    .waCard()
-
-                artifactsOptionsSection
-                    .waCard()
-
-                runStatusAndLogSection
+                logSection
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .scrollClipDisabled(true)
     }
 
-    private var inputSection: some View {
+    private var topAreaSection: some View {
+        ViewThatFits(in: .horizontal) {
+            topAreaWide
+            topAreaNarrow
+        }
+    }
+
+    private var topAreaWide: some View {
+        HStack(alignment: .top, spacing: Layout.topColumnSpacing) {
+            topLeftColumn
+                .frame(minWidth: Layout.topLeftMinWidth, maxWidth: .infinity, alignment: .leading)
+            overviewCard
+                .frame(width: Layout.overviewMaxWidth, alignment: .leading)
+        }
+    }
+
+    private var topAreaNarrow: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            topLeftColumn
+                .frame(maxWidth: .infinity, alignment: .leading)
+            overviewCard
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var topLeftColumn: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            inputPathSection
+            outputPathSection
+            participantsSection
+        }
+        .waCard()
+    }
+
+    private var inputPathSection: some View {
         WASection(title: "Input", systemImage: "tray.and.arrow.down") {
-            VStack(alignment: .leading, spacing: 10) {
-                Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 8) {
-                    GridRow {
-                        Text("Chat export:")
-                            .frame(width: Self.labelWidth, alignment: .leading)
+            Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 8) {
+                GridRow {
+                    Text("Chat export:")
+                        .frame(width: Layout.labelWidth, alignment: .leading)
 
-                        Text(displayChatPath(chatURL) ?? "—")
-                            .multilineTextAlignment(.leading)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .help(chatURL?.path ?? "")
+                    Text(displayChatPath(chatURL) ?? "—")
+                        .multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .help(chatURL?.path ?? "")
 
-                        Button("Choose…") { pickChatFile() }
-                            .buttonStyle(.bordered)
-                            .accessibilityLabel("Choose chat export")
-                            .disabled(isRunning)
-                    }
-                }
-
-                if chatURL != nil {
-                    Divider()
-                        .padding(.vertical, 2)
-                    inputSummary
+                    Button("Choose…") { pickChatFile() }
+                        .buttonStyle(.bordered)
+                        .accessibilityLabel("Choose chat export")
+                        .disabled(isRunning)
                 }
             }
         }
     }
 
-    private var outputSection: some View {
+    private var outputPathSection: some View {
         WASection(title: "Output", systemImage: "tray.and.arrow.up") {
             Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 8) {
                 GridRow {
                     Text("Output folder:")
-                        .frame(width: Self.labelWidth, alignment: .leading)
+                        .frame(width: Layout.labelWidth, alignment: .leading)
 
                     Text(displayOutputPath(outBaseURL) ?? "—")
                         .multilineTextAlignment(.leading)
@@ -471,7 +498,23 @@ struct ContentView: View {
         }
     }
 
-    private var inputSummary: some View {
+    private var participantsSection: some View {
+        WASection(title: "Participants", systemImage: "person.2") {
+            VStack(alignment: .leading, spacing: 10) {
+                chatPartnerSelectionRow
+                phoneOverridesSection
+            }
+        }
+    }
+
+    private var overviewCard: some View {
+        WASection(title: "Overview", systemImage: "info.circle") {
+            overviewSummary
+        }
+        .waCard()
+    }
+
+    private var overviewSummary: some View {
         VStack(alignment: .leading, spacing: 6) {
             if let badge = inputKindBadge {
                 Text(badge)
@@ -486,14 +529,14 @@ struct ContentView: View {
                 GridRow {
                     Text("Detected chat title:")
                         .foregroundStyle(.secondary)
-                        .frame(width: Self.labelWidth, alignment: .leading)
+                        .frame(width: Layout.labelWidth, alignment: .leading)
                     Text(detectedChatTitle ?? "—")
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 GridRow {
                     Text("Participant label:")
                         .foregroundStyle(.secondary)
-                        .frame(width: Self.labelWidth, alignment: .leading)
+                        .frame(width: Layout.labelWidth, alignment: .leading)
                     HStack(spacing: 6) {
                         Text(autoDetectedChatPartnerName ?? "—")
                         if let confidence = inputSummaryConfidenceText {
@@ -506,14 +549,14 @@ struct ContentView: View {
                 GridRow {
                     Text("Message date range:")
                         .foregroundStyle(.secondary)
-                        .frame(width: Self.labelWidth, alignment: .leading)
+                        .frame(width: Layout.labelWidth, alignment: .leading)
                     Text(inputSummaryDateRangeText)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 GridRow {
                     Text("Media counts:")
                         .foregroundStyle(.secondary)
-                        .frame(width: Self.labelWidth, alignment: .leading)
+                        .frame(width: Layout.labelWidth, alignment: .leading)
                     Text(inputSummaryMediaCountsText)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -522,30 +565,57 @@ struct ContentView: View {
         }
     }
 
-    private var artifactsOptionsSection: some View {
-        WASection(title: "Artifacts & Options", systemImage: "slider.horizontal.3") {
-            VStack(alignment: .leading, spacing: 10) {
-                outputAndSidecarOptions
-                chatPartnerSelectionRow
-                phoneOverridesSection
-            }
+    private var optionsSection: some View {
+        ViewThatFits(in: .horizontal) {
+            optionsWide
+            optionsNarrow
         }
     }
 
-    private var outputAndSidecarOptions: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            outputsHeader
-            outputsGrid
-
-            Divider()
-                .padding(.vertical, 1)
-
-            sidecarToggle
-            rawArchiveToggle
-            deleteOriginalsToggle
-            debugLoggingToggle
+    private var optionsWide: some View {
+        HStack(alignment: .top, spacing: 12) {
+            artifactsSection
+                .waCard()
+                .frame(minWidth: Layout.optionsColumnMinWidth, maxWidth: .infinity, alignment: .leading)
+            sourceHandlingSection
+                .waCard()
+                .frame(minWidth: Layout.optionsColumnMinWidth, maxWidth: .infinity, alignment: .leading)
         }
-        .controlSize(.small)
+    }
+
+    private var optionsNarrow: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            artifactsSection
+                .waCard()
+            sourceHandlingSection
+                .waCard()
+        }
+    }
+
+    private var artifactsSection: some View {
+        WASection(title: "Artifacts", systemImage: "doc.on.doc") {
+            VStack(alignment: .leading, spacing: 10) {
+                outputsHeader
+                outputsGrid
+
+                Divider()
+                    .padding(.vertical, 1)
+
+                sidecarToggle
+            }
+            .controlSize(.small)
+        }
+    }
+
+    private var sourceHandlingSection: some View {
+        WASection(title: "Source handling", systemImage: "archivebox") {
+            VStack(alignment: .leading, spacing: 8) {
+                rawArchiveToggle
+                deleteOriginalsToggle
+                debugLoggingToggle
+            }
+            .controlSize(.small)
+        }
     }
 
     private var outputsHeader: some View {
@@ -685,10 +755,11 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {
                 Text("Exported by:")
-                    .frame(width: Self.labelWidth, alignment: .leading)
+                    .frame(width: Layout.labelWidth, alignment: .leading)
                 Text(resolvedExporterName())
                     .lineLimit(1)
-                    .truncationMode(.tail)
+                    .truncationMode(.middle)
+                    .frame(width: Layout.chatPartnerWidth, alignment: .leading)
                 Spacer(minLength: 0)
             }
 
@@ -697,7 +768,7 @@ struct ContentView: View {
                     Text("Chat partner:")
                     helpIcon("Choose the person you chatted with (name or number).")
                 }
-                .frame(width: Self.labelWidth, alignment: .leading)
+                .frame(width: Layout.labelWidth, alignment: .leading)
 
                 VStack(alignment: .leading, spacing: 6) {
                     Menu {
@@ -735,7 +806,7 @@ struct ContentView: View {
                         HStack(spacing: 8) {
                             Text(chatPartnerSelectionDisplayName)
                                 .lineLimit(1)
-                                .truncationMode(.tail)
+                                .truncationMode(.middle)
                             Spacer(minLength: 0)
                             Image(systemName: "chevron.up.chevron.down")
                                 .font(.system(size: 10, weight: .semibold))
@@ -743,7 +814,7 @@ struct ContentView: View {
                         }
                         .padding(.horizontal, 8)
                         .padding(.vertical, 4)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .frame(width: Layout.chatPartnerWidth, alignment: .leading)
                         .background(
                             RoundedRectangle(cornerRadius: 6, style: .continuous)
                                 .stroke(.white.opacity(0.10), lineWidth: 1)
@@ -764,11 +835,13 @@ struct ContentView: View {
                         TextField("e.g. Alex", text: $chatPartnerCustomName)
                             .textFieldStyle(.roundedBorder)
                             .accessibilityLabel("Custom chat partner")
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .frame(width: Layout.chatPartnerWidth, alignment: .leading)
                             .disabled(isRunning)
                     }
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(width: Layout.chatPartnerWidth, alignment: .leading)
+
+                Spacer(minLength: 0)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -894,15 +967,6 @@ struct ContentView: View {
         .padding(.top, 2)
     }
 
-    private var runStatusAndLogSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            runSection
-                .waCard()
-
-            logSection
-        }
-    }
-
     private var runSection: some View {
         WASection(title: "Run", systemImage: "play.circle") {
             VStack(alignment: .leading, spacing: 8) {
@@ -987,51 +1051,16 @@ struct ContentView: View {
                     .buttonStyle(.bordered)
                     .disabled(runStatus != .ready)
 
-                    if isRunning && !logAutoScrollEnabled {
-                        Text("Auto-scroll paused")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                    }
-
                     Spacer()
                 }
 
-                ScrollViewReader { proxy in
-                    ScrollView([.vertical, .horizontal]) {
-                        VStack(alignment: .leading, spacing: 0) {
-                            Text(displayLogText)
-                                .font(.system(.body, design: .monospaced))
-                                .textSelection(.enabled)
-                                .fixedSize(horizontal: true, vertical: true)
-                                .frame(maxWidth: .infinity, alignment: .topLeading)
-                                .padding(8)
-                            Color.clear
-                                .frame(height: 1)
-                                .id("logBottom")
-                        }
-                    }
-                    .frame(maxWidth: .infinity, minHeight: logSectionHeight, maxHeight: logSectionHeight, alignment: .topLeading)
-                    .onChange(of: logLines.count) { _, _ in
-                        guard isRunning, logAutoScrollEnabled, !logLines.isEmpty else { return }
-                        logAutoScrollWorkItem?.cancel()
-                        let work = DispatchWorkItem {
-                            proxy.scrollTo("logBottom", anchor: .bottomLeading)
-                        }
-                        logAutoScrollWorkItem = work
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: work)
-                    }
-                    .simultaneousGesture(
-                        DragGesture().onChanged { _ in
-                            if isRunning {
-                                logAutoScrollEnabled = false
-                            }
-                        }
-                    )
-                }
+                TextEditor(text: .constant(displayLogText))
+                    .font(.system(.body, design: .monospaced))
+                    .frame(height: Self.logEditorHeight)
             }
             .padding(.top, 6)
         } label: {
-            Label("Log", systemImage: "doc.text.magnifyingglass")
+            Label("Log (Diagnostics)", systemImage: "doc.text.magnifyingglass")
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(.secondary)
         }
@@ -1700,33 +1729,6 @@ struct ContentView: View {
     }
 
     // MARK: - Logging
-
-    private var outputStepCount: Int {
-        var count = 0
-        if exportSortedAttachments { count += 1 }
-        if exportHTMLMax { count += 1 }
-        if exportHTMLMid { count += 1 }
-        if exportHTMLMin { count += 1 }
-        if exportMarkdown { count += 1 }
-        return count
-    }
-
-    private var maxLogLinesContent: Int {
-        let headerLines = 4 // Start + target folder + export name + options
-        let perArtifactLines = outputStepCount * 2
-        let footerLines = 1 // Completed
-        let bufferLines = 3
-        let lines = headerLines + perArtifactLines + footerLines + bufferLines
-        return max(lines, Self.logMinLinesContent)
-    }
-
-    private var maxLogLinesDisplay: Int {
-        maxLogLinesContent + (Self.logPadLinesPerSide * 2)
-    }
-
-    private var logSectionHeight: CGFloat {
-        Self.logLineHeight * CGFloat(maxLogLinesDisplay) + Self.logSectionVerticalPadding
-    }
 
     private var displayLogText: String {
         let pad = String(repeating: "\n", count: Self.logPadLinesPerSide)
@@ -2456,8 +2458,6 @@ struct ContentView: View {
     private func startExport(chatURL: URL, outDir: URL, allowOverwrite: Bool) {
         guard !isRunning else { return }
         clearLog()
-        logAutoScrollEnabled = true
-        logExpanded = true
         lastRunDuration = nil
         lastRunFailureSummary = nil
         lastRunFailureArtifact = nil
