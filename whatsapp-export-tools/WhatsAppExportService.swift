@@ -37,6 +37,36 @@ import PDFKit
 import UniformTypeIdentifiers
 #endif
 
+// MARK: - Central Debug Logger
+
+enum WETLog {
+    nonisolated private static let lock = NSLock()
+    nonisolated(unsafe) private static var debugEnabled: Bool = false
+
+    nonisolated static func configure(debugEnabled enabled: Bool) {
+        lock.lock()
+        debugEnabled = enabled
+        lock.unlock()
+    }
+
+    nonisolated static func isDebugEnabled() -> Bool {
+        lock.lock()
+        let value = debugEnabled
+        lock.unlock()
+        return value
+    }
+
+    nonisolated static func dbg(_ message: @autoclosure () -> String, sink: ((String) -> Void)? = nil) {
+        guard isDebugEnabled() else { return }
+        let line = "WET-DBG: \(message())"
+        if let sink {
+            sink(line)
+        } else {
+            print(line)
+        }
+    }
+}
+
 // MARK: - Time Policy (Deterministic)
 
 enum TimePolicy {
@@ -2532,7 +2562,7 @@ public enum WhatsAppExportService {
         resetStagedAttachmentCache()
 
         let fm = FileManager.default
-        let sidecarDebugEnabled = ProcessInfo.processInfo.environment["WET_SIDECAR_DEBUG"] == "1"
+        let sidecarDebugEnabled = WETLog.isDebugEnabled()
         let expectedAttachments = expectedAttachmentCount(prepared: prepared)
         let outPath = outDir.standardizedFileURL
         let sidecarHTML = outPath.appendingPathComponent("\(prepared.baseName)-sdc.html")
@@ -2554,7 +2584,7 @@ public enum WhatsAppExportService {
         let stagingBaseDir = outPath.appendingPathComponent(prepared.baseName, isDirectory: true)
         if allowStagingOverwrite && expectedAttachments > 0, fm.fileExists(atPath: stagingBaseDir.path) {
             if sidecarDebugEnabled {
-                print("DEBUG: SIDE: removing staged sidecar dir before render: \(stagingBaseDir.path)")
+                WETLog.dbg("DEBUG: SIDE: removing staged sidecar dir before render: \(stagingBaseDir.path)")
             }
             try? fm.removeItem(at: stagingBaseDir)
         }
@@ -2609,7 +2639,7 @@ public enum WhatsAppExportService {
         )
 
         if isDirectoryEmptyFirstLevel(sidecarBaseDir), sidecarDebugEnabled {
-            print("DEBUG: SIDE: sidecar base dir empty after render; keeping for validation")
+            WETLog.dbg("DEBUG: SIDE: sidecar base dir empty after render; keeping for validation")
         }
 
         return (sidecarBaseDir: sidecarBaseDir, sidecarHTML: sidecarHTML, expectedAttachments: expectedAttachments)
@@ -3604,7 +3634,7 @@ public enum WhatsAppExportService {
     }
 
     nonisolated private static func normalizeZipEntryTimestamps(zipURL: URL, destDir: URL) throws {
-        let debugEnabled = ProcessInfo.processInfo.environment["WET_DEBUG"] == "1"
+        let debugEnabled = WETLog.isDebugEnabled()
         let entries = try readZipEntryTimestamps(zipURL: zipURL)
         guard !entries.isEmpty else { return }
 
@@ -3790,7 +3820,7 @@ public enum WhatsAppExportService {
                     appliedAction = "keep-extracted"
                     if debugEnabled, let mismatch = offsetMismatch(candidate: candidateDate, extracted: extracted) {
                         let relSanitized = sanitizeDebugPath(rel)
-                        print("WET-DBG: ZIP mtime keep path=\(relSanitized) source=\(source.rawValue) delta=\(mismatch.delta)s offset=\(mismatch.offset)s")
+                        WETLog.dbg("ZIP mtime keep path=\(relSanitized) source=\(source.rawValue) delta=\(mismatch.delta)s offset=\(mismatch.offset)s")
                     }
                 }
             } else if let extracted = extractedMTime {
@@ -3812,11 +3842,11 @@ public enum WhatsAppExportService {
                     try fm.setAttributes([.modificationDate: appliedDate], ofItemAtPath: targetPath)
                     if debugEnabled {
                         let relSanitized = sanitizeDebugPath(rel)
-                        print("WET-DBG: ZIP mtime apply partial path=\(relSanitized)")
+                        WETLog.dbg("ZIP mtime apply partial path=\(relSanitized)")
                     }
                 } catch {
                     if debugEnabled {
-                        print("WET-DBG: ZIP mtime apply failed for \(sanitizeDebugPath(rel))")
+                        WETLog.dbg("ZIP mtime apply failed for \(sanitizeDebugPath(rel))")
                     }
                     throw ZipTimestampError.timestampApplyFailed
                 }
@@ -3826,18 +3856,18 @@ public enum WhatsAppExportService {
                 let isPDF = rel.lowercased().hasSuffix(".pdf")
                 if isPDF {
                     let epoch = Int(appliedDate.timeIntervalSince1970.rounded())
-                    print("WET-DBG: ZIP mtime set path=\(sanitizeDebugPath(rel)) source=\(appliedSource.rawValue) action=\(appliedAction) epoch=\(epoch)")
+                    WETLog.dbg("ZIP mtime set path=\(sanitizeDebugPath(rel)) source=\(appliedSource.rawValue) action=\(appliedAction) epoch=\(epoch)")
                 }
                 if let actual = (try? fm.attributesOfItem(atPath: targetPath))?[.modificationDate] as? Date {
                     let delta = abs(actual.timeIntervalSince1970 - appliedDate.timeIntervalSince1970)
                     if delta > 2.0 {
                         let intendedEpoch = Int(appliedDate.timeIntervalSince1970.rounded())
                         let actualEpoch = Int(actual.timeIntervalSince1970.rounded())
-                        print("WET-DBG: ZIP mtime verify path=\(sanitizeDebugPath(rel)) source=\(appliedSource.rawValue) intended=\(intendedEpoch) actual=\(actualEpoch)")
+                        WETLog.dbg("ZIP mtime verify path=\(sanitizeDebugPath(rel)) source=\(appliedSource.rawValue) intended=\(intendedEpoch) actual=\(actualEpoch)")
                     }
                 } else {
                     let intendedEpoch = Int(appliedDate.timeIntervalSince1970.rounded())
-                    print("WET-DBG: ZIP mtime verify path=\(sanitizeDebugPath(rel)) source=\(appliedSource.rawValue) intended=\(intendedEpoch) actual=-1")
+                    WETLog.dbg("ZIP mtime verify path=\(sanitizeDebugPath(rel)) source=\(appliedSource.rawValue) intended=\(intendedEpoch) actual=-1")
                 }
             }
         }
@@ -4816,7 +4846,7 @@ public enum WhatsAppExportService {
         attachmentEntries: [AttachmentCanonicalEntry]? = nil
     ) async throws -> SidecarFolderTree {
         let fm = FileManager.default
-        let sidecarDebugEnabled = ProcessInfo.processInfo.environment["WET_SIDECAR_DEBUG"] == "1"
+        let sidecarDebugEnabled = WETLog.isDebugEnabled()
 
         let baseFolderURL = outDir.appendingPathComponent(folderName, isDirectory: true)
         if fm.fileExists(atPath: baseFolderURL.path) {
@@ -4884,7 +4914,7 @@ public enum WhatsAppExportService {
 
         let caps = wetConcurrencyCaps
         if sidecarDebugEnabled {
-            print("WET-DBG: CONCURRENCY: sidecar attachments cap=\(caps.io) jobs=\(jobs.count)")
+            WETLog.dbg("CONCURRENCY: sidecar attachments cap=\(caps.io) jobs=\(jobs.count)")
         }
         let limiter = AsyncLimiter(caps.io)
         var results = Array<SortedAttachmentBucket?>(repeating: nil, count: jobs.count)
@@ -5160,8 +5190,8 @@ public enum WhatsAppExportService {
                     try writeExclusiveData(decoded.data, to: dest)
                     if previewDebugEnabled() {
                         previewDebugLog("stage preview hash=\(hash) bytes=\(decoded.data.count) dest=\(dest.lastPathComponent)")
-                    } else if ProcessInfo.processInfo.environment["WET_SIDECAR_DEBUG"] == "1" {
-                        print("WET-DBG: stage preview -> \(dest.path)")
+                    } else {
+                        WETLog.dbg("stage preview -> \(dest.path)")
                     }
                     lastError = nil
                     break
@@ -5434,11 +5464,9 @@ nonisolated private static func stageThumbnailForExport(
             return relativeHref(for: dest, relativeTo: baseDir)
         }
 
-    if let jpg = await thumbnailJPEGData(for: src, maxPixel: thumbMaxPixel, quality: thumbJPEGQuality) {
+        if let jpg = await thumbnailJPEGData(for: src, maxPixel: thumbMaxPixel, quality: thumbJPEGQuality) {
             try writeExclusiveData(jpg, to: dest)
-            if ProcessInfo.processInfo.environment["WET_SIDECAR_DEBUG"] == "1" {
-                print("WET-DBG: stage thumb -> \(dest.path)")
-            }
+            WETLog.dbg("stage thumb -> \(dest.path)")
             return relativeHref(for: dest, relativeTo: baseDir)
         }
 
@@ -6673,9 +6701,9 @@ nonisolated private static func stageThumbnailForExport(
         let chatDir = chatURL.deletingLastPathComponent().standardizedFileURL
         let externalAssetsRoot = externalAssetsDir?.standardizedFileURL
         let externalPreviewsDir = externalAssetsRoot?.appendingPathComponent("_previews", isDirectory: true)
-        if ProcessInfo.processInfo.environment["WET_SIDECAR_DEBUG"] == "1", let externalAssetsRoot {
-            print("WET-DBG: externalAssetsRoot: \(externalAssetsRoot.path)")
-            if let externalPreviewsDir { print("WET-DBG: externalPreviewsDir: \(externalPreviewsDir.path)") }
+        if let externalAssetsRoot {
+            WETLog.dbg("externalAssetsRoot: \(externalAssetsRoot.path)")
+            if let externalPreviewsDir { WETLog.dbg("externalPreviewsDir: \(externalPreviewsDir.path)") }
         }
 
         let caps = wetConcurrencyCaps
@@ -7467,12 +7495,12 @@ nonisolated private static func stageThumbnailForExport(
         if let c = attrs[.creationDate] as? Date { newAttrs[.creationDate] = c }
         if let m = attrs[.modificationDate] as? Date { newAttrs[.modificationDate] = m }
 
-        if ProcessInfo.processInfo.environment["WET_DEBUG"] == "1" {
+        if WETLog.isDebugEnabled() {
             let srcExt = source.pathExtension.lowercased()
             let dstExt = dest.pathExtension.lowercased()
             if (srcExt == "pdf" || dstExt == "pdf"), let m = newAttrs[.modificationDate] as? Date {
                 let epoch = Int(m.timeIntervalSince1970.rounded())
-                print("WET-DBG: PDF mtime apply epoch=\(epoch) src=\(source.path) dst=\(dest.path)")
+                WETLog.dbg("PDF mtime apply epoch=\(epoch) src=\(source.path) dst=\(dest.path)")
             }
         }
 
@@ -7501,9 +7529,7 @@ nonisolated private static func stageThumbnailForExport(
             )
             return contents.isEmpty
         } catch {
-            if ProcessInfo.processInfo.environment["WET_SIDECAR_DEBUG"] == "1" {
-                print("WET-DBG: isDirectoryEmptyFirstLevel failed for \(url.path): \(error)")
-            }
+            WETLog.dbg("isDirectoryEmptyFirstLevel failed for \(url.path): \(error)")
             return false
         }
     }
@@ -7515,18 +7541,14 @@ nonisolated private static func stageThumbnailForExport(
             includingPropertiesForKeys: [.isRegularFileKey],
             options: [.skipsPackageDescendants]
         ) else {
-            if ProcessInfo.processInfo.environment["WET_SIDECAR_DEBUG"] == "1" {
-                print("WET-DBG: isDirectoryEmptyRecursive failed for \(url.path)")
-            }
+            WETLog.dbg("isDirectoryEmptyRecursive failed for \(url.path)")
             return false
         }
         for case let entry as URL in en {
             // If we cannot query resource values for any entry, err on the side of "not empty".
             // This prevents accidental deletion of directories that are actually populated.
             guard let rv = try? entry.resourceValues(forKeys: [.isRegularFileKey]) else {
-                if ProcessInfo.processInfo.environment["WET_SIDECAR_DEBUG"] == "1" {
-                    print("WET-DBG: isDirectoryEmptyRecursive: could not read resourceValues for \(entry.path)")
-                }
+                WETLog.dbg("isDirectoryEmptyRecursive: could not read resourceValues for \(entry.path)")
                 return false
             }
             if rv.isRegularFile == true {
@@ -7607,7 +7629,6 @@ nonisolated private static func stageThumbnailForExport(
     nonisolated static func cleanupTemporaryExportFolders(in dir: URL) throws {
         let fm = FileManager.default
         let base = dir.standardizedFileURL
-        let debugEnabled = ProcessInfo.processInfo.environment["WET_SIDECAR_DEBUG"] == "1"
         guard let contents = try? fm.contentsOfDirectory(
             at: base,
             includingPropertiesForKeys: [.isDirectoryKey],
@@ -7619,9 +7640,7 @@ nonisolated private static func stageThumbnailForExport(
         var failed: [String] = []
         for u in contents where u.lastPathComponent.hasPrefix(".wa_export_tmp_") {
             do {
-                if debugEnabled {
-                    print("WET-DBG: removeItem: \(u.path)")
-                }
+                WETLog.dbg("removeItem: \(u.path)")
                 try fm.removeItem(at: u)
             } catch {
                 failed.append(u.lastPathComponent)
@@ -8250,7 +8269,6 @@ nonisolated private static func stageThumbnailForExport(
         originalZipURL: URL? = nil
     ) throws {
         let fm = FileManager.default
-        let debugEnabled = ProcessInfo.processInfo.environment["WET_SIDECAR_DEBUG"] == "1"
 
         let zipURL = originalZipURL ?? pickSiblingZipURL(sourceDir: sourceDir)
         guard let zipURL else { return }
@@ -8264,10 +8282,8 @@ nonisolated private static func stageThumbnailForExport(
             overridePartnerRaw: overridePartnerRaw
         )
         let destName = "\(afterBase).zip"
-        if debugEnabled {
-            print("WET-DBG: SIDECAR ZIP NAME BEFORE: \"\(zipURL.lastPathComponent)\"")
-            print("WET-DBG: SIDECAR ZIP NAME AFTER: \"\(destName)\"")
-        }
+        WETLog.dbg("SIDECAR ZIP NAME BEFORE: \"\(zipURL.lastPathComponent)\"")
+        WETLog.dbg("SIDECAR ZIP NAME AFTER: \"\(destName)\"")
 
         let dest = destParentDir.appendingPathComponent(destName)
         if fm.fileExists(atPath: dest.path) {

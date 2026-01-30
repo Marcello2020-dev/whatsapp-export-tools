@@ -16,6 +16,7 @@ struct ContentView: View {
         let outDir: URL
         let exportDir: URL
         let tempWorkspaceURL: URL?
+        let debugEnabled: Bool
         let allowOverwrite: Bool
         let isOverwriteRetry: Bool
         let preflight: OutputPreflight?
@@ -2284,11 +2285,9 @@ struct ContentView: View {
         )
         
         let debugEnabled = wetDebugLoggingEnabled
-            || env["WET_SIDECAR_DEBUG"] == "1"
-            || env["WET_DEBUG"] == "1"
+        WETLog.configure(debugEnabled: debugEnabled)
         let debugLog: (String) -> Void = { [appendLog] message in
-            guard debugEnabled else { return }
-            appendLog("WET-DBG: \(message)")
+            WETLog.dbg(message, sink: appendLog)
         }
 
         debugLog("UI PARTNER OVERRIDE RAW: \"\(overridePartnerEffective ?? "")\"")
@@ -2328,6 +2327,7 @@ struct ContentView: View {
             outDir: outDir,
             exportDir: exportDir,
             tempWorkspaceURL: snapshot.tempWorkspaceURL,
+            debugEnabled: debugEnabled,
             allowOverwrite: allowOverwrite,
             isOverwriteRetry: isOverwriteRetry,
             preflight: preflight,
@@ -2375,12 +2375,9 @@ struct ContentView: View {
         }
         let logger = ExportProgressLogger(append: append)
         let env = ProcessInfo.processInfo.environment
-        let debugEnabled = wetDebugLoggingEnabled
-            || env["WET_SIDECAR_DEBUG"] == "1"
-            || env["WET_DEBUG"] == "1"
+        let debugEnabled = context.debugEnabled
         let debugLog: @Sendable (String) -> Void = { [appendLog] message in
-            guard debugEnabled else { return }
-            appendLog("WET-DBG: \(message)")
+            WETLog.dbg(message, sink: appendLog)
         }
         let perfEnabled = env["WET_PERF"] == "1"
 
@@ -2653,7 +2650,7 @@ struct ContentView: View {
         let plan = context.plan
         let env = ProcessInfo.processInfo.environment
         let perfEnabled = env["WET_PERF"] == "1"
-        let verboseDebug = env["WET_DEBUG_VERBOSE"] == "1"
+        let verboseDebug = debugEnabled && env["WET_DEBUG_VERBOSE"] == "1"
         if debugEnabled {
             let caps = WhatsAppExportService.concurrencyCaps()
             debugLog("CONCURRENCY CAPS: cpu=\(caps.cpu) io=\(caps.io)")
@@ -2827,7 +2824,7 @@ struct ContentView: View {
             return count
         }
 
-        let sidecarDebugEnabled = debugEnabled || ProcessInfo.processInfo.environment["WET_SIDECAR_DEBUG"] == "1"
+        let sidecarDebugEnabled = debugEnabled
 
         func logSidecarTree(root: URL, label: String) {
             guard sidecarDebugEnabled else { return }
