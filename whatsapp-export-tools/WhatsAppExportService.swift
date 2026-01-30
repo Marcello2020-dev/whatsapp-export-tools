@@ -410,7 +410,7 @@ struct TemporaryExportFolderCleanupError: Error, LocalizedError, Sendable {
     let failedFolders: [String]
 
     var errorDescription: String? {
-        "Konnte temporäre Export-Ordner nicht entfernen: \(failedFolders.joined(separator: ", "))"
+        "Could not remove temporary export folders: \(failedFolders.joined(separator: ", "))"
     }
 }
 
@@ -418,7 +418,7 @@ struct OutputCollisionError: Error, LocalizedError, Sendable {
     let url: URL
 
     var errorDescription: String? {
-        "Ziel existiert bereits (keine Suffixe erlaubt): \(url.lastPathComponent)"
+        "Destination already exists (no suffixes allowed): \(url.lastPathComponent)"
     }
 }
 
@@ -427,7 +427,7 @@ struct StagingDirectoryCreationError: Error, LocalizedError, Sendable {
     let underlying: Error
 
     var errorDescription: String? {
-        "Konnte temporären Export-Ordner nicht anlegen: \(url.lastPathComponent)"
+        "Could not create temporary export folder: \(url.lastPathComponent)"
     }
 }
 
@@ -470,7 +470,7 @@ public enum HTMLVariant: String, CaseIterable, Hashable, Sendable {
     nonisolated public var perfLabel: String {
         switch self {
         case .embedAll: return "Max"
-        case .thumbnailsOnly: return "Kompakt"
+        case .thumbnailsOnly: return "Compact"
         case .textOnly: return "E-Mail"
         }
     }

@@ -63,6 +63,27 @@ struct ContentView: View {
         }
     }
 
+    private enum RunStatus: Equatable {
+        case ready
+        case validating
+        case exporting(String)
+        case completed
+        case failed
+        case cancelled
+    }
+
+    private enum ArtifactProgressState: String {
+        case pending = "Pending"
+        case running = "Running"
+        case done = "Done"
+    }
+
+    private struct ArtifactProgress: Identifiable, Equatable {
+        let id: String
+        let label: String
+        var state: ArtifactProgressState
+    }
+
     private struct OutputPreflight: Sendable {
         let baseName: String
         let existing: [URL]
@@ -73,7 +94,7 @@ struct ContentView: View {
         let underlying: Error
 
         var errorDescription: String? {
-            "Konnte vorhandene Ausgabe nicht löschen: \(url.lastPathComponent)"
+            "Could not delete existing output: \(url.lastPathComponent)"
         }
     }
 
@@ -98,7 +119,6 @@ struct ContentView: View {
     private static let labelWidth: CGFloat = 110
     private static let designMaxWidth: CGFloat = 1440
     private static let designMaxHeight: CGFloat = 900
-    private static let optionsColumnMaxWidth: CGFloat = 480
     private static let aiMenuBadgeImage: NSImage = AIGlowPalette.menuBadgeImage
     private static let logLineHeight: CGFloat = 17
     private static let logPadLinesPerSide: Int = 1
@@ -126,11 +146,11 @@ struct ContentView: View {
         var title: String {
             switch self {
             case .embedAll:
-                return "Maximal: Alles einbetten (größte Datei)"
+                return "Max: Embed everything (largest file)"
             case .thumbnailsOnly:
-                return "Mittel: Nur Thumbnails einbetten"
+                return "Compact: Embed thumbnails only"
             case .textOnly:
-                return "Minimal: Nur Text (keine Linkvorschauen, keine Thumbnails)"
+                return "E-Mail: Text only (no previews, no thumbnails)"
             }
         }
 
@@ -139,7 +159,7 @@ struct ContentView: View {
             case .embedAll:
                 return "Max"
             case .thumbnailsOnly:
-                return "Kompakt"
+                return "Compact"
             case .textOnly:
                 return "E-Mail"
             }
@@ -294,9 +314,19 @@ struct ContentView: View {
     @State private var autoSuggestedPhoneNames: [String: String] = [:]
 
     @State private var isRunning: Bool = false
+    @State private var runStatus: RunStatus = .ready
+    @State private var runProgress: [ArtifactProgress] = []
+    @State private var lastRunDuration: TimeInterval? = nil
+    @State private var lastRunFailureSummary: String? = nil
+    @State private var lastRunFailureArtifact: String? = nil
+    @State private var currentArtifactLabel: String? = nil
+    @State private var lastExportDir: URL? = nil
+    @State private var lastSidecarHTML: URL? = nil
     @State private var logText: String = ""
     @State private var logLines: [String] = []
     @State private var logAutoScrollWorkItem: DispatchWorkItem? = nil
+    @State private var logAutoScrollEnabled: Bool = true
+    @State private var logExpanded: Bool = true
 
     @State private var showReplaceAlert: Bool = false
     @State private var replaceExistingNames: [String] = []
@@ -331,26 +361,26 @@ struct ContentView: View {
             runAIGlowHostStateCheckIfNeeded()
 #endif
         }
-        .alert("Datei bereits vorhanden", isPresented: $showReplaceAlert) {
-            Button("Abbrechen", role: .cancel) { }
-            Button("Ersetzen") {
+        .alert("Export already exists", isPresented: $showReplaceAlert) {
+            Button("Cancel", role: .cancel) { }
+            Button("Replace") {
                 guard let chatURL, let outBaseURL else { return }
                 overwriteConfirmed = true
                 startExport(chatURL: chatURL, outDir: outBaseURL, allowOverwrite: true)
             }
         } message: {
             Text(
-                "Im Zielordner existieren bereits:\n" +
+                "The output folder already contains:\n" +
                 replaceExistingNames.joined(separator: "\n") +
-                "\n\nSoll(en) diese Datei(en) ersetzt werden?"
+                "\n\nReplace these items?"
             )
         }
-        .alert("Originaldaten löschen?", isPresented: $showDeleteOriginalsAlert) {
-            Button("Abbrechen", role: .cancel) {
+        .alert("Delete originals?", isPresented: $showDeleteOriginalsAlert) {
+            Button("Cancel", role: .cancel) {
                 deleteOriginalCandidates = []
                 deleteOriginalTempWorkspaceURL = nil
             }
-            Button("Originale löschen", role: .destructive) {
+            Button("Delete originals", role: .destructive) {
                 let items = deleteOriginalCandidates
                 deleteOriginalCandidates = []
                 let tempWorkspace = deleteOriginalTempWorkspaceURL
@@ -360,7 +390,7 @@ struct ContentView: View {
         } message: {
             let lines = deleteOriginalCandidates.map { $0.path }.joined(separator: "\n")
             Text(
-                "Die Roharchiv-Kopie wurde geprüft. Diese Originale können gelöscht werden:\n" +
+                "Raw archive copy verified. These originals can be deleted:\n" +
                 lines
             )
         }
@@ -368,22 +398,33 @@ struct ContentView: View {
     }
 
     private var mainContent: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            header
-                .waCard()
+        ScrollView(.vertical) {
+            VStack(alignment: .leading, spacing: 12) {
+                header
+                    .waCard()
 
-            inputsSection
+                inputSection
+                    .waCard()
 
-            optionsAndLogSection
+                outputSection
+                    .waCard()
+
+                artifactsOptionsSection
+                    .waCard()
+
+                runStatusAndLogSection
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .scrollClipDisabled(true)
     }
 
-    private var inputsSection: some View {
-        WASection(title: "Eingaben", systemImage: "bubble.left.and.bubble.right.fill") {
+    private var inputSection: some View {
+        WASection(title: "Input", systemImage: "tray.and.arrow.down") {
             VStack(alignment: .leading, spacing: 10) {
                 Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 8) {
                     GridRow {
-                        Text("Chat-Export:")
+                        Text("Chat export:")
                             .frame(width: Self.labelWidth, alignment: .leading)
 
                         Text(displayChatPath(chatURL) ?? "—")
@@ -392,24 +433,10 @@ struct ContentView: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .help(chatURL?.path ?? "")
 
-                        Button("Auswählen…") { pickChatFile() }
+                        Button("Choose…") { pickChatFile() }
                             .buttonStyle(.bordered)
-                            .accessibilityLabel("Chat-Export auswählen")
-                    }
-
-                    GridRow {
-                        Text("Zielordner:")
-                            .frame(width: Self.labelWidth, alignment: .leading)
-
-                        Text(displayOutputPath(outBaseURL) ?? "—")
-                            .multilineTextAlignment(.leading)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .help(outBaseURL?.path ?? "")
-
-                        Button("Auswählen…") { pickOutputFolder() }
-                            .buttonStyle(.bordered)
-                            .accessibilityLabel("Zielordner auswählen")
+                            .accessibilityLabel("Choose chat export")
+                            .disabled(isRunning)
                     }
                 }
 
@@ -420,7 +447,28 @@ struct ContentView: View {
                 }
             }
         }
-        .waCard()
+    }
+
+    private var outputSection: some View {
+        WASection(title: "Output", systemImage: "tray.and.arrow.up") {
+            Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 8) {
+                GridRow {
+                    Text("Output folder:")
+                        .frame(width: Self.labelWidth, alignment: .leading)
+
+                    Text(displayOutputPath(outBaseURL) ?? "—")
+                        .multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .help(outBaseURL?.path ?? "")
+
+                    Button("Choose…") { pickOutputFolder() }
+                        .buttonStyle(.bordered)
+                        .accessibilityLabel("Choose output folder")
+                        .disabled(isRunning)
+                }
+            }
+        }
     }
 
     private var inputSummary: some View {
@@ -474,36 +522,14 @@ struct ContentView: View {
         }
     }
 
-    private var optionsAndLogSection: some View {
-        HStack(alignment: .top, spacing: 12) {
-            optionsColumn
-            logSection
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-    }
-
-    private var optionsColumn: some View {
-        ScrollView(.vertical) {
-            VStack(alignment: .leading, spacing: 12) {
-                optionsSection
-                actionsRow
-            }
-            .frame(width: Self.optionsColumnMaxWidth, alignment: .topLeading)
-        }
-        .scrollClipDisabled(true)
-        .frame(width: Self.optionsColumnMaxWidth, alignment: .topLeading)
-        .frame(maxHeight: .infinity, alignment: .topLeading)
-    }
-
-    private var optionsSection: some View {
-        WASection(title: "Optionen", systemImage: "slider.horizontal.3") {
+    private var artifactsOptionsSection: some View {
+        WASection(title: "Artifacts & Options", systemImage: "slider.horizontal.3") {
             VStack(alignment: .leading, spacing: 10) {
                 outputAndSidecarOptions
                 chatPartnerSelectionRow
                 phoneOverridesSection
             }
         }
-        .waCard()
     }
 
     private var outputAndSidecarOptions: some View {
@@ -524,10 +550,10 @@ struct ContentView: View {
 
     private var outputsHeader: some View {
         HStack(spacing: 6) {
-            Text("Ausgaben")
+            Text("Artifacts")
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(.secondary)
-            helpIcon("Alle Ausgaben sind optional; Standard: alles an (inkl. Sidecar).")
+            helpIcon("All artifacts are optional; default: all enabled (including Sidecar).")
         }
     }
 
@@ -536,8 +562,8 @@ struct ContentView: View {
             GridRow {
                 Toggle(isOn: $exportHTMLMax) {
                     HStack(spacing: 6) {
-                        Text("Max (1 Datei, alles enthalten)")
-                        helpIcon("Größte Datei, alles eingebettet (Base64). Ideal für vollständige Offline-Ansicht; Datei wird deutlich größer.")
+                        Text("Max (single file, all content embedded)")
+                        helpIcon("Largest file; embeds everything (Base64). Ideal for full offline viewing; file will be much larger.")
                     }
                 }
                 .accessibilityLabel("HTML Max")
@@ -549,11 +575,11 @@ struct ContentView: View {
 
                 Toggle(isOn: $exportHTMLMid) {
                     HStack(spacing: 6) {
-                        Text("Kompakt (mit Vorschauen)")
-                        helpIcon("Gute Übersicht mit kleinerer Datei. Thumbnails eingebettet, große Medien ausgelagert.")
+                        Text("Compact (with previews)")
+                        helpIcon("Smaller file with previews. Thumbnails embedded; large media stored externally.")
                     }
                 }
-                .accessibilityLabel("HTML Kompakt")
+                .accessibilityLabel("HTML Compact")
                 .disabled(isRunning)
                 .onChange(of: exportHTMLMid) {
                     persistExportSettings()
@@ -563,8 +589,8 @@ struct ContentView: View {
             GridRow {
                 Toggle(isOn: $exportHTMLMin) {
                     HStack(spacing: 6) {
-                        Text("E-Mail (minimal, Text-only)")
-                        helpIcon("Sehr klein, nur Text. Keine Medien oder Vorschauen.")
+                        Text("E-Mail (minimal, text-only)")
+                        helpIcon("Very small; text only. No media or previews.")
                     }
                 }
                 .accessibilityLabel("HTML E-Mail")
@@ -577,10 +603,10 @@ struct ContentView: View {
                 Toggle(isOn: $exportMarkdown) {
                     HStack(spacing: 6) {
                         Text("Markdown (.md)")
-                        helpIcon("Erzeugt eine Markdown-Ausgabe des Chats.")
+                        helpIcon("Creates a Markdown export of the chat.")
                     }
                 }
-                .accessibilityLabel("Markdown Ausgabe")
+                .accessibilityLabel("Markdown export")
                 .disabled(isRunning)
                 .onChange(of: exportMarkdown) {
                     persistExportSettings()
@@ -593,8 +619,8 @@ struct ContentView: View {
     private var sidecarToggle: some View {
         Toggle(isOn: $exportSortedAttachments) {
             HStack(spacing: 6) {
-                Text("Sidecar (Archiv, beste Performance)")
-                Text("Empfohlen")
+                Text("Sidecar (archive, best performance)")
+                Text("Recommended")
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 6)
@@ -603,10 +629,10 @@ struct ContentView: View {
                         Capsule(style: .continuous)
                             .fill(.white.opacity(0.08))
                     )
-                helpIcon("Wie Max, aber Medien im Sidecar-Ordner. Ideal als ZIP (HTML + Ordner) und schneller im Browser.")
+                helpIcon("Like Max, but media lives in the Sidecar folder. Ideal for ZIPs (HTML + folder) and faster in the browser.")
             }
         }
-        .accessibilityLabel("Sidecar Ausgabe")
+        .accessibilityLabel("Sidecar export")
         .disabled(isRunning)
         .onChange(of: exportSortedAttachments) {
             persistExportSettings()
@@ -616,11 +642,11 @@ struct ContentView: View {
     private var deleteOriginalsToggle: some View {
         Toggle(isOn: $deleteOriginalsAfterSidecar) {
             HStack(spacing: 6) {
-                Text("Originaldaten nach Sidecar-Erstellung löschen (optional, nach Prüfung)")
-                helpIcon("Vergleicht Roharchiv und Original. Löschen nur nach identischer Prüfung.")
+                Text("Delete originals after Sidecar (optional, after verification)")
+                helpIcon("Compares raw archive and originals. Delete only after verified match.")
             }
         }
-        .accessibilityLabel("Originaldaten löschen")
+        .accessibilityLabel("Delete originals")
         .disabled(isRunning || !exportSortedAttachments)
         .onChange(of: deleteOriginalsAfterSidecar) {
             persistExportSettings()
@@ -630,11 +656,11 @@ struct ContentView: View {
     private var rawArchiveToggle: some View {
         Toggle(isOn: $includeRawArchive) {
             HStack(spacing: 6) {
-                Text("Roharchiv der Originaldaten kopieren")
-                helpIcon("Legt eine Kopie des WhatsApp-Exports als <ExportBase>__raw/ neben die Ausgaben.")
+                Text("Copy raw WhatsApp export archive")
+                helpIcon("Creates a copy of the WhatsApp export as <ExportBase>__raw/ next to the outputs.")
             }
         }
-        .accessibilityLabel("Roharchiv kopieren")
+        .accessibilityLabel("Copy raw archive")
         .disabled(isRunning)
         .onChange(of: includeRawArchive) {
             persistExportSettings()
@@ -658,7 +684,7 @@ struct ContentView: View {
     private var chatPartnerSelectionRow: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {
-                Text("Erstellt von:")
+                Text("Exported by:")
                     .frame(width: Self.labelWidth, alignment: .leading)
                 Text(resolvedExporterName())
                     .lineLimit(1)
@@ -668,8 +694,8 @@ struct ContentView: View {
 
             HStack(spacing: 12) {
                 HStack(spacing: 6) {
-                    Text("Chat-Partner:")
-                    helpIcon("Wähle das Gegenüber (Name oder Nummer), mit dem du gechattet hast.")
+                    Text("Chat partner:")
+                    helpIcon("Choose the person you chatted with (name or number).")
                 }
                 .frame(width: Self.labelWidth, alignment: .leading)
 
@@ -699,7 +725,7 @@ struct ContentView: View {
                             set: { if $0 { chatPartnerSelection = Self.customChatPartnerTag } }
                         )) {
                             Label {
-                                Text("Benutzerdefiniert…")
+                                Text("Custom…")
                             } icon: {
                                 Image(systemName: "circle")
                                     .opacity(0)
@@ -731,13 +757,15 @@ struct ContentView: View {
                         )
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("Chat-Partner")
+                    .accessibilityLabel("Chat partner")
+                    .disabled(isRunning)
 
                     if chatPartnerSelection == Self.customChatPartnerTag {
-                        TextField("z. B. Alex", text: $chatPartnerCustomName)
+                        TextField("e.g. Alex", text: $chatPartnerCustomName)
                             .textFieldStyle(.roundedBorder)
-                            .accessibilityLabel("Chat-Partner benutzerdefiniert")
+                            .accessibilityLabel("Custom chat partner")
                             .frame(maxWidth: .infinity, alignment: .leading)
+                            .disabled(isRunning)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -749,7 +777,7 @@ struct ContentView: View {
     private var chatPartnerSelectionDisplayName: String {
         if chatPartnerSelection == Self.customChatPartnerTag {
             let trimmed = chatPartnerCustomName.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? "Benutzerdefiniert…" : trimmed
+            return trimmed.isEmpty ? "Custom…" : trimmed
         }
         let trimmed = chatPartnerSelection.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
@@ -759,7 +787,7 @@ struct ContentView: View {
             if let fallback = chatPartnerCandidates.first {
                 return applyPhoneOverrideIfNeeded(fallback)
             }
-            return "Chat-Partner"
+            return "Chat partner"
         }
         return applyPhoneOverrideIfNeeded(trimmed)
     }
@@ -772,10 +800,10 @@ struct ContentView: View {
 
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 6) {
-                    Text("Unbekannte Telefonnummern (optional umbenennen)")
+                    Text("Unknown phone numbers (optional rename)")
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(.secondary)
-                    helpIcon("Diese Eingabe wird nur für Teilnehmende angeboten, die im Export ausschließlich als Telefonnummer erscheinen.")
+                    helpIcon("Shown only for participants that appear as phone numbers in the export.")
                 }
 
                 ForEach(phoneOnlyParticipants, id: \.self) { num in
@@ -793,7 +821,7 @@ struct ContentView: View {
                             .truncationMode(.middle)
                             .frame(width: 210, alignment: .leading)
 
-                        TextField("Name (z. B. Max Mustermann)", text: overrideBinding)
+                        TextField("Name (e.g., Alex Example)", text: overrideBinding)
                             .textFieldStyle(.roundedBorder)
                             .aiGlow(
                                 active: shouldShowPhoneSuggestionGlow(for: num),
@@ -801,6 +829,7 @@ struct ContentView: View {
                                 cornerRadius: 6,
                                 style: WETAIGlowStyle.defaultStyle()
                             )
+                            .disabled(isRunning)
 
                         Spacer(minLength: 0)
                     }
@@ -809,12 +838,12 @@ struct ContentView: View {
         }
     }
 
-    private var actionsRow: some View {
+    private var runActionsRow: some View {
         HStack(spacing: 12) {
             Button {
                 guard !isRunning else { return }
                 guard let chatURL, let outBaseURL else {
-                    appendLog("ERROR: Bitte zuerst Chat-Export und Zielordner auswählen.")
+                    appendLog("ERROR: Please choose a chat export and an output folder first.")
                     return
                 }
                 startExport(chatURL: chatURL, outDir: outBaseURL, allowOverwrite: false)
@@ -826,25 +855,17 @@ struct ContentView: View {
                             .controlSize(.small)
                             .tint(.red)
                     }
-                    Label(isRunning ? "Läuft…" : "Generieren", systemImage: "square.and.arrow.up")
+                    Label(isRunning ? "Exporting…" : "Export", systemImage: "square.and.arrow.up")
                 }
             }
             .buttonStyle(.borderedProminent)
-            .disabled(isRunning)
+            .disabled(!canStartExport)
 
-            Button {
-                clearLog()
-            } label: {
-                Label("Log leeren", systemImage: "trash")
-            }
-            .buttonStyle(.bordered)
-            .disabled(isRunning)
-
-            let cancelButton = Button("Abbrechen") {
+            let cancelButton = Button("Cancel") {
                 guard isRunning, !cancelRequested else { return }
                 cancelRequested = true
                 exportTask?.cancel()
-                appendLog("Abbruch angefordert…")
+                appendLog("Cancel requested…")
             }
             .disabled(!isRunning || cancelRequested)
 
@@ -854,38 +875,165 @@ struct ContentView: View {
                 cancelButton.buttonStyle(.bordered)
             }
 
+            if runStatus == .completed, let exportDir = lastExportDir {
+                Button("Reveal in Finder") {
+                    revealInFinder(exportDir)
+                }
+                .buttonStyle(.bordered)
+            }
+
+            if runStatus == .completed, let sidecarURL = lastSidecarHTML {
+                Button("Open Sidecar HTML") {
+                    NSWorkspace.shared.open(sidecarURL)
+                }
+                .buttonStyle(.bordered)
+            }
+
             Spacer()
         }
         .padding(.top, 2)
     }
 
-    private var logSection: some View {
-        WASection(title: "Log", systemImage: "doc.text.magnifyingglass") {
-            ScrollViewReader { proxy in
-                ScrollView([.vertical, .horizontal]) {
-                    VStack(alignment: .leading, spacing: 0) {
-                        Text(displayLogText)
-                            .font(.system(.body, design: .monospaced))
-                            .textSelection(.enabled)
-                            .fixedSize(horizontal: true, vertical: true)
-                            .frame(maxWidth: .infinity, alignment: .topLeading)
-                            .padding(8)
-                        Color.clear
-                            .frame(height: 1)
-                            .id("logBottom")
-                    }
+    private var runStatusAndLogSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            runSection
+                .waCard()
+
+            logSection
+        }
+    }
+
+    private var runSection: some View {
+        WASection(title: "Run", systemImage: "play.circle") {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(runStatusText)
+                    .font(.system(size: 12, weight: .semibold))
+
+                runStatusDetailView
+
+                if !runProgress.isEmpty {
+                    runProgressView
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .onChange(of: logLines.count) { _, _ in
-                    guard !logLines.isEmpty else { return }
-                    logAutoScrollWorkItem?.cancel()
-                    let work = DispatchWorkItem {
-                        proxy.scrollTo("logBottom", anchor: .bottomLeading)
+
+                runActionsRow
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var runStatusDetailView: some View {
+        switch runStatus {
+        case .completed:
+            if let duration = lastRunDuration {
+                Text("Total duration: \(Self.formatDuration(duration))")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+            }
+        case .failed:
+            let summary = failureSummaryText
+            VStack(alignment: .leading, spacing: 4) {
+                Text(summary)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                Button("Show Log") {
+                    logExpanded = true
+                }
+                .buttonStyle(.link)
+            }
+        case .cancelled:
+            Text("Cancelled (published outputs preserved).")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+        default:
+            EmptyView()
+        }
+    }
+
+    private var runProgressView: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(runProgress) { step in
+                HStack(spacing: 6) {
+                    Image(systemName: progressIconName(for: step.state))
+                        .foregroundStyle(progressIconColor(for: step.state))
+                    Text(step.label)
+                    Spacer()
+                    Text(step.state.rawValue)
+                        .foregroundStyle(.secondary)
+                }
+                .font(.system(size: 12))
+                .accessibilityLabel("\(step.label) \(step.state.rawValue)")
+            }
+        }
+        .padding(.top, 2)
+    }
+
+    private var logSection: some View {
+        DisclosureGroup(isExpanded: $logExpanded) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Button("Copy Log") {
+                        copyLogToPasteboard()
                     }
-                    logAutoScrollWorkItem = work
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: work)
+                    .buttonStyle(.bordered)
+
+                    Button("Save Log…") {
+                        saveLog()
+                    }
+                    .buttonStyle(.bordered)
+
+                    Button("Clear Log") {
+                        clearLog()
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(runStatus != .ready)
+
+                    if isRunning && !logAutoScrollEnabled {
+                        Text("Auto-scroll paused")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer()
+                }
+
+                ScrollViewReader { proxy in
+                    ScrollView([.vertical, .horizontal]) {
+                        VStack(alignment: .leading, spacing: 0) {
+                            Text(displayLogText)
+                                .font(.system(.body, design: .monospaced))
+                                .textSelection(.enabled)
+                                .fixedSize(horizontal: true, vertical: true)
+                                .frame(maxWidth: .infinity, alignment: .topLeading)
+                                .padding(8)
+                            Color.clear
+                                .frame(height: 1)
+                                .id("logBottom")
+                        }
+                    }
+                    .frame(maxWidth: .infinity, minHeight: logSectionHeight, maxHeight: logSectionHeight, alignment: .topLeading)
+                    .onChange(of: logLines.count) { _, _ in
+                        guard isRunning, logAutoScrollEnabled, !logLines.isEmpty else { return }
+                        logAutoScrollWorkItem?.cancel()
+                        let work = DispatchWorkItem {
+                            proxy.scrollTo("logBottom", anchor: .bottomLeading)
+                        }
+                        logAutoScrollWorkItem = work
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: work)
+                    }
+                    .simultaneousGesture(
+                        DragGesture().onChanged { _ in
+                            if isRunning {
+                                logAutoScrollEnabled = false
+                            }
+                        }
+                    )
                 }
             }
+            .padding(.top, 6)
+        } label: {
+            Label("Log", systemImage: "doc.text.magnifyingglass")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.secondary)
         }
         .waCard()
         .aiGlow(
@@ -895,7 +1043,6 @@ struct ContentView: View {
             style: logGlowStyle,
             debugTag: "log"
         )
-        .frame(maxWidth: .infinity, minHeight: logSectionHeight, maxHeight: logSectionHeight, alignment: .topLeading)
     }
 
     private var logGlowStyle: AIGlowStyle {
@@ -919,7 +1066,7 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("WhatsApp Export Tools")
                     .font(.system(size: 15, weight: .semibold))
-                Text("WhatsApp-Chat als HTML und Markdown")
+                Text("Export WhatsApp chats to HTML and Markdown")
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
             }
@@ -1241,9 +1388,9 @@ struct ContentView: View {
 
     private func pickChatFile() {
         let panel = NSOpenPanel()
-        panel.title = "WhatsApp-Chat-Export auswählen"
-        panel.message = "Bitte WhatsApp-Exportordner, ZIP oder _chat.txt auswählen."
-        panel.prompt = "Auswählen"
+        panel.title = "Choose WhatsApp chat export"
+        panel.message = "Select a WhatsApp export folder, ZIP, or _chat.txt."
+        panel.prompt = "Choose"
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = true
         panel.canChooseFiles = true
@@ -1261,9 +1408,9 @@ struct ContentView: View {
 
     private func pickOutputFolder() {
         let panel = NSOpenPanel()
-        panel.title = "Zielordner auswählen"
-        panel.message = "Bitte den Zielordner für die Exportdateien auswählen."
-        panel.prompt = "Auswählen"
+        panel.title = "Choose output folder"
+        panel.message = "Select the output folder for the export artifacts."
+        panel.prompt = "Choose"
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
@@ -1289,12 +1436,15 @@ struct ContentView: View {
             chatURLAccess = scoped
             chatURL = scoped.resourceURL
         } else {
-            appendLog("WARN: Sicherheitszugriff auf den Chat-Export konnte nicht aktiviert werden.")
+            appendLog("WARN: Security-scoped access to the chat export could not be enabled.")
             chatURL = nil
             chatURLAccess = nil
         }
         if !isRestoringSettings {
             persistExportSettings()
+        }
+        Task { @MainActor in
+            self.resetRunStateIfIdle()
         }
     }
 
@@ -1310,12 +1460,15 @@ struct ContentView: View {
             outBaseURLAccess = scoped
             outBaseURL = scoped.resourceURL
         } else {
-            appendLog("WARN: Sicherheitszugriff auf den Zielordner konnte nicht aktiviert werden.")
+            appendLog("WARN: Security-scoped access to the output folder could not be enabled.")
             outBaseURL = nil
             outBaseURLAccess = nil
         }
         if !isRestoringSettings {
             persistExportSettings()
+        }
+        Task { @MainActor in
+            self.resetRunStateIfIdle()
         }
     }
 
@@ -1355,7 +1508,7 @@ struct ContentView: View {
 
             var parts = detectionSnapshot.participants
             let usedFallbackParticipant = parts.isEmpty
-            if parts.isEmpty { parts = ["Ich"] }
+            if parts.isEmpty { parts = ["Me"] }
             detectedParticipants = parts
 
             let partnerHintRaw: String? = {
@@ -1501,9 +1654,9 @@ struct ContentView: View {
             if chatPartnerSelection != Self.customChatPartnerTag {
                 chatPartnerSelection = fallbackPartner
             }
-            exporterName = "Ich"
+            exporterName = "Me"
             autoSuggestedPhoneNames = [:]
-            appendLog("WARN: Teilnehmer konnten nicht ermittelt werden. \(error)")
+            appendLog("WARN: Participants could not be determined. \(error)")
         }
     }
 
@@ -1522,7 +1675,7 @@ struct ContentView: View {
     private func resolvedExporterName() -> String {
         let trimmed = exporterName.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
-            let fallback = detectedParticipants.first ?? "Ich"
+            let fallback = detectedParticipants.first ?? "Me"
             return applyPhoneOverrideIfNeeded(fallback)
         }
         return applyPhoneOverrideIfNeeded(trimmed)
@@ -1559,9 +1712,9 @@ struct ContentView: View {
     }
 
     private var maxLogLinesContent: Int {
-        let headerLines = 4 // Start + Zielordner + Exportname + Optionen
+        let headerLines = 4 // Start + target folder + export name + options
         let perArtifactLines = outputStepCount * 2
-        let footerLines = 1 // Abgeschlossen
+        let footerLines = 1 // Completed
         let bufferLines = 3
         let lines = headerLines + perArtifactLines + footerLines + bufferLines
         return max(lines, Self.logMinLinesContent)
@@ -1614,6 +1767,114 @@ struct ContentView: View {
         #endif
     }
 
+    private var canStartExport: Bool {
+        !isRunning && chatURL != nil && outBaseURL != nil
+    }
+
+    private var runStatusText: String {
+        switch runStatus {
+        case .ready:
+            return "Ready"
+        case .validating:
+            return "Validating…"
+        case .exporting(let artifact):
+            return "Exporting: \(artifact)"
+        case .completed:
+            return "Completed"
+        case .failed:
+            return "Failed"
+        case .cancelled:
+            return "Cancelled"
+        }
+    }
+
+    private var failureSummaryText: String {
+        if let artifact = lastRunFailureArtifact, let summary = lastRunFailureSummary {
+            return "Failed (\(artifact)): \(summary)"
+        }
+        if let summary = lastRunFailureSummary {
+            return "Failed: \(summary)"
+        }
+        return "Failed. See log for details."
+    }
+
+    private func progressIconName(for state: ArtifactProgressState) -> String {
+        switch state {
+        case .pending: return "circle"
+        case .running: return "circle.inset.filled"
+        case .done: return "checkmark.circle.fill"
+        }
+    }
+
+    private func progressIconColor(for state: ArtifactProgressState) -> Color {
+        switch state {
+        case .pending: return .secondary
+        case .running: return .orange
+        case .done: return .green
+        }
+    }
+
+    private func buildProgressSteps(plan: RunPlan) -> [ArtifactProgress] {
+        var steps: [ArtifactProgress] = []
+        if plan.wantsSidecar {
+            steps.append(ArtifactProgress(id: "sidecar", label: "Sidecar", state: .pending))
+        }
+        for variant in plan.variants {
+            let label = Self.htmlVariantLogLabel(for: variant)
+            steps.append(ArtifactProgress(id: "html-\(variant.rawValue)", label: label, state: .pending))
+        }
+        if plan.wantsMD {
+            steps.append(ArtifactProgress(id: "markdown", label: "Markdown", state: .pending))
+        }
+        return steps
+    }
+
+    @MainActor
+    private func updateProgress(label: String, state: ArtifactProgressState) {
+        guard let index = runProgress.firstIndex(where: { $0.label == label }) else { return }
+        runProgress[index].state = state
+    }
+
+    @MainActor
+    private func markRunFailure(summary: String, artifact: String?) {
+        lastRunFailureSummary = summary
+        lastRunFailureArtifact = artifact
+        runStatus = .failed
+    }
+
+    @MainActor
+    private func resetRunStateIfIdle() {
+        guard !isRunning else { return }
+        runStatus = .ready
+        lastRunFailureSummary = nil
+        lastRunFailureArtifact = nil
+        currentArtifactLabel = nil
+    }
+
+    @MainActor
+    private func copyLogToPasteboard() {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(logText, forType: .string)
+    }
+
+    @MainActor
+    private func saveLog() {
+        let panel = NSSavePanel()
+        panel.title = "Save Log"
+        panel.prompt = "Save"
+        panel.nameFieldStringValue = "wet-log.txt"
+        panel.allowedContentTypes = [.plainText]
+        if panel.runModal() == .OK, let url = panel.url {
+            try? logText.write(to: url, atomically: true, encoding: .utf8)
+        }
+    }
+
+    @MainActor
+    private func revealInFinder(_ url: URL) {
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
     nonisolated private static func formatDuration(_ seconds: TimeInterval) -> String {
         let totalSeconds = max(0, Int(seconds.rounded()))
         let minutes = totalSeconds / 60
@@ -1658,8 +1919,8 @@ struct ContentView: View {
         let reportName = "perf_compact_\(tsFormatter.string(from: Date())).md"
         let reportURL = reportsDir.appendingPathComponent(reportName)
 
-        let onOff = { (value: Bool) in value ? "AN" : "AUS" }
-        let artifactOrder = ["Sidecar", "Max", "Kompakt", "E-Mail", "Markdown"]
+        let onOff = { (value: Bool) in value ? "ON" : "OFF" }
+        let artifactOrder = ["Sidecar", "Max", "Compact", "E-Mail", "Markdown"]
 
         var lines: [String] = []
         lines.append("# Perf Compact Report")
@@ -1667,25 +1928,25 @@ struct ContentView: View {
         lines.append("## Baseline (given)")
         lines.append("- Sidecar: 0:42")
         lines.append("- Max: 0:21")
-        lines.append("- Kompakt: 1:37")
+        lines.append("- Compact: 1:37")
         lines.append("- E-Mail: 0:02")
         lines.append("- Markdown: 0:01")
         lines.append("- Total: 2:42")
         lines.append("")
         lines.append("## Run")
         lines.append("- Start: \(Self.formatClockTime(runStartWall))")
-        lines.append("- Exportname: \(baseName)")
-        lines.append("- Zielordner: \(context.exportDir.path)")
-        lines.append("- Optionen: Max=\(onOff(context.selectedVariantsInOrder.contains(.embedAll))) " +
-                     "Kompakt=\(onOff(context.selectedVariantsInOrder.contains(.thumbnailsOnly))) " +
+        lines.append("- Export name: \(baseName)")
+        lines.append("- Target folder: \(context.exportDir.path)")
+        lines.append("- Options: Max=\(onOff(context.selectedVariantsInOrder.contains(.embedAll))) " +
+                     "Compact=\(onOff(context.selectedVariantsInOrder.contains(.thumbnailsOnly))) " +
                      "E-Mail=\(onOff(context.selectedVariantsInOrder.contains(.textOnly))) " +
                      "Markdown=\(onOff(context.wantsMD)) " +
                      "Sidecar=\(onOff(context.wantsSidecar)) " +
-                     "Roharchiv=\(onOff(context.wantsRawArchiveCopy)) " +
-                     "Originale löschen=\(onOff(context.wantsDeleteOriginals))")
+                     "RawArchive=\(onOff(context.wantsRawArchiveCopy)) " +
+                     "DeleteOriginals=\(onOff(context.wantsDeleteOriginals))")
         lines.append("- Total: \(Self.formatDuration(totalDuration))")
         lines.append("")
-        lines.append("## Artifact-Durations")
+        lines.append("## Artifact durations")
         for key in artifactOrder {
             if let duration = snapshot.artifactDurationByLabel[key] {
                 lines.append("- \(key): \(Self.formatDuration(duration))")
@@ -1812,7 +2073,7 @@ struct ContentView: View {
     nonisolated private static func htmlVariantLogLabel(for variant: HTMLVariant) -> String {
         switch variant {
         case .embedAll: return "Max"
-        case .thumbnailsOnly: return "Kompakt"
+        case .thumbnailsOnly: return "Compact"
         case .textOnly: return "E-Mail"
         }
     }
@@ -1969,19 +2230,19 @@ struct ContentView: View {
                 labels.insert("Sidecar")
             }
             if isRawArchive(name) {
-                labels.insert("Raw-Archiv")
+                labels.insert("Raw archive")
             }
             if isManifest(name) {
                 labels.insert("Manifest")
             }
             if isChecksum(name) {
-                labels.insert("Prüfsumme")
+                labels.insert("Checksum")
             }
             if isVariantHTML(name, suffix: "-max") {
                 labels.insert("Max")
             }
             if isVariantHTML(name, suffix: "-mid") {
-                labels.insert("Kompakt")
+                labels.insert("Compact")
             }
             if isVariantHTML(name, suffix: "-min") {
                 labels.insert("E-Mail")
@@ -1991,7 +2252,7 @@ struct ContentView: View {
             }
         }
 
-        let ordered = ["Sidecar", "Raw-Archiv", "Manifest", "Prüfsumme", "Max", "Kompakt", "E-Mail", "Markdown"]
+        let ordered = ["Sidecar", "Raw archive", "Manifest", "Checksum", "Max", "Compact", "E-Mail", "Markdown"]
         return ordered.filter { labels.contains($0) }
     }
 
@@ -2195,6 +2456,16 @@ struct ContentView: View {
     private func startExport(chatURL: URL, outDir: URL, allowOverwrite: Bool) {
         guard !isRunning else { return }
         clearLog()
+        logAutoScrollEnabled = true
+        logExpanded = true
+        lastRunDuration = nil
+        lastRunFailureSummary = nil
+        lastRunFailureArtifact = nil
+        currentArtifactLabel = nil
+        lastExportDir = nil
+        lastSidecarHTML = nil
+        runProgress = []
+        runStatus = .validating
         if !allowOverwrite {
             pendingPreflight = nil
             pendingPreparedExport = nil
@@ -2279,6 +2550,7 @@ struct ContentView: View {
             )
         } catch {
             appendLog("ERROR: \(error.localizedDescription)")
+            markRunFailure(summary: error.localizedDescription, artifact: "Validation")
             isRunning = false
             return
         }
@@ -2294,13 +2566,15 @@ struct ContentView: View {
 
         let exporter = resolvedExporterName()
         if exporter.isEmpty {
-            appendLog("ERROR: Ersteller konnte nicht ermittelt werden.")
+            appendLog("ERROR: Could not determine exporter.")
+            markRunFailure(summary: "Could not determine exporter.", artifact: "Validation")
             isRunning = false
             return
         }
 
         if uiChatPartnerRaw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            appendLog("ERROR: Bitte einen Chat-Partner auswählen.")
+            appendLog("ERROR: Please choose a chat partner.")
+            markRunFailure(summary: "Please choose a chat partner.", artifact: "Validation")
             isRunning = false
             return
         }
@@ -2323,7 +2597,7 @@ struct ContentView: View {
             if exportHTMLMax { parts.append("-max") }
             if exportHTMLMid { parts.append("-mid") }
             if exportHTMLMin { parts.append("-min") }
-            return parts.isEmpty ? "AUS" : parts.joined(separator: ", ")
+            return parts.isEmpty ? "OFF" : parts.joined(separator: ", ")
         }()
 
         let partnerForNamingRaw = overridePartnerEffective ?? detectedPartnerRaw
@@ -2334,7 +2608,8 @@ struct ContentView: View {
         let outputChatPartnerFolderOverride = partnerForNamingFolderName
 
         if selectedVariantsInOrder.isEmpty && !wantsMD && !wantsSidecar {
-            appendLog("ERROR: Bitte mindestens eine Ausgabe aktivieren (HTML, Markdown oder Sidecar).")
+            appendLog("ERROR: Please enable at least one output (HTML, Markdown, or Sidecar).")
+            markRunFailure(summary: "Enable at least one output (HTML, Markdown, or Sidecar).", artifact: "Validation")
             isRunning = false
             return
         }
@@ -2344,6 +2619,7 @@ struct ContentView: View {
             wantsMD: wantsMD,
             wantsSidecar: wantsSidecar
         )
+        runProgress = buildProgressSteps(plan: plan)
         
         let debugEnabled = wetDebugLoggingEnabled
         WETLog.configure(debugEnabled: debugEnabled)
@@ -2430,6 +2706,7 @@ struct ContentView: View {
 
         await Task.yield()
         logExportTiming("T3 pre-processing begin", startUptime: startUptime)
+        runStatus = .validating
 
         let append: @Sendable (String) -> Void = { [appendLog] message in
             appendLog(message)
@@ -2464,6 +2741,7 @@ struct ContentView: View {
             }
         } catch {
             logger.log("ERROR: \(error)")
+            markRunFailure(summary: error.localizedDescription, artifact: "Validation")
             return
         }
         let baseName = prepared.baseName
@@ -2483,19 +2761,19 @@ struct ContentView: View {
 
         let runStartWall = Date()
         let runStartUptime = ProcessInfo.processInfo.systemUptime
-        let startSuffix = context.isOverwriteRetry ? " (Ersetzen bestätigt)" : ""
+        let startSuffix = context.isOverwriteRetry ? " (Replace confirmed)" : ""
         logger.log("Start: \(Self.formatClockTime(runStartWall))\(startSuffix)")
-        logger.log("Zielordner: \(context.exportDir.lastPathComponent)")
-        logger.log("Exportname: \(baseName)")
-        let onOff = { (value: Bool) in value ? "AN" : "AUS" }
+        logger.log("Target folder: \(context.exportDir.lastPathComponent)")
+        logger.log("Export name: \(baseName)")
+        let onOff = { (value: Bool) in value ? "ON" : "OFF" }
         logger.log(
-            "Optionen: Max=\(onOff(context.selectedVariantsInOrder.contains(.embedAll))) " +
-            "Kompakt=\(onOff(context.selectedVariantsInOrder.contains(.thumbnailsOnly))) " +
+            "Options: Max=\(onOff(context.selectedVariantsInOrder.contains(.embedAll))) " +
+            "Compact=\(onOff(context.selectedVariantsInOrder.contains(.thumbnailsOnly))) " +
             "E-Mail=\(onOff(context.selectedVariantsInOrder.contains(.textOnly))) " +
             "Markdown=\(onOff(context.wantsMD)) " +
             "Sidecar=\(onOff(context.wantsSidecar)) " +
-            "Roharchiv=\(onOff(context.wantsRawArchiveCopy)) " +
-            "Originale löschen=\(onOff(context.wantsDeleteOriginals))"
+            "RawArchive=\(onOff(context.wantsRawArchiveCopy)) " +
+            "DeleteOriginals=\(onOff(context.wantsDeleteOriginals))"
         )
         debugLog("RUN START: \(Self.formatClockTime(runStartWall))")
         debugLog("PARTNER NAME SOURCE: \(context.chatPartnerSource)")
@@ -2503,7 +2781,7 @@ struct ContentView: View {
         debugLog("TARGET DIR: \(context.exportDir.path)")
         debugLog("EXPORT NAME: \(baseName)")
         debugLog("OPTIONS: Max=\(onOff(context.selectedVariantsInOrder.contains(.embedAll))) " +
-                 "Kompakt=\(onOff(context.selectedVariantsInOrder.contains(.thumbnailsOnly))) " +
+                 "Compact=\(onOff(context.selectedVariantsInOrder.contains(.thumbnailsOnly))) " +
                  "E-Mail=\(onOff(context.selectedVariantsInOrder.contains(.textOnly))) " +
                  "Markdown=\(onOff(context.wantsMD)) " +
                  "Sidecar=\(onOff(context.wantsSidecar)) " +
@@ -2543,6 +2821,21 @@ struct ContentView: View {
                 }
             }
 
+            currentArtifactLabel = nil
+            let onStepStart: @Sendable (String) -> Void = { label in
+                Task { @MainActor in
+                    self.currentArtifactLabel = label
+                    self.runStatus = .exporting(label)
+                    self.updateProgress(label: label, state: .running)
+                }
+            }
+
+            let onStepDone: @Sendable (String, TimeInterval) -> Void = { label, _ in
+                Task { @MainActor in
+                    self.updateProgress(label: label, state: .done)
+                }
+            }
+
             let workTask = Task.detached(priority: .userInitiated) {
                 try await Self.performExportWork(
                     context: context,
@@ -2550,7 +2843,9 @@ struct ContentView: View {
                     prepared: prepared,
                     log: append,
                     debugEnabled: debugEnabled,
-                    debugLog: debugLog
+                    debugLog: debugLog,
+                    onStepStart: onStepStart,
+                    onStepDone: onStepDone
                 )
             }
             let workResult = try await withTaskCancellationHandler {
@@ -2566,7 +2861,7 @@ struct ContentView: View {
             )
 
             if context.wantsRawArchiveCopy {
-                logger.log("Start Roharchiv")
+                logger.log("Start Raw archive")
                 let rawStart = ProcessInfo.processInfo.systemUptime
                 _ = try await Task.detached(priority: .utility) {
                     try SourceOps.copyRawArchive(
@@ -2579,12 +2874,12 @@ struct ContentView: View {
                     )
                 }.value
                 let rawDuration = ProcessInfo.processInfo.systemUptime - rawStart
-                logger.log("Done Roharchiv (\(Self.formatDuration(rawDuration)))")
+                logger.log("Done Raw archive (\(Self.formatDuration(rawDuration)))")
             }
 
             do {
                 let checksumStart = ProcessInfo.processInfo.systemUptime
-                logger.log("Start Prüfsummen")
+                logger.log("Start Checksums")
                 let artifactPaths = Self.manifestArtifactRelativePaths(
                     baseName: baseName,
                     variants: context.plan.variants,
@@ -2613,9 +2908,9 @@ struct ContentView: View {
                     debugLog: debugLog
                 )
                 let checksumDuration = ProcessInfo.processInfo.systemUptime - checksumStart
-                logger.log("Done Prüfsummen (\(Self.formatDuration(checksumDuration)))")
+                logger.log("Done Checksums (\(Self.formatDuration(checksumDuration)))")
             } catch {
-                logger.log("ERROR: Prüfsummen fehlgeschlagen: \(error)")
+                logger.log("ERROR: Checksums failed: \(error)")
                 throw error
             }
 
@@ -2628,10 +2923,10 @@ struct ContentView: View {
             }
 
             let totalDuration = ProcessInfo.processInfo.systemUptime - runStartUptime
-            logger.log("Abgeschlossen: \(Self.formatDuration(totalDuration))")
+            logger.log("Completed: \(Self.formatDuration(totalDuration))")
             var published: [String] = []
             if context.wantsSidecar { published.append("Sidecar") }
-            if context.wantsRawArchiveCopy { published.append("Roharchiv") }
+            if context.wantsRawArchiveCopy { published.append("Raw archive") }
             published.append(contentsOf: context.plan.variants.map { Self.htmlVariantLogLabel(for: $0) })
             if context.wantsMD { published.append("Markdown") }
             let perfSnapshot = WhatsAppExportService.perfSnapshot()
@@ -2656,13 +2951,25 @@ struct ContentView: View {
                 sidecarImmutabilityWarnings: workResult.sidecarImmutabilityWarnings,
                 outputSuffixArtifacts: workResult.outputSuffixArtifacts
             )
+            lastRunDuration = totalDuration
+            lastExportDir = workResult.exportDir
+            lastSidecarHTML = context.wantsSidecar
+                ? Self.outputSidecarHTML(baseName: baseName, in: workResult.exportDir)
+                : nil
+            lastRunFailureSummary = nil
+            lastRunFailureArtifact = nil
+            currentArtifactLabel = nil
+            runStatus = .completed
         } catch {
             if error is CancellationError {
-                logger.log("Abgebrochen.")
+                logger.log("Cancelled.")
+                runStatus = .cancelled
+                currentArtifactLabel = nil
                 return
             }
             if let deletionError = error as? OutputDeletionError {
-                logger.log("ERROR: \(deletionError.errorDescription ?? "Konnte vorhandene Ausgaben nicht löschen.")")
+                logger.log("ERROR: \(deletionError.errorDescription ?? "Could not delete existing outputs.")")
+                markRunFailure(summary: deletionError.errorDescription ?? "Could not delete existing outputs.", artifact: currentArtifactLabel)
                 return
             }
             if let waErr = error as? WAExportError {
@@ -2694,14 +3001,17 @@ struct ContentView: View {
                     replaceExistingNames = Self.replaceDialogLabels(existingNames: existingNames, baseName: baseName)
                     showReplaceAlert = true
                     let count = replaceExistingNames.count
-                    logger.log("Vorhandene Ausgaben gefunden: \(count) Datei(en). Warte auf Bestätigung zum Ersetzen…")
+                    logger.log("Existing outputs found: \(count) item(s). Waiting for replace confirmation…")
+                    runStatus = .ready
                     return
                 case .suffixArtifactsFound(let names):
-                    logger.log("ERROR: Suffix-Artefakte gefunden (bitte Zielordner bereinigen): \(names.joined(separator: ", "))")
+                    logger.log("ERROR: Suffix artifacts found (please clean the output folder): \(names.joined(separator: ", "))")
+                    markRunFailure(summary: "Suffix artifacts found: \(names.joined(separator: ", "))", artifact: "Validation")
                     return
                 }
             }
             logger.log("ERROR: \(error)")
+            markRunFailure(summary: error.localizedDescription, artifact: currentArtifactLabel)
         }
     }
 
@@ -2762,7 +3072,9 @@ struct ContentView: View {
         prepared: WhatsAppExportService.PreparedExport,
         log: @Sendable (String) -> Void,
         debugEnabled: Bool,
-        debugLog: @Sendable (String) -> Void
+        debugLog: @Sendable (String) -> Void,
+        onStepStart: @Sendable (String) -> Void,
+        onStepDone: @Sendable (String, TimeInterval) -> Void
     ) async throws -> ExportWorkResult {
         let fm = FileManager.default
         let exportDir = context.exportDir.standardizedFileURL
@@ -2853,11 +3165,15 @@ struct ContentView: View {
         }
 
         func logStart(_ artifact: Artifact) {
-            log("Start \(artifactLabel(artifact))")
+            let label = artifactLabel(artifact)
+            log("Start \(label)")
+            onStepStart(label)
         }
 
         func logDone(_ artifact: Artifact, duration: TimeInterval) {
-            log("Done \(artifactLabel(artifact)) (\(Self.formatDuration(duration)))")
+            let label = artifactLabel(artifact)
+            log("Done \(label) (\(Self.formatDuration(duration)))")
+            onStepDone(label, duration)
         }
 
         var publishCounts: [String: Int] = [:]
@@ -2866,7 +3182,7 @@ struct ContentView: View {
             let key = url.standardizedFileURL.path
             let count = publishCounts[key, default: 0]
             if count > 0 {
-                log("BUG: Zweite Veröffentlichung blockiert: \(artifactLabel(artifact)) (\(url.lastPathComponent))")
+                log("BUG: Duplicate publish blocked: \(artifactLabel(artifact)) (\(url.lastPathComponent))")
                 return false
             }
             publishCounts[key] = count + 1
@@ -3560,7 +3876,7 @@ struct ContentView: View {
 
         let failed = result.failed
         if !failed.isEmpty {
-            appendLog("ERROR: Löschen fehlgeschlagen: \(failed.map { $0.path }.joined(separator: ", "))")
+            appendLog("ERROR: Delete failed: \(failed.map { $0.path }.joined(separator: ", "))")
         }
     }
 
@@ -3585,7 +3901,7 @@ struct ContentView: View {
             if let url = resolveBookmark(chatBookmark, expectDirectory: false) {
                 setChatURL(url)
             } else {
-                appendLog("WARN: Letzter Chat-Export nicht verfügbar. Bitte erneut auswählen.")
+                appendLog("WARN: Last chat export is no longer available. Please reselect it.")
                 setChatURL(nil)
             }
         }
@@ -3594,7 +3910,7 @@ struct ContentView: View {
             if let url = resolveBookmark(outputBookmark, expectDirectory: true) {
                 setOutputBaseURL(url)
             } else {
-                appendLog("WARN: Letzter Zielordner nicht verfügbar. Bitte erneut auswählen.")
+                appendLog("WARN: Last output folder is no longer available. Please reselect it.")
                 setOutputBaseURL(nil)
             }
         }
@@ -3647,7 +3963,7 @@ struct ContentView: View {
     }
 }
 
-// MARK: - Helpers (Dateiebene)
+// MARK: - Helpers (file-level)
 
 private struct WASection<Content: View>: View {
     let title: String
@@ -3689,7 +4005,7 @@ private struct HelpButton: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(12)
         }
-        .accessibilityLabel("Hilfe")
+        .accessibilityLabel("Help")
     }
 }
 
