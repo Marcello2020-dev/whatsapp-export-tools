@@ -174,6 +174,83 @@ enum TimePolicy {
     }
 }
 
+// MARK: - Deterministic JSON (non-actor, stable ordering)
+
+private enum WETJSONValue {
+    case string(String)
+    case number(Int)
+    case bool(Bool)
+    case object([(String, WETJSONValue)])
+    case array([WETJSONValue])
+    case null
+}
+
+nonisolated private func wetEncodeJSON(_ value: WETJSONValue, indent: Int = 0) -> String {
+    let pad = String(repeating: "  ", count: indent)
+    switch value {
+    case .string(let s):
+        return wetEscapeJSONString(s)
+    case .number(let n):
+        return String(n)
+    case .bool(let b):
+        return b ? "true" : "false"
+    case .null:
+        return "null"
+    case .array(let items):
+        guard !items.isEmpty else { return "[]" }
+        let nextIndent = indent + 1
+        let nextPad = String(repeating: "  ", count: nextIndent)
+        var lines: [String] = ["["]
+        for (idx, item) in items.enumerated() {
+            let line = nextPad + wetEncodeJSON(item, indent: nextIndent)
+            lines.append(idx == items.count - 1 ? line : line + ",")
+        }
+        lines.append(pad + "]")
+        return lines.joined(separator: "\n")
+    case .object(let pairs):
+        guard !pairs.isEmpty else { return "{}" }
+        let nextIndent = indent + 1
+        let nextPad = String(repeating: "  ", count: nextIndent)
+        var lines: [String] = ["{"]
+        for (idx, pair) in pairs.enumerated() {
+            let (key, val) = pair
+            let line = nextPad + wetEscapeJSONString(key) + ": " + wetEncodeJSON(val, indent: nextIndent)
+            lines.append(idx == pairs.count - 1 ? line : line + ",")
+        }
+        lines.append(pad + "}")
+        return lines.joined(separator: "\n")
+    }
+}
+
+nonisolated private func wetEscapeJSONString(_ s: String) -> String {
+    var out = "\""
+    out.reserveCapacity(s.count + 2)
+    for scalar in s.unicodeScalars {
+        switch scalar.value {
+        case 0x22:
+            out.append("\\\"")
+        case 0x5C:
+            out.append("\\\\")
+        case 0x08:
+            out.append("\\b")
+        case 0x0C:
+            out.append("\\f")
+        case 0x0A:
+            out.append("\\n")
+        case 0x0D:
+            out.append("\\r")
+        case 0x09:
+            out.append("\\t")
+        case 0x00...0x1F:
+            out.append(String(format: "\\u%04X", scalar.value))
+        default:
+            out.append(Character(scalar))
+        }
+    }
+    out.append("\"")
+    return out
+}
+
 // MARK: - Models
 
 public struct WAMessage: Sendable {
@@ -7787,14 +7864,14 @@ nonisolated private static func stageThumbnailForExport(
         let mediaCounts = manifestMediaCounts(messages: messages)
         let perf = perfSnapshot()
 
-        let fileHashValues: [JSONValue] = sortedEntries.map {
+        let fileHashValues: [WETJSONValue] = sortedEntries.map {
             .object([
                 ("path", .string($0.path)),
                 ("sha256", .string($0.sha256))
             ])
         }
 
-        let artifactTimingPairs: [(String, JSONValue)] = [
+        let artifactTimingPairs: [(String, WETJSONValue)] = [
             flags.sidecar ? ("sidecar", .null) : nil,
             flags.max ? ("max", .null) : nil,
             flags.compact ? ("compact", .null) : nil,
@@ -7803,7 +7880,7 @@ nonisolated private static func stageThumbnailForExport(
             flags.rawArchive ? ("rawArchive", .null) : nil
         ].compactMap { $0 }
 
-        let manifestValue = JSONValue.object([
+        let manifestValue = WETJSONValue.object([
             ("appVersion", .string(appVersion)),
             ("buildNumber", .string(buildNumber)),
             ("exportBase", .string(baseName)),
@@ -7844,7 +7921,7 @@ nonisolated private static func stageThumbnailForExport(
             ("bundleHashSha256", .string(bundleHash))
         ])
 
-        let manifestContent = encodeJSON(manifestValue) + "\n"
+        let manifestContent = wetEncodeJSON(manifestValue) + "\n"
         let manifestData = manifestContent.data(using: .utf8) ?? Data()
 
         let stagingBase = try localStagingBaseDirectory()
@@ -7953,81 +8030,6 @@ nonisolated private static func stageThumbnailForExport(
 
     nonisolated private static func manifestMediaCounts(messages: [WAMessage]) -> WAMediaCounts {
         messageMediaCounts(messages: messages)
-    }
-
-    private enum JSONValue {
-        case string(String)
-        case number(Int)
-        case bool(Bool)
-        case object([(String, JSONValue)])
-        case array([JSONValue])
-        case null
-    }
-
-    private static func encodeJSON(_ value: JSONValue, indent: Int = 0) -> String {
-        let pad = String(repeating: "  ", count: indent)
-        switch value {
-        case .string(let s):
-            return escapeJSONString(s)
-        case .number(let n):
-            return String(n)
-        case .bool(let b):
-            return b ? "true" : "false"
-        case .null:
-            return "null"
-        case .array(let items):
-            guard !items.isEmpty else { return "[]" }
-            let nextIndent = indent + 1
-            let nextPad = String(repeating: "  ", count: nextIndent)
-            var lines: [String] = ["["]
-            for (idx, item) in items.enumerated() {
-                let line = nextPad + encodeJSON(item, indent: nextIndent)
-                lines.append(idx == items.count - 1 ? line : line + ",")
-            }
-            lines.append(pad + "]")
-            return lines.joined(separator: "\n")
-        case .object(let pairs):
-            guard !pairs.isEmpty else { return "{}" }
-            let nextIndent = indent + 1
-            let nextPad = String(repeating: "  ", count: nextIndent)
-            var lines: [String] = ["{"]
-            for (idx, pair) in pairs.enumerated() {
-                let (key, val) = pair
-                let line = nextPad + escapeJSONString(key) + ": " + encodeJSON(val, indent: nextIndent)
-                lines.append(idx == pairs.count - 1 ? line : line + ",")
-            }
-            lines.append(pad + "}")
-            return lines.joined(separator: "\n")
-        }
-    }
-
-    private static func escapeJSONString(_ s: String) -> String {
-        var out = "\""
-        out.reserveCapacity(s.count + 2)
-        for scalar in s.unicodeScalars {
-            switch scalar.value {
-            case 0x22:
-                out.append("\\\"")
-            case 0x5C:
-                out.append("\\\\")
-            case 0x08:
-                out.append("\\b")
-            case 0x0C:
-                out.append("\\f")
-            case 0x0A:
-                out.append("\\n")
-            case 0x0D:
-                out.append("\\r")
-            case 0x09:
-                out.append("\\t")
-            case 0x00...0x1F:
-                out.append(String(format: "\\u%04X", scalar.value))
-            default:
-                out.append(Character(scalar))
-            }
-        }
-        out.append("\"")
-        return out
     }
 
     nonisolated static func publishExternalAssetsIfPresent(
