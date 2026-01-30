@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import CryptoKit
 @preconcurrency import Dispatch
 
 
@@ -2196,6 +2197,10 @@ public enum WhatsAppExportService {
         if existingNames.contains(outMD.lastPathComponent) { existing.append(outMD) }
         if existingNames.contains(sidecarHTML.lastPathComponent) { existing.append(sidecarHTML) }
         if existingNames.contains(sortedFolderURL.lastPathComponent) { existing.append(sortedFolderURL) }
+        let manifestURL = outPath.appendingPathComponent("\(base).manifest.json")
+        let shaURL = outPath.appendingPathComponent("\(base).sha256")
+        if existingNames.contains(manifestURL.lastPathComponent) { existing.append(manifestURL) }
+        if existingNames.contains(shaURL.lastPathComponent) { existing.append(shaURL) }
         for variant in HTMLVariant.allCases {
             let name = "\(base)\(variant.filenameSuffix).html"
             if existingNames.contains(name) {
@@ -2942,6 +2947,35 @@ public enum WhatsAppExportService {
 
         try? fm.removeItem(at: stagingDir)
         didRemoveStaging = true
+
+        var artifactPaths: [String] = variants.map { "\(base)\($0.filenameSuffix).html" }
+        artifactPaths.append("\(base).md")
+        if exportSortedAttachments {
+            artifactPaths.append("\(base)-sdc.html")
+        }
+
+        let manifestFlags = ManifestArtifactFlags(
+            sidecar: exportSortedAttachments,
+            max: variants.contains(.embedAll),
+            compact: variants.contains(.thumbnailsOnly),
+            email: variants.contains(.textOnly),
+            markdown: true,
+            deleteOriginals: false,
+            rawArchive: false
+        )
+
+        _ = try writeDeterministicManifestAndChecksums(
+            exportDir: outPath,
+            baseName: base,
+            chatURL: chatPath,
+            messages: msgs,
+            meName: meName,
+            artifactRelativePaths: artifactPaths,
+            flags: manifestFlags,
+            allowOverwrite: allowOverwrite,
+            debugEnabled: false,
+            debugLog: nil
+        )
 
         return ExportMultiResult(htmlByVariant: htmlByVariant, md: outMD)
     }
@@ -7556,6 +7590,444 @@ nonisolated private static func stageThumbnailForExport(
             }
         }
         return true
+    }
+
+    // MARK: - Deterministic Manifest + Checksums
+
+    struct ManifestArtifactFlags: Sendable {
+        let sidecar: Bool
+        let max: Bool
+        let compact: Bool
+        let email: Bool
+        let markdown: Bool
+        let deleteOriginals: Bool
+        let rawArchive: Bool
+    }
+
+    struct ChecksumEntry: Sendable {
+        let path: String
+        let sha256: String
+    }
+
+    enum ManifestChecksumError: Error, LocalizedError, Sendable {
+        case missingRequiredArtifact(url: URL)
+        case invalidRelativePath(url: URL)
+        case unreadableArtifact(url: URL)
+
+        var errorDescription: String? {
+            switch self {
+            case .missingRequiredArtifact(let url):
+                return "Required artifact missing for checksum: \(url.lastPathComponent)"
+            case .invalidRelativePath(let url):
+                return "Checksum path normalization failed for: \(url.path)"
+            case .unreadableArtifact(let url):
+                return "Checksum artifact unreadable: \(url.lastPathComponent)"
+            }
+        }
+    }
+
+    nonisolated static func writeDeterministicManifestAndChecksums(
+        exportDir: URL,
+        baseName: String,
+        chatURL: URL,
+        messages: [WAMessage],
+        meName: String,
+        artifactRelativePaths: [String],
+        flags: ManifestArtifactFlags,
+        allowOverwrite: Bool,
+        debugEnabled: Bool = false,
+        debugLog: ((String) -> Void)? = nil
+    ) throws -> (manifestURL: URL, shaURL: URL, bundleHash: String, entries: [ChecksumEntry]) {
+        let fm = FileManager.default
+        let root = exportDir.standardizedFileURL
+        let manifestName = "\(baseName).manifest.json"
+        let shaName = "\(baseName).sha256"
+
+        func log(_ msg: String) {
+            guard debugEnabled else { return }
+            debugLog?(msg)
+        }
+
+        let requiredFiles: [URL] = artifactRelativePaths.map { root.appendingPathComponent($0) }
+        for url in requiredFiles {
+            guard fm.fileExists(atPath: url.path) else {
+                throw ManifestChecksumError.missingRequiredArtifact(url: url)
+            }
+        }
+
+        var candidates: [URL] = []
+        candidates.append(contentsOf: requiredFiles)
+
+        if flags.sidecar {
+            let sidecarDir = root.appendingPathComponent(baseName, isDirectory: true)
+            if fm.fileExists(atPath: sidecarDir.path) {
+                candidates.append(sidecarDir)
+            }
+        }
+
+        if flags.rawArchive {
+            let rawDir = root.appendingPathComponent("\(baseName)__raw", isDirectory: true)
+            if fm.fileExists(atPath: rawDir.path) {
+                candidates.append(rawDir)
+            } else {
+                throw ManifestChecksumError.missingRequiredArtifact(url: rawDir)
+            }
+            let rawZip = root.appendingPathComponent("\(baseName)__raw.zip")
+            if fm.fileExists(atPath: rawZip.path) {
+                candidates.append(rawZip)
+            }
+        }
+
+        let externalAssetDirs = ["_thumbs", "_previews"]
+        for name in externalAssetDirs {
+            let dir = root.appendingPathComponent(name, isDirectory: true)
+            var isDir = ObjCBool(false)
+            if fm.fileExists(atPath: dir.path, isDirectory: &isDir), isDir.boolValue {
+                candidates.append(dir)
+            }
+        }
+
+        let excludedNames: Set<String> = [
+            manifestName,
+            shaName,
+            ".DS_Store"
+        ]
+
+        func shouldSkip(_ url: URL) -> Bool {
+            let name = url.lastPathComponent
+            if excludedNames.contains(name) { return true }
+            if name.hasPrefix("._") { return true }
+            if name.hasPrefix(".") { return true }
+            if name.hasPrefix(".wa_export_tmp_") { return true }
+            return false
+        }
+
+        func appendFiles(from url: URL, into list: inout [URL]) throws {
+            let rv = try? url.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey])
+            if rv?.isRegularFile == true {
+                if !shouldSkip(url) { list.append(url) }
+                return
+            }
+            if rv?.isDirectory == true {
+                guard let en = fm.enumerator(
+                    at: url,
+                    includingPropertiesForKeys: [.isRegularFileKey],
+                    options: [.skipsHiddenFiles, .skipsPackageDescendants]
+                ) else {
+                    return
+                }
+                for case let entry as URL in en {
+                    if shouldSkip(entry) { continue }
+                    let erv = try? entry.resourceValues(forKeys: [.isRegularFileKey])
+                    if erv?.isRegularFile == true {
+                        list.append(entry)
+                    }
+                }
+                return
+            }
+            throw ManifestChecksumError.unreadableArtifact(url: url)
+        }
+
+        var files: [URL] = []
+        for candidate in candidates {
+            try appendFiles(from: candidate, into: &files)
+        }
+
+        func normalizedRelativePath(_ url: URL) -> String? {
+            let rootPath = root.standardizedFileURL.path
+            let fullPath = url.standardizedFileURL.path
+            guard fullPath.hasPrefix(rootPath) else { return nil }
+            var rel = String(fullPath.dropFirst(rootPath.count))
+            if rel.hasPrefix("/") { rel.removeFirst() }
+            if rel.isEmpty { return nil }
+            let nfc = rel.precomposedStringWithCanonicalMapping
+            return nfc.replacingOccurrences(of: "\\", with: "/")
+        }
+
+        func sha256Hex(for url: URL) throws -> String {
+            let handle = try FileHandle(forReadingFrom: url)
+            defer { try? handle.close() }
+            var hasher = SHA256()
+            while true {
+                let chunk = try handle.read(upToCount: 1024 * 1024) ?? Data()
+                if chunk.isEmpty { break }
+                hasher.update(data: chunk)
+            }
+            let digest = hasher.finalize()
+            return digest.map { String(format: "%02x", $0) }.joined()
+        }
+
+        var entriesByPath: [String: ChecksumEntry] = [:]
+        entriesByPath.reserveCapacity(files.count)
+
+        for fileURL in files {
+            guard let rel = normalizedRelativePath(fileURL) else {
+                throw ManifestChecksumError.invalidRelativePath(url: fileURL)
+            }
+            if entriesByPath[rel] != nil { continue }
+            let sha = try sha256Hex(for: fileURL)
+            entriesByPath[rel] = ChecksumEntry(path: rel, sha256: sha)
+        }
+
+        let sortedEntries = entriesByPath.values.sorted {
+            $0.path.utf8.lexicographicallyPrecedes($1.path.utf8)
+        }
+
+        let shaLines = sortedEntries.map { "\($0.sha256)  \($0.path)" }
+        let shaContent = shaLines.joined(separator: "\n") + "\n"
+        let shaData = shaContent.data(using: .utf8) ?? Data()
+        let bundleHash = SHA256.hash(data: shaData).map { String(format: "%02x", $0) }.joined()
+
+        let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown"
+        let buildNumber = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "unknown"
+
+        let participants = manifestParticipants(messages: messages, meName: meName)
+        let dateRange = manifestMessageDateRange(messages: messages)
+        let createdAt = manifestCreatedAt(chatURL: chatURL)
+        let mediaCounts = manifestMediaCounts(messages: messages)
+        let perf = perfSnapshot()
+
+        let fileHashValues: [JSONValue] = sortedEntries.map {
+            .object([
+                ("path", .string($0.path)),
+                ("sha256", .string($0.sha256))
+            ])
+        }
+
+        let artifactTimingPairs: [(String, JSONValue)] = [
+            flags.sidecar ? ("sidecar", .null) : nil,
+            flags.max ? ("max", .null) : nil,
+            flags.compact ? ("compact", .null) : nil,
+            flags.email ? ("email", .null) : nil,
+            flags.markdown ? ("markdown", .null) : nil,
+            flags.rawArchive ? ("rawArchive", .null) : nil
+        ].compactMap { $0 }
+
+        let manifestValue = JSONValue.object([
+            ("appVersion", .string(appVersion)),
+            ("buildNumber", .string(buildNumber)),
+            ("exportBase", .string(baseName)),
+            ("participants", .array(participants.map { .string($0) })),
+            ("createdAt", createdAt.map { .string($0) } ?? .null),
+            ("messageDateRange", dateRange.map {
+                .object([
+                    ("start", .string($0.start)),
+                    ("end", .string($0.end))
+                ])
+            } ?? .null),
+            ("artifacts", .object([
+                ("sidecar", .bool(flags.sidecar)),
+                ("max", .bool(flags.max)),
+                ("compact", .bool(flags.compact)),
+                ("email", .bool(flags.email)),
+                ("markdown", .bool(flags.markdown)),
+                ("deleteOriginals", .bool(flags.deleteOriginals)),
+                ("rawArchive", .bool(flags.rawArchive))
+            ])),
+            ("mediaCounts", .object([
+                ("images", .number(mediaCounts.images)),
+                ("videos", .number(mediaCounts.videos)),
+                ("audios", .number(mediaCounts.audios)),
+                ("documents", .number(mediaCounts.documents))
+            ])),
+            ("thumbnailStats", .object([
+                ("requested", .number(perf.thumbStoreRequested)),
+                ("reused", .number(perf.thumbStoreReused)),
+                ("generated", .number(perf.thumbStoreGenerated)),
+                ("timeMs", .null)
+            ])),
+            ("timings", .object([
+                ("totalMs", .null),
+                ("artifactMs", .object(artifactTimingPairs))
+            ])),
+            ("fileHashesSha256", .array(fileHashValues)),
+            ("bundleHashSha256", .string(bundleHash))
+        ])
+
+        let manifestContent = encodeJSON(manifestValue) + "\n"
+        let manifestData = manifestContent.data(using: .utf8) ?? Data()
+
+        let stagingBase = try localStagingBaseDirectory()
+        let stagingDir = try createStagingDirectory(in: stagingBase)
+        var didRemoveStaging = false
+        defer {
+            if !didRemoveStaging, fm.fileExists(atPath: stagingDir.path) {
+                try? fm.removeItem(at: stagingDir)
+            }
+        }
+
+        let stagedManifest = stagingDir.appendingPathComponent(manifestName)
+        let stagedSha = stagingDir.appendingPathComponent(shaName)
+        try manifestData.write(to: stagedManifest, options: [.atomic])
+        try shaData.write(to: stagedSha, options: [.atomic])
+
+        func publishMove(staged: URL, final: URL) throws {
+            try fm.createDirectory(at: final.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if fm.fileExists(atPath: final.path) {
+                if allowOverwrite {
+                    let isDir = (try? final.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+                    let backup = final
+                        .deletingLastPathComponent()
+                        .appendingPathComponent(".wa_backup_\(UUID().uuidString)", isDirectory: isDir)
+                    if debugEnabled {
+                        log("OVERWRITE: backup existing -> \(backup.path)")
+                        log("PUBLISH REPLACE: \(final.path)")
+                    }
+                    try fm.moveItem(at: final, to: backup)
+                    do {
+                        try fm.moveItem(at: staged, to: final)
+                        try? fm.removeItem(at: backup)
+                    } catch {
+                        if fm.fileExists(atPath: backup.path) {
+                            try? fm.moveItem(at: backup, to: final)
+                        }
+                        throw error
+                    }
+                } else {
+                    throw OutputCollisionError(url: final)
+                }
+            } else {
+                try fm.moveItem(at: staged, to: final)
+            }
+            if debugEnabled {
+                log("PUBLISH OK: \(final.path)")
+            }
+        }
+
+        let finalManifest = root.appendingPathComponent(manifestName)
+        let finalSha = root.appendingPathComponent(shaName)
+        try publishMove(staged: stagedManifest, final: finalManifest)
+        try publishMove(staged: stagedSha, final: finalSha)
+
+        didRemoveStaging = true
+        if fm.fileExists(atPath: stagingDir.path) {
+            try? fm.removeItem(at: stagingDir)
+        }
+
+        return (manifestURL: finalManifest, shaURL: finalSha, bundleHash: bundleHash, entries: sortedEntries)
+    }
+
+    nonisolated private static func manifestParticipants(messages: [WAMessage], meName: String) -> [String] {
+        var labels: [String] = []
+        labels.reserveCapacity(messages.count)
+
+        var seen: Set<String> = []
+        func insertLabel(_ raw: String) {
+            let sanitized = safeFinderFilename(raw)
+            let key = normalizedKey(sanitized)
+            guard !key.isEmpty else { return }
+            if seen.insert(key).inserted {
+                labels.append(sanitized)
+            }
+        }
+
+        let fromMessages = participants(from: messages)
+        for name in fromMessages {
+            insertLabel(name)
+        }
+
+        let meLabel = safeFinderFilename(meName)
+        if !meLabel.isEmpty {
+            let meKey = normalizedKey(meLabel)
+            if !meKey.isEmpty, !seen.contains(meKey) {
+                _ = seen.insert(meKey)
+                labels.insert(meLabel, at: 0)
+            }
+        }
+
+        return labels
+    }
+
+    nonisolated private static func manifestMessageDateRange(messages: [WAMessage]) -> (start: String, end: String)? {
+        guard let range = messageDateRange(messages: messages) else { return nil }
+        return (
+            start: TimePolicy.iso8601WithOffsetString(range.lowerBound),
+            end: TimePolicy.iso8601WithOffsetString(range.upperBound)
+        )
+    }
+
+    nonisolated private static func manifestCreatedAt(chatURL: URL) -> String? {
+        guard let date = exportCreatedDate(chatURL: chatURL) else { return nil }
+        return TimePolicy.iso8601WithOffsetString(date)
+    }
+
+    nonisolated private static func manifestMediaCounts(messages: [WAMessage]) -> WAMediaCounts {
+        messageMediaCounts(messages: messages)
+    }
+
+    private enum JSONValue {
+        case string(String)
+        case number(Int)
+        case bool(Bool)
+        case object([(String, JSONValue)])
+        case array([JSONValue])
+        case null
+    }
+
+    private static func encodeJSON(_ value: JSONValue, indent: Int = 0) -> String {
+        let pad = String(repeating: "  ", count: indent)
+        switch value {
+        case .string(let s):
+            return escapeJSONString(s)
+        case .number(let n):
+            return String(n)
+        case .bool(let b):
+            return b ? "true" : "false"
+        case .null:
+            return "null"
+        case .array(let items):
+            guard !items.isEmpty else { return "[]" }
+            let nextIndent = indent + 1
+            let nextPad = String(repeating: "  ", count: nextIndent)
+            var lines: [String] = ["["]
+            for (idx, item) in items.enumerated() {
+                let line = nextPad + encodeJSON(item, indent: nextIndent)
+                lines.append(idx == items.count - 1 ? line : line + ",")
+            }
+            lines.append(pad + "]")
+            return lines.joined(separator: "\n")
+        case .object(let pairs):
+            guard !pairs.isEmpty else { return "{}" }
+            let nextIndent = indent + 1
+            let nextPad = String(repeating: "  ", count: nextIndent)
+            var lines: [String] = ["{"]
+            for (idx, pair) in pairs.enumerated() {
+                let (key, val) = pair
+                let line = nextPad + escapeJSONString(key) + ": " + encodeJSON(val, indent: nextIndent)
+                lines.append(idx == pairs.count - 1 ? line : line + ",")
+            }
+            lines.append(pad + "}")
+            return lines.joined(separator: "\n")
+        }
+    }
+
+    private static func escapeJSONString(_ s: String) -> String {
+        var out = "\""
+        out.reserveCapacity(s.count + 2)
+        for scalar in s.unicodeScalars {
+            switch scalar.value {
+            case 0x22:
+                out.append("\\\"")
+            case 0x5C:
+                out.append("\\\\")
+            case 0x08:
+                out.append("\\b")
+            case 0x0C:
+                out.append("\\f")
+            case 0x0A:
+                out.append("\\n")
+            case 0x0D:
+                out.append("\\r")
+            case 0x09:
+                out.append("\\t")
+            case 0x00...0x1F:
+                out.append(String(format: "\\u%04X", scalar.value))
+            default:
+                out.append(Character(scalar))
+            }
+        }
+        out.append("\"")
+        return out
     }
 
     nonisolated static func publishExternalAssetsIfPresent(

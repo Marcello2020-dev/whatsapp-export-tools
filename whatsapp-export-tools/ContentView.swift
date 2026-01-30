@@ -1835,6 +1835,34 @@ struct ContentView: View {
         SourceOps.rawArchiveDirectory(baseName: baseName, in: dir)
     }
 
+    nonisolated private static func outputManifestURL(baseName: String, in dir: URL) -> URL {
+        dir.appendingPathComponent("\(baseName).manifest.json")
+    }
+
+    nonisolated private static func outputSHA256URL(baseName: String, in dir: URL) -> URL {
+        dir.appendingPathComponent("\(baseName).sha256")
+    }
+
+    nonisolated private static func manifestArtifactRelativePaths(
+        baseName: String,
+        variants: [HTMLVariant],
+        wantsMarkdown: Bool,
+        wantsSidecar: Bool
+    ) -> [String] {
+        var paths: [String] = []
+        paths.reserveCapacity(variants.count + 2)
+        for variant in variants {
+            paths.append("\(baseName)\(htmlVariantSuffix(for: variant)).html")
+        }
+        if wantsMarkdown {
+            paths.append("\(baseName).md")
+        }
+        if wantsSidecar {
+            paths.append("\(baseName)-sdc.html")
+        }
+        return paths
+    }
+
     nonisolated static func replaceDeleteTargets(
         baseName: String,
         variantSuffixes: [String],
@@ -1878,6 +1906,16 @@ struct ContentView: View {
             }
         }
 
+        let manifestURL = outputManifestURL(baseName: baseName, in: dir)
+        if seen.insert(manifestURL.lastPathComponent).inserted {
+            urls.append(manifestURL)
+        }
+
+        let shaURL = outputSHA256URL(baseName: baseName, in: dir)
+        if seen.insert(shaURL.lastPathComponent).inserted {
+            urls.append(shaURL)
+        }
+
         return urls
     }
 
@@ -1911,12 +1949,30 @@ struct ContentView: View {
             return false
         }
 
+        func isManifest(_ name: String) -> Bool {
+            guard name.hasSuffix(".json") else { return false }
+            let stem = (name as NSString).deletingPathExtension
+            return stem.hasPrefix("\(baseName).manifest")
+        }
+
+        func isChecksum(_ name: String) -> Bool {
+            guard name.hasSuffix(".sha256") else { return false }
+            let stem = (name as NSString).deletingPathExtension
+            return stem.hasPrefix(baseName)
+        }
+
         for name in existingNames {
             if isSidecarHTML(name) || isSidecarDir(name) {
                 labels.insert("Sidecar")
             }
             if isRawArchive(name) {
                 labels.insert("Raw-Archiv")
+            }
+            if isManifest(name) {
+                labels.insert("Manifest")
+            }
+            if isChecksum(name) {
+                labels.insert("Prüfsumme")
             }
             if isVariantHTML(name, suffix: "-max") {
                 labels.insert("Max")
@@ -1932,7 +1988,7 @@ struct ContentView: View {
             }
         }
 
-        let ordered = ["Sidecar", "Raw-Archiv", "Max", "Kompakt", "E-Mail", "Markdown"]
+        let ordered = ["Sidecar", "Raw-Archiv", "Manifest", "Prüfsumme", "Max", "Kompakt", "E-Mail", "Markdown"]
         return ordered.filter { labels.contains($0) }
     }
 
@@ -2091,6 +2147,8 @@ struct ContentView: View {
         if wantsRawArchive {
             expected.append("\(baseName)__raw")
         }
+        expected.append("\(baseName).manifest.json")
+        expected.append("\(baseName).sha256")
 
         func isSuffixedVariant(expectedName: String, actualName: String) -> Bool {
             guard actualName != expectedName else { return false }
@@ -2519,6 +2577,43 @@ struct ContentView: View {
                 logger.log("Done Roharchiv")
             }
 
+            do {
+                let checksumStart = ProcessInfo.processInfo.systemUptime
+                logger.log("Start Prüfsummen")
+                let artifactPaths = Self.manifestArtifactRelativePaths(
+                    baseName: baseName,
+                    variants: context.plan.variants,
+                    wantsMarkdown: context.wantsMD,
+                    wantsSidecar: context.wantsSidecar
+                )
+                let flags = WhatsAppExportService.ManifestArtifactFlags(
+                    sidecar: context.wantsSidecar,
+                    max: context.plan.variants.contains(.embedAll),
+                    compact: context.plan.variants.contains(.thumbnailsOnly),
+                    email: context.plan.variants.contains(.textOnly),
+                    markdown: context.wantsMD,
+                    deleteOriginals: context.wantsDeleteOriginals,
+                    rawArchive: context.wantsRawArchiveCopy
+                )
+                _ = try WhatsAppExportService.writeDeterministicManifestAndChecksums(
+                    exportDir: workResult.exportDir,
+                    baseName: baseName,
+                    chatURL: prepared.chatURL,
+                    messages: prepared.messages,
+                    meName: prepared.meName,
+                    artifactRelativePaths: artifactPaths,
+                    flags: flags,
+                    allowOverwrite: context.allowOverwrite,
+                    debugEnabled: debugEnabled,
+                    debugLog: debugLog
+                )
+                let checksumDuration = ProcessInfo.processInfo.systemUptime - checksumStart
+                logger.log("Done Prüfsummen (\(Self.formatDuration(checksumDuration)))")
+            } catch {
+                logger.log("ERROR: Prüfsummen fehlgeschlagen: \(error)")
+                throw error
+            }
+
             if context.wantsDeleteOriginals {
                 await offerSourceDeletionIfPossible(
                     context: context,
@@ -2616,6 +2711,12 @@ struct ContentView: View {
             let rawDir = Self.outputRawArchiveDir(baseName: baseName, in: exportDir)
             if existingNames.contains(rawDir.lastPathComponent) { existing.append(rawDir) }
         }
+
+        let manifestURL = Self.outputManifestURL(baseName: baseName, in: exportDir)
+        if existingNames.contains(manifestURL.lastPathComponent) { existing.append(manifestURL) }
+
+        let shaURL = Self.outputSHA256URL(baseName: baseName, in: exportDir)
+        if existingNames.contains(shaURL.lastPathComponent) { existing.append(shaURL) }
 
         for variant in context.plan.variants {
             let variantURL = Self.outputHTMLURL(baseName: baseName, variant: variant, in: exportDir)
