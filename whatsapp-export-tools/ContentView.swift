@@ -1768,6 +1768,9 @@ struct ContentView: View {
             : "WARNING: duplicate work detected"
         lines.append("- No-duplicate-work check: attachment index builds=\(snapshot.attachmentIndexBuildCount) (expected 1) — \(duplicateNote)")
         lines.append("- Timestamps: normalized at sidecar step + final safety pass; mismatches logged if detected.")
+        lines.append("")
+        lines.append("## Known Issues / Follow-ups")
+        lines.append("- n/a")
 
         let reportText = lines.joined(separator: "\n") + "\n"
         try? reportText.write(to: reportURL, atomically: true, encoding: .utf8)
@@ -2564,6 +2567,7 @@ struct ContentView: View {
 
             if context.wantsRawArchiveCopy {
                 logger.log("Start Roharchiv")
+                let rawStart = ProcessInfo.processInfo.systemUptime
                 _ = try await Task.detached(priority: .utility) {
                     try SourceOps.copyRawArchive(
                         baseName: baseName,
@@ -2574,7 +2578,8 @@ struct ContentView: View {
                         debugLog: debugLog
                     )
                 }.value
-                logger.log("Done Roharchiv")
+                let rawDuration = ProcessInfo.processInfo.systemUptime - rawStart
+                logger.log("Done Roharchiv (\(Self.formatDuration(rawDuration)))")
             }
 
             do {
@@ -2629,6 +2634,19 @@ struct ContentView: View {
             if context.wantsRawArchiveCopy { published.append("Roharchiv") }
             published.append(contentsOf: context.plan.variants.map { Self.htmlVariantLogLabel(for: $0) })
             if context.wantsMD { published.append("Markdown") }
+            let perfSnapshot = WhatsAppExportService.perfSnapshot()
+            logger.log(
+                "Counters: artifacts=\(published.count) " +
+                "thumbs requested=\(perfSnapshot.thumbStoreRequested) " +
+                "reused=\(perfSnapshot.thumbStoreReused) " +
+                "generated=\(perfSnapshot.thumbStoreGenerated) " +
+                "time=\(Self.formatSeconds(perfSnapshot.thumbStoreTime))"
+            )
+            logger.log(
+                "Counters: attachmentIndex builds=\(perfSnapshot.attachmentIndexBuildCount) " +
+                "files=\(perfSnapshot.attachmentIndexBuildFiles) " +
+                "time=\(Self.formatSeconds(perfSnapshot.attachmentIndexBuildTime))"
+            )
             debugLog("RUN DONE: \(Self.formatDuration(totalDuration)) published=\(published.joined(separator: ", "))")
             writePerfReport(
                 context: context,
