@@ -14,6 +14,7 @@ struct ContentView: View {
     private struct ExportContext: Sendable {
         let chatURL: URL
         let outDir: URL
+        let partnerFolderName: String
         let exportDir: URL
         let tempWorkspaceURL: URL?
         let debugEnabled: Bool
@@ -911,7 +912,7 @@ struct ContentView: View {
         Toggle(isOn: $includeRawArchive) {
             HStack(spacing: 6) {
                 Text("Copy raw WhatsApp export archive")
-                helpIcon("Creates a copy of the WhatsApp export as <ExportBase>__raw/ next to the outputs.")
+                helpIcon("Creates a copy of the WhatsApp export inside __raw/ under the run folder.")
             }
         }
         .accessibilityLabel("Copy raw archive")
@@ -1386,6 +1387,48 @@ struct ContentView: View {
             originalName: base,
             detectedPartnerRaw: detectedPartnerRaw,
             overridePartnerRaw: overridePartnerRaw
+        )
+    }
+
+    nonisolated private static func runRootDirectory(
+        outDir: URL,
+        partnerFolderName: String,
+        baseName: String
+    ) -> URL {
+        outDir
+            .appendingPathComponent(partnerFolderName, isDirectory: true)
+            .appendingPathComponent(baseName, isDirectory: true)
+    }
+
+    private func contextWithExportDir(_ context: ExportContext, exportDir: URL) -> ExportContext {
+        ExportContext(
+            chatURL: context.chatURL,
+            outDir: context.outDir,
+            partnerFolderName: context.partnerFolderName,
+            exportDir: exportDir,
+            tempWorkspaceURL: context.tempWorkspaceURL,
+            debugEnabled: context.debugEnabled,
+            allowOverwrite: context.allowOverwrite,
+            isOverwriteRetry: context.isOverwriteRetry,
+            preflight: context.preflight,
+            prepared: context.prepared,
+            baseNameOverride: context.baseNameOverride,
+            exporter: context.exporter,
+            chatPartner: context.chatPartner,
+            chatPartnerSource: context.chatPartnerSource,
+            chatPartnerFolderOverride: context.chatPartnerFolderOverride,
+            detectedPartnerRaw: context.detectedPartnerRaw,
+            overridePartnerRaw: context.overridePartnerRaw,
+            participantDetection: context.participantDetection,
+            provenance: context.provenance,
+            participantNameOverrides: context.participantNameOverrides,
+            selectedVariantsInOrder: context.selectedVariantsInOrder,
+            plan: context.plan,
+            wantsMD: context.wantsMD,
+            wantsSidecar: context.wantsSidecar,
+            wantsRawArchiveCopy: context.wantsRawArchiveCopy,
+            wantsDeleteOriginals: context.wantsDeleteOriginals,
+            htmlLabel: context.htmlLabel
         )
     }
 
@@ -2398,13 +2441,12 @@ struct ContentView: View {
 
         func isSidecarDir(_ name: String) -> Bool {
             guard !name.hasSuffix(".html"), !name.hasSuffix(".md") else { return false }
-            if name.hasPrefix("\(baseName)__raw") { return false }
+            if name.hasPrefix("__raw") { return false }
             return name.hasPrefix(baseName)
         }
 
         func isRawArchive(_ name: String) -> Bool {
-            if name.hasPrefix("\(baseName)__raw") { return true }
-            return false
+            return name.hasPrefix("__raw")
         }
 
         func isManifest(_ name: String) -> Bool {
@@ -2691,7 +2733,7 @@ struct ContentView: View {
             expected.append(baseName)
         }
         if wantsRawArchive {
-            expected.append("\(baseName)__raw")
+            expected.append("__raw")
         }
         expected.append("\(baseName).manifest.json")
         expected.append("\(baseName).sha256")
@@ -2946,14 +2988,14 @@ struct ContentView: View {
         let zipName = provenance.originalZipURL?.lastPathComponent ?? ""
         debugLog("PROVENANCE: inputKind=\(inputKindLabel) detectedFolder=\"\(provenance.detectedFolderURL.path)\" originalZip=\"\(zipName)\"")
 
-        let subfolderName = suggestedChatSubfolderName(
+        let partnerFolderName = suggestedChatSubfolderName(
             chatURL: resolvedChatURL,
             chatPartner: partnerForNamingRaw,
             detectedPartnerRaw: detectedPartnerRaw,
             overridePartnerRaw: overridePartnerEffective
         )
-        debugLog("TARGET DIR NAME: \"\(subfolderName)\" detected=\"\(detectedPartnerRaw)\" override=\"\(overridePartnerEffective ?? "")\" effective=\"\(partnerForNamingRaw)\"")
-        let exportDir = outDir.appendingPathComponent(subfolderName, isDirectory: true)
+        debugLog("PARTNER DIR NAME: \"\(partnerFolderName)\" detected=\"\(detectedPartnerRaw)\" override=\"\(overridePartnerEffective ?? "")\" effective=\"\(partnerForNamingRaw)\"")
+        let partnerRoot = outDir.appendingPathComponent(partnerFolderName, isDirectory: true)
 
         let isOverwriteRetry = overwriteConfirmed
         let shouldReusePrepared = reusePrepared || isOverwriteRetry
@@ -2970,7 +3012,8 @@ struct ContentView: View {
         let context = ExportContext(
             chatURL: resolvedChatURL,
             outDir: outDir,
-            exportDir: exportDir,
+            partnerFolderName: partnerFolderName,
+            exportDir: partnerRoot,
             tempWorkspaceURL: snapshot.tempWorkspaceURL,
             debugEnabled: debugEnabled,
             allowOverwrite: allowOverwrite,
@@ -3057,6 +3100,12 @@ struct ContentView: View {
         let overrideTrimmed = context.baseNameOverride?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let baseName = overrideTrimmed.isEmpty ? prepared.baseName : overrideTrimmed
         let preparedForRun = Self.preparedWithBaseName(prepared, baseName: baseName)
+        let runRoot = Self.runRootDirectory(
+            outDir: context.outDir,
+            partnerFolderName: context.partnerFolderName,
+            baseName: baseName
+        )
+        let runContext = contextWithExportDir(context, exportDir: runRoot)
 
         if let detection = context.participantDetection {
             let winner = detection.evidence.first(where: { $0.source == "decision:winner" })?.excerpt ?? "n/a"
@@ -3075,30 +3124,31 @@ struct ContentView: View {
         let runStartUptime = ProcessInfo.processInfo.systemUptime
         let startSuffix = context.isOverwriteRetry ? " (Replace confirmed)" : ""
         logger.log("Start: \(Self.formatClockTime(runStartWall))\(startSuffix)")
-        logger.log("Target folder: \(context.exportDir.lastPathComponent)")
+        logger.log("RUN ROOT: \(runRoot.path)")
+        logger.log("Target folder: \(runRoot.lastPathComponent)")
         logger.log("Export name: \(baseName)")
         let onOff = { (value: Bool) in value ? "ON" : "OFF" }
         logger.log(
-            "Options: Max=\(onOff(context.selectedVariantsInOrder.contains(.embedAll))) " +
-            "Compact=\(onOff(context.selectedVariantsInOrder.contains(.thumbnailsOnly))) " +
-            "E-Mail=\(onOff(context.selectedVariantsInOrder.contains(.textOnly))) " +
-            "Markdown=\(onOff(context.wantsMD)) " +
-            "Sidecar=\(onOff(context.wantsSidecar)) " +
-            "RawArchive=\(onOff(context.wantsRawArchiveCopy)) " +
-            "DeleteOriginals=\(onOff(context.wantsDeleteOriginals))"
+            "Options: Max=\(onOff(runContext.selectedVariantsInOrder.contains(.embedAll))) " +
+            "Compact=\(onOff(runContext.selectedVariantsInOrder.contains(.thumbnailsOnly))) " +
+            "E-Mail=\(onOff(runContext.selectedVariantsInOrder.contains(.textOnly))) " +
+            "Markdown=\(onOff(runContext.wantsMD)) " +
+            "Sidecar=\(onOff(runContext.wantsSidecar)) " +
+            "RawArchive=\(onOff(runContext.wantsRawArchiveCopy)) " +
+            "DeleteOriginals=\(onOff(runContext.wantsDeleteOriginals))"
         )
         debugLog("RUN START: \(Self.formatClockTime(runStartWall))")
-        debugLog("PARTNER NAME SOURCE: \(context.chatPartnerSource)")
-        debugLog("PARTNER NAME EFFECTIVE: \(context.chatPartner)")
-        debugLog("TARGET DIR: \(context.exportDir.path)")
+        debugLog("PARTNER NAME SOURCE: \(runContext.chatPartnerSource)")
+        debugLog("PARTNER NAME EFFECTIVE: \(runContext.chatPartner)")
+        debugLog("RUN ROOT: \(runRoot.path)")
         debugLog("EXPORT NAME: \(baseName)")
-        debugLog("OPTIONS: Max=\(onOff(context.selectedVariantsInOrder.contains(.embedAll))) " +
-                 "Compact=\(onOff(context.selectedVariantsInOrder.contains(.thumbnailsOnly))) " +
-                 "E-Mail=\(onOff(context.selectedVariantsInOrder.contains(.textOnly))) " +
-                 "Markdown=\(onOff(context.wantsMD)) " +
-                 "Sidecar=\(onOff(context.wantsSidecar)) " +
-                 "RawArchive=\(onOff(context.wantsRawArchiveCopy)) " +
-                 "DeleteOriginals=\(onOff(context.wantsDeleteOriginals))")
+        debugLog("OPTIONS: Max=\(onOff(runContext.selectedVariantsInOrder.contains(.embedAll))) " +
+                 "Compact=\(onOff(runContext.selectedVariantsInOrder.contains(.thumbnailsOnly))) " +
+                 "E-Mail=\(onOff(runContext.selectedVariantsInOrder.contains(.textOnly))) " +
+                 "Markdown=\(onOff(runContext.wantsMD)) " +
+                 "Sidecar=\(onOff(runContext.wantsSidecar)) " +
+                 "RawArchive=\(onOff(runContext.wantsRawArchiveCopy)) " +
+                 "DeleteOriginals=\(onOff(runContext.wantsDeleteOriginals))")
         if perfEnabled {
             let caps = WhatsAppExportService.concurrencyCaps()
             logger.log("WET-PERF: caps cpu=\(caps.cpu) io=\(caps.io)")
@@ -3112,12 +3162,12 @@ struct ContentView: View {
 
         do {
             let preflight: OutputPreflight
-            if let provided = context.preflight {
+            if let provided = runContext.preflight {
                 preflight = provided
             } else {
                 preflight = try await Self.debugMeasureAsync("preflight") {
                     let preflightTask = Task.detached(priority: .userInitiated) {
-                        try Self.performOutputPreflight(context: context, baseName: baseName)
+                        try Self.performOutputPreflight(context: runContext, baseName: baseName)
                     }
                     return try await withTaskCancellationHandler {
                         try await preflightTask.value
@@ -3126,7 +3176,7 @@ struct ContentView: View {
                     }
                 }
 
-                if !preflight.existing.isEmpty, !context.allowOverwrite {
+                if !preflight.existing.isEmpty, !runContext.allowOverwrite {
                     pendingPreflight = preflight
                     pendingPreparedExport = prepared
                     throw WAExportError.outputAlreadyExists(urls: preflight.existing)
@@ -3148,7 +3198,7 @@ struct ContentView: View {
 
             let workTask = Task.detached(priority: .userInitiated) {
                 try await Self.performExportWork(
-                    context: context,
+                    context: runContext,
                     baseName: preflight.baseName,
                     prepared: preparedForRun,
                     log: append,
@@ -3170,7 +3220,7 @@ struct ContentView: View {
                 md: workResult.md
             )
 
-            if context.wantsRawArchiveCopy {
+            if runContext.wantsRawArchiveCopy {
                 let rawStep = RunStep.rawArchive
                 markStepState(rawStep, state: .running)
                 logger.log("Start \(rawStep.label)")
@@ -3179,8 +3229,8 @@ struct ContentView: View {
                     try SourceOps.copyRawArchive(
                         baseName: baseName,
                         exportDir: workResult.exportDir,
-                        provenance: context.provenance,
-                        allowOverwrite: context.allowOverwrite,
+                        provenance: runContext.provenance,
+                        allowOverwrite: runContext.allowOverwrite,
                         debugEnabled: debugEnabled,
                         debugLog: debugLog
                     )
@@ -3195,18 +3245,18 @@ struct ContentView: View {
                 logger.log("Start Checksums")
                 let artifactPaths = Self.manifestArtifactRelativePaths(
                     baseName: baseName,
-                    variants: context.plan.variants,
-                    wantsMarkdown: context.wantsMD,
-                    wantsSidecar: context.wantsSidecar
+                    variants: runContext.plan.variants,
+                    wantsMarkdown: runContext.wantsMD,
+                    wantsSidecar: runContext.wantsSidecar
                 )
                 let flags = WhatsAppExportService.ManifestArtifactFlags(
-                    sidecar: context.wantsSidecar,
-                    max: context.plan.variants.contains(.embedAll),
-                    compact: context.plan.variants.contains(.thumbnailsOnly),
-                    email: context.plan.variants.contains(.textOnly),
-                    markdown: context.wantsMD,
-                    deleteOriginals: context.wantsDeleteOriginals,
-                    rawArchive: context.wantsRawArchiveCopy
+                    sidecar: runContext.wantsSidecar,
+                    max: runContext.plan.variants.contains(.embedAll),
+                    compact: runContext.plan.variants.contains(.thumbnailsOnly),
+                    email: runContext.plan.variants.contains(.textOnly),
+                    markdown: runContext.wantsMD,
+                    deleteOriginals: runContext.wantsDeleteOriginals,
+                    rawArchive: runContext.wantsRawArchiveCopy
                 )
                 _ = try WhatsAppExportService.writeDeterministicManifestAndChecksums(
                     exportDir: workResult.exportDir,
@@ -3216,7 +3266,7 @@ struct ContentView: View {
                     meName: prepared.meName,
                     artifactRelativePaths: artifactPaths,
                     flags: flags,
-                    allowOverwrite: context.allowOverwrite,
+                    allowOverwrite: runContext.allowOverwrite,
                     debugEnabled: debugEnabled,
                     debugLog: debugLog
                 )
@@ -3227,9 +3277,9 @@ struct ContentView: View {
                 throw error
             }
 
-            if context.wantsDeleteOriginals {
+            if runContext.wantsDeleteOriginals {
                 await offerSourceDeletionIfPossible(
-                    context: context,
+                    context: runContext,
                     baseName: baseName,
                     exportDir: workResult.exportDir
                 )
@@ -3238,10 +3288,10 @@ struct ContentView: View {
             let totalDuration = ProcessInfo.processInfo.systemUptime - runStartUptime
             logger.log("Completed: \(Self.formatDuration(totalDuration))")
             var published: [String] = []
-            if context.wantsSidecar { published.append("Sidecar") }
-            if context.wantsRawArchiveCopy { published.append("Raw archive") }
-            published.append(contentsOf: context.plan.variants.map { Self.htmlVariantLogLabel(for: $0) })
-            if context.wantsMD { published.append("Markdown") }
+            if runContext.wantsSidecar { published.append("Sidecar") }
+            if runContext.wantsRawArchiveCopy { published.append("Raw archive") }
+            published.append(contentsOf: runContext.plan.variants.map { Self.htmlVariantLogLabel(for: $0) })
+            if runContext.wantsMD { published.append("Markdown") }
             let perfSnapshot = WhatsAppExportService.perfSnapshot()
             logger.log(
                 "Counters: artifacts=\(published.count) " +
@@ -3257,7 +3307,7 @@ struct ContentView: View {
             )
             debugLog("RUN DONE: \(Self.formatDuration(totalDuration)) published=\(published.joined(separator: ", "))")
             writePerfReport(
-                context: context,
+                context: runContext,
                 baseName: baseName,
                 runStartWall: runStartWall,
                 totalDuration: totalDuration,
@@ -3266,7 +3316,7 @@ struct ContentView: View {
             )
             lastRunDuration = totalDuration
             lastExportDir = workResult.exportDir
-            lastSidecarHTML = context.wantsSidecar
+            lastSidecarHTML = runContext.wantsSidecar
                 ? Self.outputSidecarHTML(baseName: baseName, in: workResult.exportDir)
                 : nil
             lastRunFailureSummary = nil
@@ -3294,22 +3344,22 @@ struct ContentView: View {
             if let waErr = error as? WAExportError {
                 switch waErr {
                 case .outputAlreadyExists:
-                    let exportDir = context.exportDir.standardizedFileURL
-                    let variantSuffixes = context.selectedVariantsInOrder.map { Self.htmlVariantSuffix(for: $0) }
+                    let exportDir = runContext.exportDir.standardizedFileURL
+                    let variantSuffixes = runContext.selectedVariantsInOrder.map { Self.htmlVariantSuffix(for: $0) }
                     let replaceTargets = Self.replaceDeleteTargets(
                         baseName: baseName,
                         variantSuffixes: variantSuffixes,
-                        wantsMarkdown: context.wantsMD,
-                        wantsSidecar: context.wantsSidecar,
-                        wantsRawArchive: context.wantsRawArchiveCopy,
+                        wantsMarkdown: runContext.wantsMD,
+                        wantsSidecar: runContext.wantsSidecar,
+                        wantsRawArchive: runContext.wantsRawArchiveCopy,
                         in: exportDir
                     )
                     let suffixArtifacts = Self.outputSuffixArtifacts(
                         baseName: baseName,
-                        variants: context.plan.variants,
-                        wantsMarkdown: context.wantsMD,
-                        wantsSidecar: context.wantsSidecar,
-                        wantsRawArchive: context.wantsRawArchiveCopy,
+                        variants: runContext.plan.variants,
+                        wantsMarkdown: runContext.wantsMD,
+                        wantsSidecar: runContext.wantsSidecar,
+                        wantsRawArchive: runContext.wantsRawArchiveCopy,
                         in: exportDir
                     )
                     let fm = FileManager.default

@@ -545,7 +545,7 @@ enum SourceOps {
     }
 
     nonisolated static func rawArchiveDirectory(baseName: String, in exportDir: URL) -> URL {
-        exportDir.appendingPathComponent("\(baseName)__raw", isDirectory: true)
+        exportDir.appendingPathComponent("__raw", isDirectory: true)
     }
 
     nonisolated static func copyRawArchive(
@@ -573,7 +573,7 @@ enum SourceOps {
             }
         }
 
-        let stagedRawRoot = stagingDir.appendingPathComponent("\(baseName)__raw", isDirectory: true)
+        let stagedRawRoot = stagingDir.appendingPathComponent("__raw", isDirectory: true)
         try fm.createDirectory(at: stagedRawRoot, withIntermediateDirectories: true)
 
         let stagedExportDir = stagedRawRoot.appendingPathComponent(sourceDir.lastPathComponent, isDirectory: true)
@@ -7765,15 +7765,11 @@ nonisolated private static func stageThumbnailForExport(
         }
 
         if flags.rawArchive {
-            let rawDir = root.appendingPathComponent("\(baseName)__raw", isDirectory: true)
+            let rawDir = root.appendingPathComponent("__raw", isDirectory: true)
             if fm.fileExists(atPath: rawDir.path) {
                 candidates.append(rawDir)
             } else {
                 throw ManifestChecksumError.missingRequiredArtifact(url: rawDir)
-            }
-            let rawZip = root.appendingPathComponent("\(baseName)__raw.zip")
-            if fm.fileExists(atPath: rawZip.path) {
-                candidates.append(rawZip)
             }
         }
 
