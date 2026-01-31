@@ -28,8 +28,37 @@ struct WETDeterminismCheck {
             envKey: "WET_DETERMINISM_ZIP_ROOT",
             fallback: "_local/fixtures/wet/determinism/zip"
         )
+        let zipMtimeInput = rootURL(
+            envKey: "WET_ZIP_MTIME_INPUT",
+            fallback: "_local/fixtures/wet/zip-mtime/whatsapp.zip"
+        )
 
         do {
+            var zipMtimeDriftDetected = false
+            let fm = FileManager.default
+            if zipMtimeInput.pathExtension.lowercased() == "zip",
+               fm.fileExists(atPath: zipMtimeInput.path),
+               fm.fileExists(atPath: folderRoot.path) {
+                do {
+                    let zipSnapshot = try WhatsAppExportService.resolveInputSnapshot(inputURL: zipMtimeInput)
+                    let extractedSnapshot = try snapshot(root: zipSnapshot.exportDir)
+                    let folderSnapshot = try snapshot(root: folderRoot)
+                    let shared = Set(folderSnapshot.keys).intersection(extractedSnapshot.keys)
+                    let mtimeHistogram = mtimeHistogramFor(shared: shared, folderSnapshot: folderSnapshot, zipSnapshot: extractedSnapshot)
+                    let driftDetected = detectSystematicMtimeDrift(sharedCount: shared.count, mtimeHistogram: mtimeHistogram)
+                    zipMtimeDriftDetected = driftDetected
+                    print("WET_DETERMINISM_CHECK: zip-mtime-drift shared=\(shared.count) drift=\(driftDetected)")
+                    if let temp = zipSnapshot.tempWorkspaceURL {
+                        try? fm.removeItem(at: temp)
+                    }
+                } catch {
+                    zipMtimeDriftDetected = true
+                    print("WET_DETERMINISM_CHECK: zip-mtime-drift FAIL: \(error)")
+                }
+            } else {
+                print("WET_DETERMINISM_CHECK: zip-mtime-drift SKIP (missing fixture)")
+            }
+
             let folderSnapshot = try snapshot(root: folderRoot)
             let zipSnapshot = try snapshot(root: zipRoot)
 
@@ -67,12 +96,7 @@ struct WETDeterminismCheck {
                 print("WET_DETERMINISM_CHECK: markdown relpath not found")
             }
 
-            var mtimeHistogram: [Int: Int] = [:]
-            for rel in shared {
-                guard let a = folderSnapshot[rel], let b = zipSnapshot[rel] else { continue }
-                let delta = Int((b.mtime.timeIntervalSince1970 - a.mtime.timeIntervalSince1970).rounded())
-                mtimeHistogram[delta, default: 0] += 1
-            }
+            let mtimeHistogram = mtimeHistogramFor(shared: shared, folderSnapshot: folderSnapshot, zipSnapshot: zipSnapshot)
             let topDeltas = mtimeHistogram.sorted { lhs, rhs in
                 if lhs.value == rhs.value { return lhs.key < rhs.key }
                 return lhs.value > rhs.value
@@ -82,9 +106,18 @@ struct WETDeterminismCheck {
                 print("WET_DETERMINISM_CHECK: mtime-delta \(delta)s count=\(count)")
             }
             let plus3600 = mtimeHistogram[3600] ?? 0
+            let minus3600 = mtimeHistogram[-3600] ?? 0
             print("WET_DETERMINISM_CHECK: mtime-delta +3600s count=\(plus3600)")
+            print("WET_DETERMINISM_CHECK: mtime-delta -3600s count=\(minus3600)")
+            let driftDetected = detectSystematicMtimeDrift(sharedCount: shared.count, mtimeHistogram: mtimeHistogram)
+            if driftDetected {
+                let driftCount = mtimeHistogram.filter { abs(abs($0.key) - 3600) <= 2 }.values.reduce(0, +)
+                let sharedCount = max(shared.count, 1)
+                let driftRatio = Double(driftCount) / Double(sharedCount)
+                print("WET_DETERMINISM_CHECK: mtime-drift ±3600s detected count=\(driftCount) ratio=\(String(format: "%.2f", driftRatio))")
+            }
 
-            let hasDiffs = !onlyFolder.isEmpty || !onlyZip.isEmpty || !shaDiff.isEmpty || mdDiff
+            let hasDiffs = !onlyFolder.isEmpty || !onlyZip.isEmpty || !shaDiff.isEmpty || mdDiff || driftDetected || zipMtimeDriftDetected
             if hasDiffs {
                 print("WET_DETERMINISM_CHECK: FAIL")
             } else {
@@ -138,6 +171,28 @@ struct WETDeterminismCheck {
         }
 
         return out
+    }
+
+    private static func mtimeHistogramFor(
+        shared: Set<String>,
+        folderSnapshot: [String: FileInfo],
+        zipSnapshot: [String: FileInfo]
+    ) -> [Int: Int] {
+        var histogram: [Int: Int] = [:]
+        for rel in shared {
+            guard let a = folderSnapshot[rel], let b = zipSnapshot[rel] else { continue }
+            let delta = Int((b.mtime.timeIntervalSince1970 - a.mtime.timeIntervalSince1970).rounded())
+            histogram[delta, default: 0] += 1
+        }
+        return histogram
+    }
+
+    private static func detectSystematicMtimeDrift(sharedCount: Int, mtimeHistogram: [Int: Int]) -> Bool {
+        let total = max(sharedCount, 1)
+        let driftCandidates = mtimeHistogram.filter { abs(abs($0.key) - 3600) <= 2 }
+        let driftCount = driftCandidates.values.reduce(0, +)
+        let driftRatio = Double(driftCount) / Double(total)
+        return driftCount >= 3 && driftRatio >= 0.8
     }
 
     private static func sha256Hex(_ data: Data) -> String {

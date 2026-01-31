@@ -4316,6 +4316,9 @@ public enum WhatsAppExportService {
     }
 
     nonisolated private static func extractZip(at zipURL: URL, to destDir: URL) throws {
+        if WETLog.isDebugEnabled() {
+            WETLog.dbg("ZIP extractor: /usr/bin/ditto -x -k")
+        }
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
         proc.arguments = ["-x", "-k", zipURL.path, destDir.path]
@@ -4330,11 +4333,14 @@ public enum WhatsAppExportService {
             let msg = String(data: data, encoding: .utf8) ?? "exit \(proc.terminationStatus)"
             throw WAInputError.zipExtractionFailed(url: zipURL, reason: msg.trimmingCharacters(in: .whitespacesAndNewlines))
         }
-
-        do {
-            try normalizeZipEntryTimestamps(zipURL: zipURL, destDir: destDir)
-        } catch {
-            throw WAInputError.zipExtractionFailed(url: zipURL, reason: "ZIP timestamp normalization failed")
+        if ProcessInfo.processInfo.environment["WET_ZIP_NORMALIZE_TIMESTAMPS"] == "1" {
+            do {
+                try normalizeZipEntryTimestamps(zipURL: zipURL, destDir: destDir)
+            } catch {
+                throw WAInputError.zipExtractionFailed(url: zipURL, reason: "ZIP timestamp normalization failed")
+            }
+        } else if WETLog.isDebugEnabled() {
+            WETLog.dbg("ZIP timestamps: preserve extracted mtimes (normalization disabled)")
         }
     }
 
