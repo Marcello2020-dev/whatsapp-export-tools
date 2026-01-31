@@ -50,10 +50,44 @@ struct ContentView: View {
         let outputSuffixArtifacts: [String]
     }
 
+    private enum RunStep: Hashable, Identifiable, Sendable {
+        case sidecar
+        case html(HTMLVariant)
+        case markdown
+        case rawArchive
+
+        nonisolated var id: String {
+            switch self {
+            case .sidecar:
+                return "sidecar"
+            case .html(let variant):
+                return "html-\(variant.rawValue)"
+            case .markdown:
+                return "markdown"
+            case .rawArchive:
+                return "raw-archive"
+            }
+        }
+
+        nonisolated var label: String {
+            switch self {
+            case .sidecar:
+                return "Sidecar"
+            case .html(let variant):
+                return variant.logLabel
+            case .markdown:
+                return "Markdown"
+            case .rawArchive:
+                return "Raw archive"
+            }
+        }
+    }
+
     private struct RunPlan: Sendable {
         let variants: [HTMLVariant]
         let wantsMD: Bool
         let wantsSidecar: Bool
+        let wantsRawArchiveCopy: Bool
 
         nonisolated var variantSuffixes: [String] {
             variants.map { ContentView.htmlVariantSuffix(for: $0) }
@@ -62,27 +96,73 @@ struct ContentView: View {
         nonisolated var wantsAnyThumbs: Bool {
             wantsSidecar || variants.contains(where: { $0 == .embedAll || $0 == .thumbnailsOnly })
         }
+
+        nonisolated var runSteps: [RunStep] {
+            var steps: [RunStep] = []
+            if wantsSidecar {
+                steps.append(.sidecar)
+            }
+            for variant in variants {
+                steps.append(.html(variant))
+            }
+            if wantsMD {
+                steps.append(.markdown)
+            }
+            if wantsRawArchiveCopy {
+                // Raw archive copy happens after artifacts and before checksums/deletion.
+                steps.append(.rawArchive)
+            }
+            return steps
+        }
     }
 
     private enum RunStatus: Equatable {
         case ready
         case validating
-        case exporting(String)
+        case exporting(RunStep)
         case completed
         case failed
         case cancelled
     }
 
-    private enum ArtifactProgressState: String {
+    private enum RunStepState: String {
         case pending = "Pending"
         case running = "Running"
         case done = "Done"
+        case failed = "Failed"
+        case cancelled = "Cancelled"
     }
 
-    private struct ArtifactProgress: Identifiable, Equatable {
-        let id: String
-        let label: String
-        var state: ArtifactProgressState
+    private struct RunStepProgress: Identifiable, Equatable {
+        let step: RunStep
+        var state: RunStepState
+        var id: String { step.id }
+    }
+
+    private struct StepTiming: Equatable {
+        var start: DispatchTime?
+        var finalDuration: TimeInterval?
+
+        mutating func startIfNeeded(at now: DispatchTime) {
+            if start == nil { start = now }
+        }
+
+        mutating func stop(at now: DispatchTime, override: TimeInterval? = nil) {
+            if let override {
+                finalDuration = override
+                return
+            }
+            guard let start else { return }
+            finalDuration = ContentView.monotonicDuration(from: start, to: now)
+        }
+
+        func elapsed(now: DispatchTime) -> TimeInterval? {
+            if let finalDuration {
+                return finalDuration
+            }
+            guard let start else { return nil }
+            return ContentView.monotonicDuration(from: start, to: now)
+        }
     }
 
     private struct OutputPreflight: Sendable {
@@ -161,7 +241,7 @@ struct ContentView: View {
             }
         }
 
-        var logLabel: String {
+        nonisolated var logLabel: String {
             switch self {
             case .embedAll:
                 return "Max"
@@ -322,11 +402,14 @@ struct ContentView: View {
 
     @State private var isRunning: Bool = false
     @State private var runStatus: RunStatus = .ready
-    @State private var runProgress: [ArtifactProgress] = []
+    @State private var runProgress: [RunStepProgress] = []
+    @State private var runStepTimings: [String: StepTiming] = [:]
+    @State private var runStepTick: DispatchTime = .now()
+    @State private var runStepTimer: Timer? = nil
     @State private var lastRunDuration: TimeInterval? = nil
     @State private var lastRunFailureSummary: String? = nil
     @State private var lastRunFailureArtifact: String? = nil
-    @State private var currentArtifactLabel: String? = nil
+    @State private var currentRunStep: RunStep? = nil
     @State private var lastExportDir: URL? = nil
     @State private var lastSidecarHTML: URL? = nil
     @State private var logText: String = ""
@@ -1118,16 +1201,33 @@ struct ContentView: View {
                 HStack(spacing: 6) {
                     Image(systemName: progressIconName(for: step.state))
                         .foregroundStyle(progressIconColor(for: step.state))
-                    Text(step.label)
+                    Text(step.step.label)
                     Spacer()
-                    Text(step.state.rawValue)
+                    Text(runStepDurationText(for: step))
+                        .monospacedDigit()
                         .foregroundStyle(.secondary)
                 }
                 .font(.system(size: 12))
-                .accessibilityLabel("\(step.label) \(step.state.rawValue)")
+                .accessibilityLabel("\(step.step.label) \(step.state.rawValue) \(runStepDurationText(for: step))")
             }
         }
         .padding(.top, 2)
+    }
+
+    private func runStepDurationText(for progress: RunStepProgress) -> String {
+        guard progress.state != .pending else { return "—" }
+        guard let timing = runStepTimings[progress.step.id] else { return "—" }
+        if progress.state == .running {
+            guard let elapsed = timing.elapsed(now: runStepTick) else { return "—" }
+            return Self.formatDuration(elapsed)
+        }
+        if let duration = timing.finalDuration {
+            return Self.formatDuration(duration)
+        }
+        if let elapsed = timing.elapsed(now: runStepTick) {
+            return Self.formatDuration(elapsed)
+        }
+        return "—"
     }
 
     private var logSection: some View {
@@ -1878,8 +1978,8 @@ struct ContentView: View {
             return "Ready"
         case .validating:
             return "Validating…"
-        case .exporting(let artifact):
-            return "Exporting: \(artifact)"
+        case .exporting(let step):
+            return "Exporting: \(step.label)"
         case .completed:
             return "Completed"
         case .failed:
@@ -1899,41 +1999,77 @@ struct ContentView: View {
         return "Failed. See log for details."
     }
 
-    private func progressIconName(for state: ArtifactProgressState) -> String {
+    private func progressIconName(for state: RunStepState) -> String {
         switch state {
         case .pending: return "circle"
         case .running: return "circle.inset.filled"
         case .done: return "checkmark.circle.fill"
+        case .failed: return "xmark.circle.fill"
+        case .cancelled: return "minus.circle.fill"
         }
     }
 
-    private func progressIconColor(for state: ArtifactProgressState) -> Color {
+    private func progressIconColor(for state: RunStepState) -> Color {
         switch state {
         case .pending: return .secondary
         case .running: return .orange
         case .done: return .green
+        case .failed: return .red
+        case .cancelled: return .yellow
         }
     }
 
-    private func buildProgressSteps(plan: RunPlan) -> [ArtifactProgress] {
-        var steps: [ArtifactProgress] = []
-        if plan.wantsSidecar {
-            steps.append(ArtifactProgress(id: "sidecar", label: "Sidecar", state: .pending))
-        }
-        for variant in plan.variants {
-            let label = Self.htmlVariantLogLabel(for: variant)
-            steps.append(ArtifactProgress(id: "html-\(variant.rawValue)", label: label, state: .pending))
-        }
-        if plan.wantsMD {
-            steps.append(ArtifactProgress(id: "markdown", label: "Markdown", state: .pending))
-        }
-        return steps
+    private func buildProgressSteps(plan: RunPlan) -> [RunStepProgress] {
+        plan.runSteps.map { RunStepProgress(step: $0, state: .pending) }
     }
 
     @MainActor
-    private func updateProgress(label: String, state: ArtifactProgressState) {
-        guard let index = runProgress.firstIndex(where: { $0.label == label }) else { return }
+    private func updateProgress(step: RunStep, state: RunStepState) {
+        guard let index = runProgress.firstIndex(where: { $0.step == step }) else { return }
         runProgress[index].state = state
+        ensureRunStepTimer(active: runProgress.contains { $0.state == .running })
+    }
+
+    @MainActor
+    private func markStepState(_ step: RunStep, state: RunStepState, reportedDuration: TimeInterval? = nil) {
+        let now = DispatchTime.now()
+        switch state {
+        case .running:
+            var timing = runStepTimings[step.id] ?? StepTiming()
+            timing.startIfNeeded(at: now)
+            timing.finalDuration = nil
+            runStepTimings[step.id] = timing
+            currentRunStep = step
+            runStatus = .exporting(step)
+        case .done, .failed, .cancelled:
+            var timing = runStepTimings[step.id] ?? StepTiming()
+            timing.startIfNeeded(at: now)
+            timing.stop(at: now, override: reportedDuration)
+            runStepTimings[step.id] = timing
+            if currentRunStep == step {
+                currentRunStep = nil
+            }
+        case .pending:
+            break
+        }
+        updateProgress(step: step, state: state)
+        runStepTick = now
+    }
+
+    @MainActor
+    private func ensureRunStepTimer(active: Bool) {
+        if active {
+            guard runStepTimer == nil else { return }
+            let timer = Timer(timeInterval: 1.0, repeats: true) { _ in
+                runStepTick = DispatchTime.now()
+            }
+            timer.tolerance = 0.2
+            RunLoop.main.add(timer, forMode: .common)
+            runStepTimer = timer
+        } else {
+            runStepTimer?.invalidate()
+            runStepTimer = nil
+        }
     }
 
     @MainActor
@@ -1949,7 +2085,8 @@ struct ContentView: View {
         runStatus = .ready
         lastRunFailureSummary = nil
         lastRunFailureArtifact = nil
-        currentArtifactLabel = nil
+        currentRunStep = nil
+        ensureRunStepTimer(active: false)
     }
 
     @MainActor
@@ -1974,6 +2111,11 @@ struct ContentView: View {
     @MainActor
     private func revealInFinder(_ url: URL) {
         NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    nonisolated private static func monotonicDuration(from start: DispatchTime, to end: DispatchTime) -> TimeInterval {
+        let nanos = end.uptimeNanoseconds - start.uptimeNanoseconds
+        return TimeInterval(Double(nanos) / 1_000_000_000)
     }
 
     nonisolated private static func formatDuration(_ seconds: TimeInterval) -> String {
@@ -2660,10 +2802,13 @@ struct ContentView: View {
         lastRunDuration = nil
         lastRunFailureSummary = nil
         lastRunFailureArtifact = nil
-        currentArtifactLabel = nil
+        currentRunStep = nil
         lastExportDir = nil
         lastSidecarHTML = nil
         runProgress = []
+        runStepTimings = [:]
+        runStepTick = DispatchTime.now()
+        ensureRunStepTimer(active: false)
         runStatus = .validating
         if reusePrepared {
             pendingPreflight = nil
@@ -2817,9 +2962,14 @@ struct ContentView: View {
         let plan = RunPlan(
             variants: selectedVariantsInOrder,
             wantsMD: wantsMD,
-            wantsSidecar: wantsSidecar
+            wantsSidecar: wantsSidecar,
+            wantsRawArchiveCopy: wantsRawArchiveCopy
         )
         runProgress = buildProgressSteps(plan: plan)
+        runStepTimings = [:]
+#if DEBUG
+        assert(plan.runSteps.contains(.rawArchive) == wantsRawArchiveCopy)
+#endif
         
         let debugEnabled = wetDebugLoggingEnabled
         WETLog.configure(debugEnabled: debugEnabled)
@@ -2906,6 +3056,7 @@ struct ContentView: View {
             isRunning = false
             exportTask = nil
             cancelRequested = false
+            ensureRunStepTimer(active: false)
         }
 
         await Task.yield()
@@ -3027,18 +3178,16 @@ struct ContentView: View {
                 }
             }
 
-            currentArtifactLabel = nil
-            let onStepStart: @Sendable (String) -> Void = { label in
+            currentRunStep = nil
+            let onStepStart: @Sendable (RunStep) -> Void = { step in
                 Task { @MainActor in
-                    self.currentArtifactLabel = label
-                    self.runStatus = .exporting(label)
-                    self.updateProgress(label: label, state: .running)
+                    self.markStepState(step, state: .running)
                 }
             }
 
-            let onStepDone: @Sendable (String, TimeInterval) -> Void = { label, _ in
+            let onStepDone: @Sendable (RunStep, TimeInterval) -> Void = { step, duration in
                 Task { @MainActor in
-                    self.updateProgress(label: label, state: .done)
+                    self.markStepState(step, state: .done, reportedDuration: duration)
                 }
             }
 
@@ -3067,7 +3216,9 @@ struct ContentView: View {
             )
 
             if context.wantsRawArchiveCopy {
-                logger.log("Start Raw archive")
+                let rawStep = RunStep.rawArchive
+                markStepState(rawStep, state: .running)
+                logger.log("Start \(rawStep.label)")
                 let rawStart = ProcessInfo.processInfo.systemUptime
                 _ = try await Task.detached(priority: .utility) {
                     try SourceOps.copyRawArchive(
@@ -3080,7 +3231,8 @@ struct ContentView: View {
                     )
                 }.value
                 let rawDuration = ProcessInfo.processInfo.systemUptime - rawStart
-                logger.log("Done Raw archive (\(Self.formatDuration(rawDuration)))")
+                logger.log("Done \(rawStep.label) (\(Self.formatDuration(rawDuration)))")
+                markStepState(rawStep, state: .done, reportedDuration: rawDuration)
             }
 
             do {
@@ -3164,18 +3316,24 @@ struct ContentView: View {
                 : nil
             lastRunFailureSummary = nil
             lastRunFailureArtifact = nil
-            currentArtifactLabel = nil
+            currentRunStep = nil
             runStatus = .completed
         } catch {
             if error is CancellationError {
                 logger.log("Cancelled.")
+                if let step = currentRunStep {
+                    markStepState(step, state: .cancelled)
+                }
                 runStatus = .cancelled
-                currentArtifactLabel = nil
+                currentRunStep = nil
                 return
             }
             if let deletionError = error as? OutputDeletionError {
                 logger.log("ERROR: \(deletionError.errorDescription ?? "Could not delete existing outputs.")")
-                markRunFailure(summary: deletionError.errorDescription ?? "Could not delete existing outputs.", artifact: currentArtifactLabel)
+                if let step = currentRunStep {
+                    markStepState(step, state: .failed)
+                }
+                markRunFailure(summary: deletionError.errorDescription ?? "Could not delete existing outputs.", artifact: currentRunStep?.label)
                 return
             }
             if let waErr = error as? WAExportError {
@@ -3220,7 +3378,10 @@ struct ContentView: View {
                 }
             }
             logger.log("ERROR: \(error)")
-            markRunFailure(summary: error.localizedDescription, artifact: currentArtifactLabel)
+            if let step = currentRunStep {
+                markStepState(step, state: .failed)
+            }
+            markRunFailure(summary: error.localizedDescription, artifact: currentRunStep?.label)
         }
     }
 
@@ -3282,8 +3443,8 @@ struct ContentView: View {
         log: @Sendable (String) -> Void,
         debugEnabled: Bool,
         debugLog: @Sendable (String) -> Void,
-        onStepStart: @Sendable (String) -> Void,
-        onStepDone: @Sendable (String, TimeInterval) -> Void
+        onStepStart: @Sendable (RunStep) -> Void,
+        onStepDone: @Sendable (RunStep, TimeInterval) -> Void
     ) async throws -> ExportWorkResult {
         let fm = FileManager.default
         let exportDir = context.exportDir.standardizedFileURL
@@ -3362,27 +3523,31 @@ struct ContentView: View {
             case markdown
         }
 
-        func artifactLabel(_ artifact: Artifact) -> String {
+        func runStep(for artifact: Artifact) -> RunStep {
             switch artifact {
             case .sidecar:
-                return "Sidecar"
+                return .sidecar
             case .html(let variant):
-                return Self.htmlVariantLogLabel(for: variant)
+                return .html(variant)
             case .markdown:
-                return "Markdown"
+                return .markdown
             }
         }
 
+        func artifactLabel(_ artifact: Artifact) -> String {
+            runStep(for: artifact).label
+        }
+
         func logStart(_ artifact: Artifact) {
-            let label = artifactLabel(artifact)
-            log("Start \(label)")
-            onStepStart(label)
+            let step = runStep(for: artifact)
+            log("Start \(step.label)")
+            onStepStart(step)
         }
 
         func logDone(_ artifact: Artifact, duration: TimeInterval) {
-            let label = artifactLabel(artifact)
-            log("Done \(label) (\(Self.formatDuration(duration)))")
-            onStepDone(label, duration)
+            let step = runStep(for: artifact)
+            log("Done \(step.label) (\(Self.formatDuration(duration)))")
+            onStepDone(step, duration)
         }
 
         var publishCounts: [String: Int] = [:]
@@ -3391,7 +3556,7 @@ struct ContentView: View {
             let key = url.standardizedFileURL.path
             let count = publishCounts[key, default: 0]
             if count > 0 {
-                log("BUG: Duplicate publish blocked: \(artifactLabel(artifact)) (\(url.lastPathComponent))")
+                log("BUG: Duplicate publish blocked: \(runStep(for: artifact).label) (\(url.lastPathComponent))")
                 return false
             }
             publishCounts[key] = count + 1
