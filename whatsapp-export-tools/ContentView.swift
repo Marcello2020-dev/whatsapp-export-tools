@@ -21,6 +21,7 @@ struct ContentView: View {
         let isOverwriteRetry: Bool
         let preflight: OutputPreflight?
         let prepared: WhatsAppExportService.PreparedExport?
+        let baseNameOverride: String?
         let exporter: String
         let chatPartner: String
         let chatPartnerSource: String
@@ -116,6 +117,7 @@ struct ContentView: View {
     }
 
     private static let customChatPartnerTag = "__CUSTOM_CHAT_PARTNER__"
+    nonisolated private static let exportBaseMaxLength: Int = 200
     private enum Layout {
         static let labelWidth: CGFloat = 110
         static let chatPartnerWidth: CGFloat = 320
@@ -331,8 +333,11 @@ struct ContentView: View {
     @State private var logLines: [String] = []
     @State private var logExpanded: Bool = false
 
-    @State private var showReplaceAlert: Bool = false
+    @State private var showReplaceSheet: Bool = false
     @State private var replaceExistingNames: [String] = []
+    @State private var replaceOutputPath: String = ""
+    @State private var replaceBaseName: String = ""
+    @State private var replaceExportDir: URL? = nil
     @State private var overwriteConfirmed: Bool = false
     @State private var pendingPreflight: OutputPreflight? = nil
     @State private var pendingPreparedExport: WhatsAppExportService.PreparedExport? = nil
@@ -364,19 +369,8 @@ struct ContentView: View {
             runAIGlowHostStateCheckIfNeeded()
 #endif
         }
-        .alert("Export already exists", isPresented: $showReplaceAlert) {
-            Button("Cancel", role: .cancel) { }
-            Button("Replace") {
-                guard let chatURL, let outBaseURL else { return }
-                overwriteConfirmed = true
-                startExport(chatURL: chatURL, outDir: outBaseURL, allowOverwrite: true)
-            }
-        } message: {
-            Text(
-                "The output folder already contains:\n" +
-                replaceExistingNames.joined(separator: "\n") +
-                "\n\nReplace these items?"
-            )
+        .sheet(isPresented: $showReplaceSheet) {
+            replaceConfirmationSheet
         }
         .alert("Delete originals?", isPresented: $showDeleteOriginalsAlert) {
             Button("Cancel", role: .cancel) {
@@ -418,6 +412,111 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .scrollClipDisabled(true)
+    }
+
+    private var replaceConfirmationSheet: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Replace existing export?")
+                .font(.headline)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Output folder")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                Text(replaceOutputPath.isEmpty ? "—" : replaceOutputPath)
+                    .font(.callout)
+                    .textSelection(.enabled)
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Export base")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                Text(replaceBaseName.isEmpty ? "—" : replaceBaseName)
+                    .font(.callout)
+                    .textSelection(.enabled)
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Items to replace")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                if replaceExistingNames.isEmpty {
+                    Text("—")
+                        .font(.callout)
+                } else {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(replaceExistingNames, id: \.self) { name in
+                            Text("• \(name)")
+                                .font(.callout)
+                        }
+                    }
+                }
+            }
+
+            Spacer(minLength: 8)
+
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel) {
+                    dismissReplaceSheet(clearPending: true)
+                }
+                .keyboardShortcut(.defaultAction)
+
+                Button("Keep Both (Deterministic)") {
+                    guard let chatURL, let outBaseURL, let exportDir = replaceExportDir else { return }
+                    let variants: [HTMLVariant] = [
+                        exportHTMLMax ? .embedAll : nil,
+                        exportHTMLMid ? .thumbnailsOnly : nil,
+                        exportHTMLMin ? .textOnly : nil
+                    ].compactMap { $0 }
+                    let wantsSidecar = exportSortedAttachments
+                    let wantsDeleteOriginals = wantsSidecar && deleteOriginalsAfterSidecar
+                    let wantsRawArchiveCopy = wantsRawArchiveCopy(wantsDeleteOriginals: wantsDeleteOriginals)
+                    guard let candidate = Self.deterministicKeepBothBaseName(
+                        baseName: replaceBaseName,
+                        variants: variants,
+                        wantsMarkdown: exportMarkdown,
+                        wantsSidecar: wantsSidecar,
+                        wantsRawArchive: wantsRawArchiveCopy,
+                        in: exportDir
+                    ) else {
+                        appendLog("ERROR: Could not generate deterministic Keep Both name.")
+                        dismissReplaceSheet(clearPending: false)
+                        return
+                    }
+                    dismissReplaceSheet(clearPending: false)
+                    startExport(
+                        chatURL: chatURL,
+                        outDir: outBaseURL,
+                        allowOverwrite: false,
+                        baseNameOverride: candidate,
+                        reusePrepared: true
+                    )
+                }
+
+                Button("Replace", role: .destructive) {
+                    guard let chatURL, let outBaseURL else { return }
+                    dismissReplaceSheet(clearPending: false)
+                    overwriteConfirmed = true
+                    startExport(chatURL: chatURL, outDir: outBaseURL, allowOverwrite: true)
+                }
+            }
+        }
+        .padding(20)
+        .frame(minWidth: 520)
+    }
+
+    private func dismissReplaceSheet(clearPending: Bool) {
+        showReplaceSheet = false
+        replaceExistingNames = []
+        replaceOutputPath = ""
+        replaceBaseName = ""
+        replaceExportDir = nil
+        if clearPending {
+            pendingPreflight = nil
+            pendingPreparedExport = nil
+        }
     }
 
     private var topAreaSection: some View {
@@ -2258,6 +2357,94 @@ struct ContentView: View {
         return ordered.filter { labels.contains($0) }
     }
 
+    nonisolated private static func preparedWithBaseName(
+        _ prepared: WhatsAppExportService.PreparedExport,
+        baseName: String
+    ) -> WhatsAppExportService.PreparedExport {
+        if prepared.baseName == baseName { return prepared }
+        return WhatsAppExportService.PreparedExport(
+            messages: prepared.messages,
+            meName: prepared.meName,
+            baseName: baseName,
+            chatURL: prepared.chatURL
+        )
+    }
+
+    nonisolated private static func stableHashHex(_ s: String) -> String {
+        var hash: UInt64 = 14695981039346656037
+        for b in s.utf8 {
+            hash ^= UInt64(b)
+            hash &*= 1099511628211
+        }
+        return String(format: "%016llx", hash)
+    }
+
+    nonisolated private static func trimmedBaseNameForSuffix(
+        baseName: String,
+        suffix: String,
+        maxLen: Int
+    ) -> String {
+        guard maxLen > suffix.count else { return baseName }
+        let available = maxLen - suffix.count
+        if baseName.count <= available { return baseName }
+        var trimmed = String(baseName.prefix(available))
+        trimmed = trimmed.trimmingCharacters(in: CharacterSet(charactersIn: " ."))
+        return trimmed.isEmpty ? String(baseName.prefix(maxLen)) : trimmed
+    }
+
+    nonisolated private static func deterministicKeepBothBaseName(
+        baseName: String,
+        variants: [HTMLVariant],
+        wantsMarkdown: Bool,
+        wantsSidecar: Bool,
+        wantsRawArchive: Bool,
+        in exportDir: URL
+    ) -> String? {
+        let exportRoot = exportDir.standardizedFileURL
+        let variantSuffixes = variants.map { htmlVariantSuffix(for: $0) }
+        let seed = "\(baseName)|\(exportRoot.path)"
+        let fm = FileManager.default
+        for index in 1...64 {
+            let hash = stableHashHex("\(seed)|\(index)")
+            let token = String(hash.prefix(6))
+            let suffix = " · copy \(token)"
+            let trimmedBase = trimmedBaseNameForSuffix(
+                baseName: baseName,
+                suffix: suffix,
+                maxLen: exportBaseMaxLength
+            )
+            let candidate = trimmedBase + suffix
+
+            let targets = replaceDeleteTargets(
+                baseName: candidate,
+                variantSuffixes: variantSuffixes,
+                wantsMarkdown: wantsMarkdown,
+                wantsSidecar: wantsSidecar,
+                wantsRawArchive: wantsRawArchive,
+                in: exportRoot
+            )
+            var exists = false
+            for url in targets where fm.fileExists(atPath: url.path) {
+                exists = true
+                break
+            }
+            if exists { continue }
+
+            let suffixArtifacts = outputSuffixArtifacts(
+                baseName: candidate,
+                variants: variants,
+                wantsMarkdown: wantsMarkdown,
+                wantsSidecar: wantsSidecar,
+                wantsRawArchive: wantsRawArchive,
+                in: exportRoot
+            )
+            if !suffixArtifacts.isEmpty { continue }
+
+            return candidate
+        }
+        return nil
+    }
+
     nonisolated static func isSafeReplaceDeleteTarget(_ target: URL, exportDir: URL) -> Bool {
         let root = exportDir.standardizedFileURL.path
         let rootPrefix = root.hasSuffix("/") ? root : root + "/"
@@ -2452,10 +2639,22 @@ struct ContentView: View {
         return offenders.sorted()
     }
 
+    private func wantsRawArchiveCopy(wantsDeleteOriginals: Bool) -> Bool {
+        let env = ProcessInfo.processInfo.environment
+        let wantsRawArchiveExplicit = includeRawArchive || env["WET_INCLUDE_RAW_ARCHIVE"] == "1"
+        return wantsRawArchiveExplicit || wantsDeleteOriginals
+    }
+
     // MARK: - Export
 
     @MainActor
-    private func startExport(chatURL: URL, outDir: URL, allowOverwrite: Bool) {
+    private func startExport(
+        chatURL: URL,
+        outDir: URL,
+        allowOverwrite: Bool,
+        baseNameOverride: String? = nil,
+        reusePrepared: Bool = false
+    ) {
         guard !isRunning else { return }
         clearLog()
         lastRunDuration = nil
@@ -2466,7 +2665,10 @@ struct ContentView: View {
         lastSidecarHTML = nil
         runProgress = []
         runStatus = .validating
-        if !allowOverwrite {
+        if reusePrepared {
+            pendingPreflight = nil
+        }
+        if !allowOverwrite && !reusePrepared {
             pendingPreflight = nil
             pendingPreparedExport = nil
         }
@@ -2588,9 +2790,7 @@ struct ContentView: View {
         let wantsMD = exportMarkdown
         let wantsSidecar = exportSortedAttachments
         let wantsDeleteOriginals = wantsSidecar && deleteOriginalsAfterSidecar
-        let env = ProcessInfo.processInfo.environment
-        let wantsRawArchiveExplicit = includeRawArchive || env["WET_INCLUDE_RAW_ARCHIVE"] == "1"
-        let wantsRawArchiveCopy = wantsRawArchiveExplicit || wantsDeleteOriginals
+        let wantsRawArchiveCopy = wantsRawArchiveCopy(wantsDeleteOriginals: wantsDeleteOriginals)
 
         let htmlLabel: String = {
             var parts: [String] = []
@@ -2651,12 +2851,15 @@ struct ContentView: View {
         let exportDir = outDir.appendingPathComponent(subfolderName, isDirectory: true)
 
         let isOverwriteRetry = overwriteConfirmed
+        let shouldReusePrepared = reusePrepared || isOverwriteRetry
         let preflight = isOverwriteRetry ? pendingPreflight : nil
-        let prepared = isOverwriteRetry ? pendingPreparedExport : nil
+        let prepared = shouldReusePrepared ? pendingPreparedExport : nil
         overwriteConfirmed = false
+        if shouldReusePrepared {
+            pendingPreparedExport = nil
+        }
         if isOverwriteRetry {
             pendingPreflight = nil
-            pendingPreparedExport = nil
         }
 
         let context = ExportContext(
@@ -2669,6 +2872,7 @@ struct ContentView: View {
             isOverwriteRetry: isOverwriteRetry,
             preflight: preflight,
             prepared: prepared,
+            baseNameOverride: baseNameOverride?.trimmingCharacters(in: .whitespacesAndNewlines),
             exporter: exporter,
             chatPartner: outputChatPartner,
             chatPartnerSource: uiChatPartnerSource,
@@ -2744,7 +2948,9 @@ struct ContentView: View {
             markRunFailure(summary: error.localizedDescription, artifact: "Validation")
             return
         }
-        let baseName = prepared.baseName
+        let overrideTrimmed = context.baseNameOverride?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let baseName = overrideTrimmed.isEmpty ? prepared.baseName : overrideTrimmed
+        let preparedForRun = Self.preparedWithBaseName(prepared, baseName: baseName)
 
         if let detection = context.participantDetection {
             let winner = detection.evidence.first(where: { $0.source == "decision:winner" })?.excerpt ?? "n/a"
@@ -2840,7 +3046,7 @@ struct ContentView: View {
                 try await Self.performExportWork(
                     context: context,
                     baseName: preflight.baseName,
-                    prepared: prepared,
+                    prepared: preparedForRun,
                     log: append,
                     debugEnabled: debugEnabled,
                     debugLog: debugLog,
@@ -2999,7 +3205,10 @@ struct ContentView: View {
                         .map { $0.lastPathComponent }
                         + suffixArtifacts.filter { fm.fileExists(atPath: exportDir.appendingPathComponent($0).path) }
                     replaceExistingNames = Self.replaceDialogLabels(existingNames: existingNames, baseName: baseName)
-                    showReplaceAlert = true
+                    replaceOutputPath = exportDir.path
+                    replaceBaseName = baseName
+                    replaceExportDir = exportDir
+                    showReplaceSheet = true
                     let count = replaceExistingNames.count
                     logger.log("Existing outputs found: \(count) item(s). Waiting for replace confirmation…")
                     runStatus = .ready
