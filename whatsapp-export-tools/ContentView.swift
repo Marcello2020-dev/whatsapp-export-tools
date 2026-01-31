@@ -205,13 +205,13 @@ struct ContentView: View {
         static let topColumnSpacing: CGFloat = 16
         static let topLeftMinWidth: CGFloat = 520
         static let optionsColumnMinWidth: CGFloat = 360
+        static let runDurationWidth: CGFloat = 52
+        static let runRowHeight: CGFloat = 18
+        static let runRowSpacing: CGFloat = 4
     }
     private static let designMaxWidth: CGFloat = 1440
     private static let designMaxHeight: CGFloat = 900
     private static let aiMenuBadgeImage: NSImage = AIGlowPalette.menuBadgeImage
-    private static let logEditorHeight: CGFloat = 220
-    private static let logPadLinesPerSide: Int = 1
-
 #if DEBUG
     private static var didRunAIGlowHostStateCheck = false
 #endif
@@ -381,7 +381,6 @@ struct ContentView: View {
     @State private var exportSortedAttachments: Bool = true
     @State private var includeRawArchive: Bool = false
     @State private var deleteOriginalsAfterSidecar: Bool = false
-    @State private var wetDebugLoggingEnabled: Bool = false
 
     @State private var detectedParticipants: [String] = []
     @State private var chatPartnerCandidates: [String] = []
@@ -412,10 +411,6 @@ struct ContentView: View {
     @State private var currentRunStep: RunStep? = nil
     @State private var lastExportDir: URL? = nil
     @State private var lastSidecarHTML: URL? = nil
-    @State private var logText: String = ""
-    @State private var logLines: [String] = []
-    @State private var logExpanded: Bool = false
-
     @State private var showReplaceSheet: Bool = false
     @State private var replaceExistingNames: [String] = []
     @State private var replaceOutputPath: String = ""
@@ -430,6 +425,9 @@ struct ContentView: View {
     @State private var didSetInitialWindowSize: Bool = false
     @State private var exportTask: Task<Void, Never>? = nil
     @State private var cancelRequested: Bool = false
+
+    @Environment(\.openWindow) private var openWindow
+    @EnvironmentObject private var diagnosticsLog: DiagnosticsLogStore
 
     // MARK: - View
 
@@ -489,8 +487,13 @@ struct ContentView: View {
 
                 runSection
                     .waCard()
-
-                logSection
+                    .aiGlow(
+                        active: isRunning,
+                        isRunning: isRunning,
+                        cornerRadius: 14,
+                        style: runGlowStyle,
+                        debugTag: "run"
+                    )
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -794,7 +797,6 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 8) {
                 rawArchiveToggle
                 deleteOriginalsToggle
-                debugLoggingToggle
             }
             .controlSize(.small)
         }
@@ -915,20 +917,6 @@ struct ContentView: View {
         .accessibilityLabel("Copy raw archive")
         .disabled(isRunning)
         .onChange(of: includeRawArchive) {
-            persistExportSettings()
-        }
-    }
-
-    private var debugLoggingToggle: some View {
-        Toggle(isOn: $wetDebugLoggingEnabled) {
-            HStack(spacing: 6) {
-                Text("Debug logging")
-                helpIcon("Emits detailed staging/validation/publish logs. Use only for troubleshooting.")
-            }
-        }
-        .accessibilityLabel("Debug logging")
-        .disabled(isRunning)
-        .onChange(of: wetDebugLoggingEnabled) {
             persistExportSettings()
         }
     }
@@ -1093,7 +1081,7 @@ struct ContentView: View {
         }
     }
 
-    private var runActionsRow: some View {
+    private var runActionButtons: some View {
         HStack(spacing: 12) {
             Button {
                 guard !isRunning else { return }
@@ -1143,27 +1131,43 @@ struct ContentView: View {
                 }
                 .buttonStyle(.bordered)
             }
-
-            Spacer()
         }
-        .padding(.top, 2)
     }
 
     private var runSection: some View {
         WASection(title: "Run", systemImage: "play.circle") {
-            VStack(alignment: .leading, spacing: 8) {
-                Text(runStatusText)
-                    .font(.system(size: 12, weight: .semibold))
-
+            VStack(alignment: .leading, spacing: 10) {
+                runHeaderBar
                 runStatusDetailView
-
-                if !runProgress.isEmpty {
-                    runProgressView
-                }
-
-                runActionsRow
+                runProgressContainer
             }
         }
+    }
+
+    private var runHeaderBar: some View {
+        HStack(alignment: .center, spacing: 12) {
+            runActionButtons
+            Spacer(minLength: 8)
+            Text(runStatusText)
+                .font(.system(size: 12, weight: .semibold))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var runProgressContainer: some View {
+        let steps = displayedRunSteps
+        return VStack(alignment: .leading, spacing: 6) {
+            if steps.isEmpty {
+                Text("Select at least one output to preview steps.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+            } else {
+                runProgressView(steps: steps)
+            }
+        }
+        .frame(minHeight: runProgressMinHeight(for: max(steps.count, 1)), alignment: .topLeading)
     }
 
     @ViewBuilder
@@ -1181,8 +1185,8 @@ struct ContentView: View {
                 Text(summary)
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
-                Button("Show Log") {
-                    logExpanded = true
+                Button("Open Diagnostics Log") {
+                    openWindow(id: DiagnosticsLogView.windowID)
                 }
                 .buttonStyle(.link)
             }
@@ -1195,9 +1199,9 @@ struct ContentView: View {
         }
     }
 
-    private var runProgressView: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            ForEach(runProgress) { step in
+    private func runProgressView(steps: [RunStepProgress]) -> some View {
+        VStack(alignment: .leading, spacing: Layout.runRowSpacing) {
+            ForEach(steps) { step in
                 HStack(spacing: 6) {
                     Image(systemName: progressIconName(for: step.state))
                         .foregroundStyle(progressIconColor(for: step.state))
@@ -1205,17 +1209,17 @@ struct ContentView: View {
                     Spacer()
                     Text(runStepDurationText(for: step))
                         .monospacedDigit()
+                        .frame(width: Layout.runDurationWidth, alignment: .trailing)
                         .foregroundStyle(.secondary)
                 }
                 .font(.system(size: 12))
                 .accessibilityLabel("\(step.step.label) \(step.state.rawValue) \(runStepDurationText(for: step))")
             }
         }
-        .padding(.top, 2)
     }
 
     private func runStepDurationText(for progress: RunStepProgress) -> String {
-        guard progress.state != .pending else { return "—" }
+        guard progress.state != .pending else { return "—:—" }
         guard let timing = runStepTimings[progress.step.id] else { return "—" }
         if progress.state == .running {
             guard let elapsed = timing.elapsed(now: runStepTick) else { return "—" }
@@ -1230,50 +1234,29 @@ struct ContentView: View {
         return "—"
     }
 
-    private var logSection: some View {
-        DisclosureGroup(isExpanded: $logExpanded) {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 8) {
-                    Button("Copy Log") {
-                        copyLogToPasteboard()
-                    }
-                    .buttonStyle(.bordered)
+    private var displayedRunSteps: [RunStepProgress] {
+        if !runProgress.isEmpty { return runProgress }
+        let plan = previewRunPlan
+        return plan.runSteps.map { RunStepProgress(step: $0, state: .pending) }
+    }
 
-                    Button("Save Log…") {
-                        saveLog()
-                    }
-                    .buttonStyle(.bordered)
-
-                    Button("Clear Log") {
-                        clearLog()
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(runStatus != .ready)
-
-                    Spacer()
-                }
-
-                TextEditor(text: .constant(displayLogText))
-                    .font(.system(.body, design: .monospaced))
-                    .frame(height: Self.logEditorHeight)
-            }
-            .padding(.top, 6)
-        } label: {
-            Label("Log (Diagnostics)", systemImage: "doc.text.magnifyingglass")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.secondary)
-        }
-        .waCard()
-        .aiGlow(
-            active: isRunning,
-            isRunning: false,
-            cornerRadius: 14,
-            style: logGlowStyle,
-            debugTag: "log"
+    private var previewRunPlan: RunPlan {
+        let wantsDeleteOriginals = exportSortedAttachments && deleteOriginalsAfterSidecar
+        let wantsRawArchiveCopy = wantsRawArchiveCopy(wantsDeleteOriginals: wantsDeleteOriginals)
+        return RunPlan(
+            variants: selectedVariantsInUI,
+            wantsMD: exportMarkdown,
+            wantsSidecar: exportSortedAttachments,
+            wantsRawArchiveCopy: wantsRawArchiveCopy
         )
     }
 
-    private var logGlowStyle: AIGlowStyle {
+    private func runProgressMinHeight(for rows: Int) -> CGFloat {
+        let count = max(rows, 1)
+        return (CGFloat(count) * Layout.runRowHeight) + (CGFloat(max(0, count - 1)) * Layout.runRowSpacing)
+    }
+
+    private var runGlowStyle: AIGlowStyle {
         WETAIGlowStyle.logStyle()
     }
 
@@ -1929,33 +1912,15 @@ struct ContentView: View {
 
     // MARK: - Logging
 
-    private var displayLogText: String {
-        let pad = String(repeating: "\n", count: Self.logPadLinesPerSide)
-        if logText.isEmpty {
-            return pad + pad
-        }
-        return pad + logText + pad
-    }
-
     nonisolated private func appendLog(_ s: String) {
         Task { @MainActor in
-            let pieces = s.split(whereSeparator: \.isNewline).map(String.init)
-            if pieces.isEmpty { return }
-            self.logLines.append(contentsOf: pieces)
-            let chunk = pieces.joined(separator: "\n")
-            if self.logText.isEmpty {
-                self.logText = chunk
-            } else {
-                self.logText.append("\n")
-                self.logText.append(chunk)
-            }
+            diagnosticsLog.append(s)
         }
     }
 
     @MainActor
     private func clearLog() {
-        logLines.removeAll(keepingCapacity: true)
-        logText = ""
+        diagnosticsLog.clear()
     }
 
     private func logExportTiming(_ label: String, startUptime: TimeInterval) {
@@ -1970,6 +1935,11 @@ struct ContentView: View {
 
     private var canStartExport: Bool {
         !isRunning && chatURL != nil && outBaseURL != nil
+    }
+
+    private var debugLoggingEnabled: Bool {
+        let env = ProcessInfo.processInfo.environment
+        return env["WET_DEBUG_LOG"] == "1" || env["WET_DEBUG"] == "1"
     }
 
     private var runStatusText: String {
@@ -2087,25 +2057,6 @@ struct ContentView: View {
         lastRunFailureArtifact = nil
         currentRunStep = nil
         ensureRunStepTimer(active: false)
-    }
-
-    @MainActor
-    private func copyLogToPasteboard() {
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        pasteboard.setString(logText, forType: .string)
-    }
-
-    @MainActor
-    private func saveLog() {
-        let panel = NSSavePanel()
-        panel.title = "Save Log"
-        panel.prompt = "Save"
-        panel.nameFieldStringValue = "wet-log.txt"
-        panel.allowedContentTypes = [.plainText]
-        if panel.runModal() == .OK, let url = panel.url {
-            try? logText.write(to: url, atomically: true, encoding: .utf8)
-        }
     }
 
     @MainActor
@@ -2787,6 +2738,14 @@ struct ContentView: View {
         return wantsRawArchiveExplicit || wantsDeleteOriginals
     }
 
+    private var selectedVariantsInUI: [HTMLVariant] {
+        [
+            exportHTMLMax ? .embedAll : nil,
+            exportHTMLMid ? .thumbnailsOnly : nil,
+            exportHTMLMin ? .textOnly : nil
+        ].compactMap { $0 }
+    }
+
     // MARK: - Export
 
     @MainActor
@@ -2926,11 +2885,7 @@ struct ContentView: View {
             return
         }
 
-        let selectedVariantsInOrder: [HTMLVariant] = [
-            exportHTMLMax ? .embedAll : nil,
-            exportHTMLMid ? .thumbnailsOnly : nil,
-            exportHTMLMin ? .textOnly : nil
-        ].compactMap { $0 }
+        let selectedVariantsInOrder = selectedVariantsInUI
 
         let wantsMD = exportMarkdown
         let wantsSidecar = exportSortedAttachments
@@ -2971,7 +2926,7 @@ struct ContentView: View {
         assert(plan.runSteps.contains(.rawArchive) == wantsRawArchiveCopy)
 #endif
         
-        let debugEnabled = wetDebugLoggingEnabled
+        let debugEnabled = debugLoggingEnabled
         WETLog.configure(debugEnabled: debugEnabled)
         let debugLog: (String) -> Void = { [appendLog] message in
             WETLog.dbg(message, sink: appendLog)
@@ -4269,7 +4224,6 @@ struct ContentView: View {
         exportSortedAttachments = snapshot.exportSortedAttachments
         includeRawArchive = snapshot.includeRawArchive
         deleteOriginalsAfterSidecar = snapshot.deleteOriginalsAfterSidecar
-        wetDebugLoggingEnabled = snapshot.wetDebugLoggingEnabled
 
         if let chatBookmark = snapshot.chatBookmark {
             if let url = resolveBookmark(chatBookmark, expectDirectory: false) {
@@ -4302,8 +4256,7 @@ struct ContentView: View {
             exportMarkdown: exportMarkdown,
             exportSortedAttachments: exportSortedAttachments,
             includeRawArchive: includeRawArchive,
-            deleteOriginalsAfterSidecar: deleteOriginalsAfterSidecar,
-            wetDebugLoggingEnabled: wetDebugLoggingEnabled
+            deleteOriginalsAfterSidecar: deleteOriginalsAfterSidecar
         )
         WETExportSettingsStorage.shared.save(snapshot)
     }
@@ -4452,7 +4405,6 @@ private struct WETExportSettingsSnapshot: Codable {
     let exportSortedAttachments: Bool
     let includeRawArchive: Bool
     let deleteOriginalsAfterSidecar: Bool
-    let wetDebugLoggingEnabled: Bool
 
     private enum CodingKeys: String, CodingKey {
         case schemaVersion
@@ -4465,7 +4417,6 @@ private struct WETExportSettingsSnapshot: Codable {
         case exportSortedAttachments
         case includeRawArchive
         case deleteOriginalsAfterSidecar
-        case wetDebugLoggingEnabled
     }
 
     init(
@@ -4478,8 +4429,7 @@ private struct WETExportSettingsSnapshot: Codable {
         exportMarkdown: Bool,
         exportSortedAttachments: Bool,
         includeRawArchive: Bool,
-        deleteOriginalsAfterSidecar: Bool,
-        wetDebugLoggingEnabled: Bool = false
+        deleteOriginalsAfterSidecar: Bool
     ) {
         self.schemaVersion = schemaVersion
         self.chatBookmark = chatBookmark
@@ -4491,7 +4441,6 @@ private struct WETExportSettingsSnapshot: Codable {
         self.exportSortedAttachments = exportSortedAttachments
         self.includeRawArchive = includeRawArchive
         self.deleteOriginalsAfterSidecar = deleteOriginalsAfterSidecar
-        self.wetDebugLoggingEnabled = wetDebugLoggingEnabled
     }
 
     init(from decoder: Decoder) throws {
@@ -4506,7 +4455,6 @@ private struct WETExportSettingsSnapshot: Codable {
         exportSortedAttachments = (try? container.decode(Bool.self, forKey: .exportSortedAttachments)) ?? true
         includeRawArchive = (try? container.decode(Bool.self, forKey: .includeRawArchive)) ?? false
         deleteOriginalsAfterSidecar = (try? container.decode(Bool.self, forKey: .deleteOriginalsAfterSidecar)) ?? false
-        wetDebugLoggingEnabled = (try? container.decode(Bool.self, forKey: .wetDebugLoggingEnabled)) ?? false
     }
 }
 

@@ -9,6 +9,8 @@ import SwiftUI
 
 @main
 struct whatsapp_export_toolsApp: App {
+    @StateObject private var diagnosticsLog = DiagnosticsLogStore()
+
     init() {
         Task { @MainActor in
             WETBareDomainPreviewCheck.runIfNeeded()
@@ -60,6 +62,7 @@ struct whatsapp_export_toolsApp: App {
                     ContentView()
                 }
             }
+            .environmentObject(diagnosticsLog)
             .onAppear {
                 WETBareDomainPreviewCheck.runIfNeeded()
                 WETBareDomainLinkifyCheck.runIfNeeded()
@@ -71,5 +74,25 @@ struct whatsapp_export_toolsApp: App {
             }
         }
         .defaultSize(width: 980, height: 780)
+        .commands {
+            DiagnosticsLogCommands()
+        }
+
+        WindowGroup(DiagnosticsLogView.windowTitle, id: DiagnosticsLogView.windowID) {
+            DiagnosticsLogView()
+                .environmentObject(diagnosticsLog)
+        }
+    }
+}
+
+private struct DiagnosticsLogCommands: Commands {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some Commands {
+        CommandGroup(after: .windowArrangement) {
+            Button("Diagnostics Log") {
+                openWindow(id: DiagnosticsLogView.windowID)
+            }
+        }
     }
 }
