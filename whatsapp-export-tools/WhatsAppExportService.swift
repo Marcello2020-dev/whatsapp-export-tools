@@ -1347,14 +1347,30 @@ public enum WhatsAppExportService {
         func precomputeAll() async {
             let targets = entries.filter { Self.isThumbnailCandidateExtension($0.sourceURL.pathExtension) }
             guard !targets.isEmpty else { return }
+            let cap = max(1, min(wetConcurrencyCaps.io, 4))
             if ProcessInfo.processInfo.environment["WET_PERF"] == "1" {
-                let cap = max(1, min(wetConcurrencyCaps.io, 4))
                 print("WET-PERF: thumbs cap=\(cap) jobs=\(targets.count)")
             }
             await withTaskGroup(of: Void.self) { group in
-                for entry in targets {
+                var iterator = targets.makeIterator()
+                var active = 0
+
+                for _ in 0..<cap {
+                    guard let entry = iterator.next() else { break }
+                    active += 1
                     group.addTask {
                         _ = await self.ensureThumbnailFile(for: entry)
+                    }
+                }
+
+                while active > 0 {
+                    _ = await group.next()
+                    active -= 1
+                    if let entry = iterator.next() {
+                        active += 1
+                        group.addTask {
+                            _ = await self.ensureThumbnailFile(for: entry)
+                        }
                     }
                 }
             }
