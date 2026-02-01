@@ -20,6 +20,7 @@ struct whatsapp_export_toolsApp: App {
             WETExternalAssetsCheck.runIfNeeded()
             WETDeterminismCheck.runIfNeeded()
             WETReplayGuardrailsCheck.runIfNeeded()
+            WETOutputStructureDedupCheck.runIfNeeded()
             AIGlowSnapshotRunner.runIfNeeded()
         }
     }
@@ -62,6 +63,11 @@ struct whatsapp_export_toolsApp: App {
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                         .padding()
+                } else if WETOutputStructureDedupCheck.isEnabled {
+                    Text("Running WET output-structure dedup check…")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .padding()
                 } else if AIGlowSnapshotRunner.isEnabled {
                     AIGlowSnapshotView(isRunning: false)
                 } else {
@@ -77,6 +83,7 @@ struct whatsapp_export_toolsApp: App {
                 WETExternalAssetsCheck.runIfNeeded()
                 WETDeterminismCheck.runIfNeeded()
                 WETReplayGuardrailsCheck.runIfNeeded()
+                WETOutputStructureDedupCheck.runIfNeeded()
                 AIGlowSnapshotRunner.runIfNeeded()
             }
         }

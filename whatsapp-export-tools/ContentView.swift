@@ -51,6 +51,17 @@ struct ContentView: View {
         let outputSuffixArtifacts: [String]
     }
 
+    private struct TargetFolderLabel: Equatable {
+        let partner: String
+        let baseName: String
+
+        static let placeholder = TargetFolderLabel(partner: "—", baseName: "—")
+
+        var displayPath: String {
+            "\(partner)/\(baseName)"
+        }
+    }
+
     private enum RunStep: Hashable, Identifiable, Sendable {
         case sidecar
         case html(HTMLVariant)
@@ -408,6 +419,7 @@ struct ContentView: View {
     @State private var lastRunFailureArtifact: String? = nil
     @State private var currentRunStep: RunStep? = nil
     @State private var lastExportDir: URL? = nil
+    @State private var targetFolderLabel: TargetFolderLabel = .placeholder
     @State private var lastSidecarHTML: URL? = nil
     @State private var showReplaceSheet: Bool = false
     @State private var replaceExistingNames: [String] = []
@@ -1136,6 +1148,7 @@ struct ContentView: View {
         WASection(title: "Run", systemImage: "play.circle") {
             VStack(alignment: .leading, spacing: 10) {
                 runHeaderBar
+                runTargetFolderView
                 runStatusDetailView
                 runProgressContainer
             }
@@ -1152,6 +1165,25 @@ struct ContentView: View {
                 .truncationMode(.tail)
                 .foregroundStyle(.secondary)
         }
+    }
+
+    private var runTargetFolderView: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("Target folder")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(targetFolderLabel.partner)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(targetFolderLabel.baseName)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            .font(.system(size: 12))
+            .foregroundStyle(.secondary)
+        }
+        .frame(minHeight: 32, alignment: .topLeading)
     }
 
     private var runProgressContainer: some View {
@@ -1364,30 +1396,23 @@ struct ContentView: View {
 
     private func suggestedChatSubfolderName(
         chatURL: URL,
-        chatPartner: String,
-        detectedPartnerRaw: String,
-        overridePartnerRaw: String?
-    ) -> String {
+        chatPartner: String
+    ) -> WETPartnerNaming.NormalizationResult {
         let trimmed = normalizedDisplayName(chatPartner)
-        let base: String
+        let candidate: String
         if !trimmed.isEmpty {
-            base = safeFolderName(trimmed)
+            candidate = trimmed
         } else if let detectedChatTitle, !detectedChatTitle.isEmpty {
-            base = safeFolderName(detectedChatTitle)
+            candidate = detectedChatTitle
         } else if let fromExportFolder = chatNameFromExportFolder(chatURL: chatURL) {
-            base = safeFolderName(fromExportFolder)
+            candidate = fromExportFolder
         } else {
-            let raw = chatPartnerCandidates.first ?? detectedParticipants.first ?? "WhatsApp Chat"
-            base = safeFolderName(raw)
+            candidate = chatPartnerCandidates.first ?? detectedParticipants.first ?? "WhatsApp Chat"
         }
-        return WhatsAppExportService.applyPartnerOverrideToName(
-            originalName: base,
-            detectedPartnerRaw: detectedPartnerRaw,
-            overridePartnerRaw: overridePartnerRaw
-        )
+        return WETPartnerNaming.normalizePartnerFolderName(candidate)
     }
 
-    nonisolated private static func runRootDirectory(
+    nonisolated static func runRootDirectory(
         outDir: URL,
         partnerFolderName: String,
         baseName: String
@@ -1549,20 +1574,7 @@ struct ContentView: View {
     }
 
     private func safeFolderName(_ s: String, maxLen: Int = 120) -> String {
-        var x = s.precomposedStringWithCanonicalMapping
-            .replacingOccurrences(of: "/", with: " ")
-            .replacingOccurrences(of: ":", with: " ")
-
-        let filteredScalars = x.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }
-        x = String(String.UnicodeScalarView(filteredScalars))
-        x = x.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
-        x = x.trimmingCharacters(in: CharacterSet(charactersIn: " ."))
-
-        if x.isEmpty { x = "WhatsApp Chat" }
-        if x.count > maxLen {
-            x = String(x.prefix(maxLen)).trimmingCharacters(in: CharacterSet(charactersIn: " ."))
-        }
-        return x
+        WETPartnerNaming.safeFolderName(s, maxLen: maxLen)
     }
 
     private func helpIcon(_ text: String) -> some View {
@@ -2853,6 +2865,7 @@ struct ContentView: View {
         lastRunFailureArtifact = nil
         currentRunStep = nil
         lastExportDir = nil
+        targetFolderLabel = .placeholder
         lastSidecarHTML = nil
         runProgress = []
         runStepTimings = [:]
@@ -2995,7 +3008,7 @@ struct ContentView: View {
         let partnerForNamingNormalized = normalizedDisplayName(partnerForNamingRaw)
         let partnerForNamingFolderName = partnerForNamingNormalized.isEmpty
             ? nil
-            : safeFolderName(partnerForNamingNormalized)
+            : WETPartnerNaming.normalizedPartnerFolderName(partnerForNamingNormalized)
         let outputChatPartnerFolderOverride = partnerForNamingFolderName
 
         if selectedVariantsInOrder.isEmpty && !wantsMD && !wantsSidecar {
@@ -3037,13 +3050,16 @@ struct ContentView: View {
         let zipName = provenance.originalZipURL?.lastPathComponent ?? ""
         debugLog("PROVENANCE: inputKind=\(inputKindLabel) detectedFolder=\"\(provenance.detectedFolderURL.path)\" originalZip=\"\(zipName)\"")
 
-        let partnerFolderName = suggestedChatSubfolderName(
+        let partnerFolderNormalization = suggestedChatSubfolderName(
             chatURL: resolvedChatURL,
-            chatPartner: partnerForNamingRaw,
-            detectedPartnerRaw: detectedPartnerRaw,
-            overridePartnerRaw: overridePartnerEffective
+            chatPartner: partnerForNamingRaw
         )
+        if debugEnabled && partnerFolderNormalization.didChange {
+            debugLog("PARTNER DIR NORMALIZED: \"\(partnerFolderNormalization.original)\" -> \"\(partnerFolderNormalization.normalized)\"")
+        }
+        let partnerFolderName = partnerFolderNormalization.normalized
         debugLog("PARTNER DIR NAME: \"\(partnerFolderName)\" detected=\"\(detectedPartnerRaw)\" override=\"\(overridePartnerEffective ?? "")\" effective=\"\(partnerForNamingRaw)\"")
+        targetFolderLabel = TargetFolderLabel(partner: partnerFolderName, baseName: "—")
         let partnerRoot = outDir.appendingPathComponent(partnerFolderName, isDirectory: true)
         if replayMode.isReplay, let sourcesRoot = replayMode.sourcesRoot {
             appendLog("MODE: replay_sources")
@@ -3170,6 +3186,7 @@ struct ContentView: View {
             baseName: baseName
         )
         let runContext = contextWithExportDir(context, exportDir: runRoot)
+        targetFolderLabel = TargetFolderLabel(partner: runContext.partnerFolderName, baseName: baseName)
 
         if let detection = context.participantDetection {
             let winner = detection.evidence.first(where: { $0.source == "decision:winner" })?.excerpt ?? "n/a"
@@ -3189,7 +3206,7 @@ struct ContentView: View {
         let startSuffix = context.isOverwriteRetry ? " (Replace confirmed)" : ""
         logger.log("Start: \(Self.formatClockTime(runStartWall))\(startSuffix)")
         logger.log("RUN ROOT: \(runRoot.path)")
-        logger.log("Target folder: \(runRoot.lastPathComponent)")
+        logger.log("Target folder: \(runContext.partnerFolderName)/\(baseName)")
         logger.log("Export name: \(baseName)")
         let onOff = { (value: Bool) in value ? "ON" : "OFF" }
         logger.log(
