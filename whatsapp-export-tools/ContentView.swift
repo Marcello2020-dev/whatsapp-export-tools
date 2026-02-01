@@ -255,11 +255,7 @@ struct ContentView: View {
         
         /// Suffix appended to the HTML filename (before extension)
         var fileSuffix: String {
-            switch self {
-            case .embedAll: return "-max"
-            case .thumbnailsOnly: return "-mid"
-            case .textOnly: return "-min"
-            }
+            WETOutputNaming.htmlVariantSuffix(for: rawValue)
         }
 
         /// Whether to fetch/render online link previews.
@@ -912,7 +908,7 @@ struct ContentView: View {
         Toggle(isOn: $includeRawArchive) {
             HStack(spacing: 6) {
                 Text("Copy raw WhatsApp export archive")
-                helpIcon("Creates a copy of the WhatsApp export inside __raw/ under the run folder.")
+                helpIcon("Creates a copy of the WhatsApp export inside Sources/ under the run folder.")
             }
         }
         .accessibilityLabel("Copy raw archive")
@@ -2300,11 +2296,7 @@ struct ContentView: View {
     }
 
     nonisolated private static func htmlVariantSuffix(for variant: HTMLVariant) -> String {
-        switch variant {
-        case .embedAll: return "-max"
-        case .thumbnailsOnly: return "-mid"
-        case .textOnly: return "-min"
-        }
+        WETOutputNaming.htmlVariantSuffix(for: variant.rawValue)
     }
 
     nonisolated private static func htmlVariantLogLabel(for variant: HTMLVariant) -> String {
@@ -2316,20 +2308,19 @@ struct ContentView: View {
     }
 
     nonisolated private static func outputHTMLURL(baseName: String, variant: HTMLVariant, in dir: URL) -> URL {
-        let name = baseName + htmlVariantSuffix(for: variant) + ".html"
-        return dir.appendingPathComponent(name)
+        dir.appendingPathComponent(WETOutputNaming.htmlVariantFilename(baseName: baseName, rawValue: variant.rawValue))
     }
 
     nonisolated private static func outputMarkdownURL(baseName: String, in dir: URL) -> URL {
-        dir.appendingPathComponent("\(baseName).md")
+        dir.appendingPathComponent(WETOutputNaming.markdownFilename(baseName: baseName))
     }
 
     nonisolated private static func outputSidecarHTML(baseName: String, in dir: URL) -> URL {
-        dir.appendingPathComponent("\(baseName)-sdc.html")
+        dir.appendingPathComponent(WETOutputNaming.sidecarHTMLFilename(baseName: baseName))
     }
 
     nonisolated private static func outputSidecarDir(baseName: String, in dir: URL) -> URL {
-        dir.appendingPathComponent(baseName, isDirectory: true)
+        dir.appendingPathComponent(WETOutputNaming.sidecarFolderName(baseName: baseName), isDirectory: true)
     }
 
     nonisolated private static func outputRawArchiveDir(baseName: String, in dir: URL) -> URL {
@@ -2353,13 +2344,13 @@ struct ContentView: View {
         var paths: [String] = []
         paths.reserveCapacity(variants.count + 2)
         for variant in variants {
-            paths.append("\(baseName)\(htmlVariantSuffix(for: variant)).html")
+            paths.append(WETOutputNaming.htmlVariantFilename(baseName: baseName, rawValue: variant.rawValue))
         }
         if wantsMarkdown {
-            paths.append("\(baseName).md")
+            paths.append(WETOutputNaming.markdownFilename(baseName: baseName))
         }
         if wantsSidecar {
-            paths.append("\(baseName)-sdc.html")
+            paths.append(WETOutputNaming.sidecarHTMLFilename(baseName: baseName))
         }
         return paths
     }
@@ -2370,7 +2361,8 @@ struct ContentView: View {
         wantsMarkdown: Bool,
         wantsSidecar: Bool,
         wantsRawArchive: Bool,
-        in dir: URL
+        in dir: URL,
+        includeLegacy: Bool = false
     ) -> [URL] {
         var urls: [URL] = []
         var seen: Set<String> = []
@@ -2407,6 +2399,29 @@ struct ContentView: View {
             }
         }
 
+        if includeLegacy {
+            for variant in HTMLVariant.allCases {
+                let legacyName = WETOutputNaming.legacyHTMLVariantFilename(baseName: baseName, rawValue: variant.rawValue)
+                if seen.insert(legacyName).inserted {
+                    urls.append(dir.appendingPathComponent(legacyName))
+                }
+            }
+            let legacySidecarHTML = WETOutputNaming.legacySidecarHTMLFilename(baseName: baseName)
+            if seen.insert(legacySidecarHTML).inserted {
+                urls.append(dir.appendingPathComponent(legacySidecarHTML))
+            }
+            let legacySidecarDir = WETOutputNaming.legacySidecarFolderName(baseName: baseName)
+            if seen.insert(legacySidecarDir).inserted {
+                urls.append(dir.appendingPathComponent(legacySidecarDir, isDirectory: true))
+            }
+            if wantsRawArchive {
+                let legacyRaw = WETOutputNaming.legacyRawFolderName
+                if seen.insert(legacyRaw).inserted {
+                    urls.append(dir.appendingPathComponent(legacyRaw, isDirectory: true))
+                }
+            }
+        }
+
         let manifestURL = outputManifestURL(baseName: baseName, in: dir)
         if seen.insert(manifestURL.lastPathComponent).inserted {
             urls.append(manifestURL)
@@ -2424,13 +2439,17 @@ struct ContentView: View {
         var labels: Set<String> = []
 
         func isSidecarHTML(_ name: String) -> Bool {
-            name.hasPrefix("\(baseName)-sdc") && name.hasSuffix(".html")
-        }
-
-        func isVariantHTML(_ name: String, suffix: String) -> Bool {
             guard name.hasSuffix(".html") else { return false }
             let stem = (name as NSString).deletingPathExtension
-            return stem.hasPrefix("\(baseName)\(suffix)")
+            let newStem = WETOutputNaming.sidecarBaseName(baseName: baseName)
+            let legacyStem = (WETOutputNaming.legacySidecarHTMLFilename(baseName: baseName) as NSString).deletingPathExtension
+            return stem.hasPrefix(newStem) || stem.hasPrefix(legacyStem)
+        }
+
+        func isVariantHTML(_ name: String, suffixes: [String]) -> Bool {
+            guard name.hasSuffix(".html") else { return false }
+            let stem = (name as NSString).deletingPathExtension
+            return suffixes.contains { stem.hasPrefix("\(baseName)\($0)") }
         }
 
         func isMarkdown(_ name: String) -> Bool {
@@ -2441,12 +2460,15 @@ struct ContentView: View {
 
         func isSidecarDir(_ name: String) -> Bool {
             guard !name.hasSuffix(".html"), !name.hasSuffix(".md") else { return false }
-            if name.hasPrefix("__raw") { return false }
-            return name.hasPrefix(baseName)
+            if name.hasPrefix(WETOutputNaming.sourcesFolderName) || name.hasPrefix(WETOutputNaming.legacyRawFolderName) {
+                return false
+            }
+            return name == WETOutputNaming.sidecarFolderName(baseName: baseName)
+                || name == WETOutputNaming.legacySidecarFolderName(baseName: baseName)
         }
 
         func isRawArchive(_ name: String) -> Bool {
-            return name.hasPrefix("__raw")
+            return name.hasPrefix(WETOutputNaming.sourcesFolderName) || name.hasPrefix(WETOutputNaming.legacyRawFolderName)
         }
 
         func isManifest(_ name: String) -> Bool {
@@ -2474,13 +2496,22 @@ struct ContentView: View {
             if isChecksum(name) {
                 labels.insert("Checksum")
             }
-            if isVariantHTML(name, suffix: "-max") {
+            if isVariantHTML(
+                name,
+                suffixes: [WETOutputNaming.htmlVariantSuffix(for: "embedAll"), "-max"]
+            ) {
                 labels.insert("Max")
             }
-            if isVariantHTML(name, suffix: "-mid") {
+            if isVariantHTML(
+                name,
+                suffixes: [WETOutputNaming.htmlVariantSuffix(for: "thumbnailsOnly"), "-mid"]
+            ) {
                 labels.insert("Compact")
             }
-            if isVariantHTML(name, suffix: "-min") {
+            if isVariantHTML(
+                name,
+                suffixes: [WETOutputNaming.htmlVariantSuffix(for: "textOnly"), "-min"]
+            ) {
                 labels.insert("E-Mail")
             }
             if isMarkdown(name) {
@@ -2729,11 +2760,11 @@ struct ContentView: View {
             expected.append("\(baseName).md")
         }
         if wantsSidecar {
-            expected.append("\(baseName)-sdc.html")
-            expected.append(baseName)
+            expected.append(WETOutputNaming.sidecarHTMLFilename(baseName: baseName))
+            expected.append(WETOutputNaming.sidecarFolderName(baseName: baseName))
         }
         if wantsRawArchive {
-            expected.append("__raw")
+            expected.append(WETOutputNaming.sourcesFolderName)
         }
         expected.append("\(baseName).manifest.json")
         expected.append("\(baseName).sha256")
@@ -2936,9 +2967,9 @@ struct ContentView: View {
 
         let htmlLabel: String = {
             var parts: [String] = []
-            if exportHTMLMax { parts.append("-max") }
-            if exportHTMLMid { parts.append("-mid") }
-            if exportHTMLMin { parts.append("-min") }
+            if exportHTMLMax { parts.append(WETOutputNaming.htmlVariantSuffix(for: "embedAll")) }
+            if exportHTMLMid { parts.append(WETOutputNaming.htmlVariantSuffix(for: "thumbnailsOnly")) }
+            if exportHTMLMin { parts.append(WETOutputNaming.htmlVariantSuffix(for: "textOnly")) }
             return parts.isEmpty ? "OFF" : parts.joined(separator: ", ")
         }()
 
@@ -3352,7 +3383,8 @@ struct ContentView: View {
                         wantsMarkdown: runContext.wantsMD,
                         wantsSidecar: runContext.wantsSidecar,
                         wantsRawArchive: runContext.wantsRawArchiveCopy,
-                        in: exportDir
+                        in: exportDir,
+                        includeLegacy: true
                     )
                     let suffixArtifacts = Self.outputSuffixArtifacts(
                         baseName: baseName,
@@ -3415,6 +3447,23 @@ struct ContentView: View {
             if existingNames.contains(rawDir.lastPathComponent) { existing.append(rawDir) }
         }
 
+        if context.wantsSidecar {
+            let legacySidecarHTML = WETOutputNaming.legacySidecarHTMLFilename(baseName: baseName)
+            if existingNames.contains(legacySidecarHTML) {
+                existing.append(exportDir.appendingPathComponent(legacySidecarHTML))
+            }
+            let legacySidecarDir = WETOutputNaming.legacySidecarFolderName(baseName: baseName)
+            if existingNames.contains(legacySidecarDir) {
+                existing.append(exportDir.appendingPathComponent(legacySidecarDir, isDirectory: true))
+            }
+        }
+        if context.wantsRawArchiveCopy {
+            let legacyRaw = WETOutputNaming.legacyRawFolderName
+            if existingNames.contains(legacyRaw) {
+                existing.append(exportDir.appendingPathComponent(legacyRaw, isDirectory: true))
+            }
+        }
+
         let manifestURL = Self.outputManifestURL(baseName: baseName, in: exportDir)
         if existingNames.contains(manifestURL.lastPathComponent) { existing.append(manifestURL) }
 
@@ -3424,6 +3473,10 @@ struct ContentView: View {
         for variant in context.plan.variants {
             let variantURL = Self.outputHTMLURL(baseName: baseName, variant: variant, in: exportDir)
             if existingNames.contains(variantURL.lastPathComponent) { existing.append(variantURL) }
+            let legacyVariant = WETOutputNaming.legacyHTMLVariantFilename(baseName: baseName, rawValue: variant.rawValue)
+            if existingNames.contains(legacyVariant) {
+                existing.append(exportDir.appendingPathComponent(legacyVariant))
+            }
         }
 
         let suffixArtifacts = Self.outputSuffixArtifacts(

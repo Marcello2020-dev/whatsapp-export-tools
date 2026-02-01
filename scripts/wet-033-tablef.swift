@@ -80,7 +80,7 @@ struct WET033TableFRunner {
 
     private static func inferBaseName(from primaryHTML: URL) throws -> String {
         let name = primaryHTML.lastPathComponent
-        let suffixes = ["-max.html", "-mid.html", "-min.html"]
+        let suffixes = ["-MaxHTML.html", "-MidHTML.html", "-mailHTML.html"]
         for suffix in suffixes {
             if name.hasSuffix(suffix) {
                 return String(name.dropLast(suffix.count))
@@ -96,14 +96,14 @@ struct WET033TableFRunner {
         let fm = FileManager.default
         let expected: [String] = {
             var names = [
-                "\(baseName)-max.html",
-                "\(baseName)-mid.html",
-                "\(baseName)-min.html",
+                "\(baseName)-MaxHTML.html",
+                "\(baseName)-MidHTML.html",
+                "\(baseName)-mailHTML.html",
                 "\(baseName).md"
             ]
             if exportSortedAttachments {
-                names.append("\(baseName)-sdc.html")
-                names.append(baseName)
+                names.append("\(baseName)-Sidecar.html")
+                names.append("\(baseName)-Sidecar")
             }
             return names
         }()
@@ -115,7 +115,7 @@ struct WET033TableFRunner {
             if !exists {
                 throw VerificationError(message: "Missing expected artifact: \(name)")
             }
-            if name == baseName, !isDir.boolValue {
+            if name == "\(baseName)-Sidecar", !isDir.boolValue {
                 throw VerificationError(message: "Expected sidecar folder to be a directory: \(name)")
             }
         }
@@ -123,11 +123,11 @@ struct WET033TableFRunner {
 
     private static func verifyThumbRules(outDir: URL, baseName: String, exportSortedAttachments: Bool) throws {
         let fm = FileManager.default
-        let compactHTML = outDir.appendingPathComponent("\(baseName)-mid.html")
+        let compactHTML = outDir.appendingPathComponent("\(baseName)-MidHTML.html")
         let compact = (try? String(contentsOf: compactHTML, encoding: .utf8)) ?? ""
 
         if exportSortedAttachments {
-            let thumbsDir = outDir.appendingPathComponent(baseName, isDirectory: true)
+            let thumbsDir = outDir.appendingPathComponent("\(baseName)-Sidecar", isDirectory: true)
                 .appendingPathComponent("_thumbs", isDirectory: true)
             var isDir = ObjCBool(false)
             guard fm.fileExists(atPath: thumbsDir.path, isDirectory: &isDir), isDir.boolValue else {

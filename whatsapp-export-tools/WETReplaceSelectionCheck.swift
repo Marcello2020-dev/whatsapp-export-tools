@@ -85,7 +85,7 @@ struct WETReplaceSelectionCheck {
         }
         try fm.createDirectory(at: root, withIntermediateDirectories: true)
 
-        let sidecarDir = root.appendingPathComponent(baseName, isDirectory: true)
+        let sidecarDir = root.appendingPathComponent("\(baseName)-Sidecar", isDirectory: true)
         try fm.createDirectory(at: sidecarDir, withIntermediateDirectories: true)
         let imagesDir = sidecarDir.appendingPathComponent("images", isDirectory: true)
         let videosDir = sidecarDir.appendingPathComponent("videos", isDirectory: true)
@@ -99,11 +99,11 @@ struct WETReplaceSelectionCheck {
         try fm.createDirectory(at: thumbsDir, withIntermediateDirectories: true)
 
         let seedFiles: [(String, String)] = [
-            ("\(baseName)-max.html", "dummy max"),
-            ("\(baseName)-mid.html", "dummy mid"),
-            ("\(baseName)-min.html", "dummy email"),
+            ("\(baseName)-MaxHTML.html", "dummy max"),
+            ("\(baseName)-MidHTML.html", "dummy mid"),
+            ("\(baseName)-mailHTML.html", "dummy email"),
             ("\(baseName).md", "dummy md"),
-            ("\(baseName)-sdc.html", "dummy sidecar html")
+            ("\(baseName)-Sidecar.html", "dummy sidecar html")
         ]
         for (name, content) in seedFiles {
             let url = root.appendingPathComponent(name)
@@ -116,7 +116,7 @@ struct WETReplaceSelectionCheck {
 
     private static func runReplace(root: URL, baseName: String) throws {
         let fm = FileManager.default
-        let variantSuffixes = ["-max", "-mid"]
+        let variantSuffixes = ["-MaxHTML", "-MidHTML"]
         let deleteTargets = ContentView.replaceDeleteTargets(
             baseName: baseName,
             variantSuffixes: variantSuffixes,
@@ -138,12 +138,12 @@ struct WETReplaceSelectionCheck {
         }
 
         try "replaced max".write(
-            to: root.appendingPathComponent("\(baseName)-max.html"),
+            to: root.appendingPathComponent("\(baseName)-MaxHTML.html"),
             atomically: true,
             encoding: .utf8
         )
         try "replaced mid".write(
-            to: root.appendingPathComponent("\(baseName)-mid.html"),
+            to: root.appendingPathComponent("\(baseName)-MidHTML.html"),
             atomically: true,
             encoding: .utf8
         )
@@ -151,12 +151,12 @@ struct WETReplaceSelectionCheck {
 
     private static func snapshot(root: URL, baseName: String) -> [String: FileInfo] {
         let files: [URL] = [
-            root.appendingPathComponent("\(baseName)-max.html"),
-            root.appendingPathComponent("\(baseName)-mid.html"),
-            root.appendingPathComponent("\(baseName)-min.html"),
+            root.appendingPathComponent("\(baseName)-MaxHTML.html"),
+            root.appendingPathComponent("\(baseName)-MidHTML.html"),
+            root.appendingPathComponent("\(baseName)-mailHTML.html"),
             root.appendingPathComponent("\(baseName).md"),
-            root.appendingPathComponent("\(baseName)-sdc.html"),
-            root.appendingPathComponent("\(baseName)/images/media_0001.jpg")
+            root.appendingPathComponent("\(baseName)-Sidecar.html"),
+            root.appendingPathComponent("\(baseName)-Sidecar/images/media_0001.jpg")
         ]
 
         var snapshot: [String: FileInfo] = [:]
@@ -211,13 +211,13 @@ struct WETReplaceSelectionCheck {
             }
         }
 
-        expectReplaced("\(baseName)-max.html")
-        expectReplaced("\(baseName)-mid.html")
+        expectReplaced("\(baseName)-MaxHTML.html")
+        expectReplaced("\(baseName)-MidHTML.html")
 
-        expectPreserved("\(baseName)-min.html")
+        expectPreserved("\(baseName)-mailHTML.html")
         expectPreserved("\(baseName).md")
-        expectPreserved("\(baseName)-sdc.html")
-        expectPreserved("\(baseName)/images/media_0001.jpg")
+        expectPreserved("\(baseName)-Sidecar.html")
+        expectPreserved("\(baseName)-Sidecar/images/media_0001.jpg")
 
         return failures
     }

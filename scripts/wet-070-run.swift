@@ -62,7 +62,7 @@ struct WET070Runner {
                 )
 
                 let primary = result.primaryHTML.lastPathComponent
-                let suffixes = ["-max.html", "-mid.html", "-min.html"]
+                let suffixes = ["-MaxHTML.html", "-MidHTML.html", "-mailHTML.html"]
                 var baseName = primary
                 for suffix in suffixes where baseName.hasSuffix(suffix) {
                     baseName = String(baseName.dropLast(suffix.count))

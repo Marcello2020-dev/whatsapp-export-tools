@@ -437,11 +437,7 @@ public enum HTMLVariant: String, CaseIterable, Hashable, Sendable {
     case textOnly        // kleinste Datei
 
     nonisolated public var filenameSuffix: String {
-        switch self {
-        case .embedAll: return "-max"
-        case .thumbnailsOnly: return "-mid"
-        case .textOnly: return "-min"
-        }
+        WETOutputNaming.htmlVariantSuffix(for: rawValue)
     }
 
     // Vorgabe: Previews nur bei textOnly aus.
@@ -545,7 +541,7 @@ enum SourceOps {
     }
 
     nonisolated static func rawArchiveDirectory(baseName: String, in exportDir: URL) -> URL {
-        exportDir.appendingPathComponent("__raw", isDirectory: true)
+        exportDir.appendingPathComponent(WETOutputNaming.sourcesFolderName, isDirectory: true)
     }
 
     nonisolated static func copyRawArchive(
@@ -573,7 +569,7 @@ enum SourceOps {
             }
         }
 
-        let stagedRawRoot = stagingDir.appendingPathComponent("__raw", isDirectory: true)
+        let stagedRawRoot = stagingDir.appendingPathComponent(WETOutputNaming.sourcesFolderName, isDirectory: true)
         try fm.createDirectory(at: stagedRawRoot, withIntermediateDirectories: true)
 
         let stagedExportDir = stagedRawRoot.appendingPathComponent(sourceDir.lastPathComponent, isDirectory: true)
@@ -2274,10 +2270,18 @@ public enum WhatsAppExportService {
 
         let fm = FileManager.default
 
-        let outHTML = outPath.appendingPathComponent("\(base).html")
-        let outMD = outPath.appendingPathComponent("\(base).md")
-        let sidecarHTML = outPath.appendingPathComponent("\(base)-sdc.html")
-        let sortedFolderURL = outPath.appendingPathComponent(base, isDirectory: true)
+        let htmlSuffix: String = {
+            if embedAttachments {
+                return embedAttachmentThumbnailsOnly
+                    ? WETOutputNaming.htmlVariantSuffix(for: "thumbnailsOnly")
+                    : WETOutputNaming.htmlVariantSuffix(for: "embedAll")
+            }
+            return WETOutputNaming.htmlVariantSuffix(for: "textOnly")
+        }()
+        let outHTML = outPath.appendingPathComponent("\(base)\(htmlSuffix).html")
+        let outMD = outPath.appendingPathComponent(WETOutputNaming.markdownFilename(baseName: base))
+        let sidecarHTML = outPath.appendingPathComponent(WETOutputNaming.sidecarHTMLFilename(baseName: base))
+        let sortedFolderURL = outPath.appendingPathComponent(WETOutputNaming.sidecarFolderName(baseName: base), isDirectory: true)
 
         let existingNames: Set<String> = (try? fm.contentsOfDirectory(
             at: outPath,
@@ -2318,10 +2322,10 @@ public enum WhatsAppExportService {
             }
         }
 
-        let stagedHTML = stagingDir.appendingPathComponent("\(base).html")
-        let stagedMD = stagingDir.appendingPathComponent("\(base).md")
-        let stagedSidecarHTML = stagingDir.appendingPathComponent("\(base)-sdc.html")
-        let stagedSidecarDir = stagingDir.appendingPathComponent(base, isDirectory: true)
+        let stagedHTML = stagingDir.appendingPathComponent("\(base)\(htmlSuffix).html")
+        let stagedMD = stagingDir.appendingPathComponent(WETOutputNaming.markdownFilename(baseName: base))
+        let stagedSidecarHTML = stagingDir.appendingPathComponent(WETOutputNaming.sidecarHTMLFilename(baseName: base))
+        let stagedSidecarDir = stagingDir.appendingPathComponent(WETOutputNaming.sidecarFolderName(baseName: base), isDirectory: true)
 
         var thumbnailStore: ThumbnailStore? = nil
         if wantsThumbs, !exportSortedAttachments {
@@ -2342,7 +2346,7 @@ public enum WhatsAppExportService {
                 chatURL: chatPath,
                 messages: msgs,
                 outDir: stagingDir,
-                folderName: base,
+                folderName: WETOutputNaming.sidecarFolderName(baseName: base),
                 detectedPartnerRaw: "",
                 overridePartnerRaw: nil,
                 originalZipURL: nil,
@@ -2372,7 +2376,7 @@ public enum WhatsAppExportService {
                 thumbnailStore = thumbContext.reader
             }
 
-            // Sidecar HTML: renders like -max but references media in the sidecar folder via relative links.
+            // Sidecar HTML: renders like -MaxHTML but references media in the sidecar folder via relative links.
             let sidecarChatURL = chatPath
             // Write sidecar HTML next to the other outputs (root of outDir) and name it consistently.
 
@@ -2630,7 +2634,7 @@ public enum WhatsAppExportService {
         resetStagedAttachmentCache()
 
         let outPath = outDir.standardizedFileURL
-        let outMD = outPath.appendingPathComponent("\(prepared.baseName).md")
+        let outMD = outPath.appendingPathComponent(WETOutputNaming.markdownFilename(baseName: prepared.baseName))
         let chatURL = chatURLOverride ?? prepared.chatURL
 
         try renderMD(
@@ -2663,7 +2667,7 @@ public enum WhatsAppExportService {
         let sidecarDebugEnabled = WETLog.isDebugEnabled()
         let expectedAttachments = expectedAttachmentCount(prepared: prepared)
         let outPath = outDir.standardizedFileURL
-        let sidecarHTML = outPath.appendingPathComponent("\(prepared.baseName)-sdc.html")
+        let sidecarHTML = outPath.appendingPathComponent(WETOutputNaming.sidecarHTMLFilename(baseName: prepared.baseName))
 
         if expectedAttachments == 0 {
             try await renderHTML(
@@ -2679,7 +2683,7 @@ public enum WhatsAppExportService {
             return (sidecarBaseDir: nil, sidecarHTML: sidecarHTML, expectedAttachments: expectedAttachments)
         }
 
-        let stagingBaseDir = outPath.appendingPathComponent(prepared.baseName, isDirectory: true)
+        let stagingBaseDir = outPath.appendingPathComponent(WETOutputNaming.sidecarFolderName(baseName: prepared.baseName), isDirectory: true)
         if allowStagingOverwrite && expectedAttachments > 0, fm.fileExists(atPath: stagingBaseDir.path) {
             if sidecarDebugEnabled {
                 WETLog.dbg("DEBUG: SIDE: removing staged sidecar dir before render: \(stagingBaseDir.path)")
@@ -2698,7 +2702,7 @@ public enum WhatsAppExportService {
             chatURL: prepared.chatURL,
             messages: prepared.messages,
             outDir: outPath,
-            folderName: prepared.baseName,
+            folderName: WETOutputNaming.sidecarFolderName(baseName: prepared.baseName),
             detectedPartnerRaw: detectedPartnerRaw,
             overridePartnerRaw: overridePartnerRaw,
             originalZipURL: originalZipURL,
@@ -2743,7 +2747,7 @@ public enum WhatsAppExportService {
         return (sidecarBaseDir: sidecarBaseDir, sidecarHTML: sidecarHTML, expectedAttachments: expectedAttachments)
     }
     
-    /// Multi-Export: erzeugt alle HTML-Varianten (-max/-mid/-min) + eine MD-Datei.
+    /// Multi-Export: erzeugt alle HTML-Varianten (-MaxHTML/-MidHTML/-mailHTML) + eine MD-Datei.
     nonisolated public static func exportMulti(
         chatURL: URL,
         outDir: URL,
@@ -2810,9 +2814,9 @@ public enum WhatsAppExportService {
         }
 
         // Empfehlung: Markdown immer „portable“ mit attachments/ Links
-        let outMD = outPath.appendingPathComponent("\(base).md")
-        let sidecarHTML = outPath.appendingPathComponent("\(base)-sdc.html")
-        let sortedFolderURL = outPath.appendingPathComponent(base, isDirectory: true)
+        let outMD = outPath.appendingPathComponent(WETOutputNaming.markdownFilename(baseName: base))
+        let sidecarHTML = outPath.appendingPathComponent(WETOutputNaming.sidecarHTMLFilename(baseName: base))
+        let sortedFolderURL = outPath.appendingPathComponent(WETOutputNaming.sidecarFolderName(baseName: base), isDirectory: true)
 
         let existingNames: Set<String> = (try? fm.contentsOfDirectory(
             at: outPath,
@@ -2853,9 +2857,9 @@ public enum WhatsAppExportService {
         for v in variants {
             stagedHTMLByVariant[v] = stagingDir.appendingPathComponent("\(base)\(v.filenameSuffix).html")
         }
-        let stagedMD = stagingDir.appendingPathComponent("\(base).md")
-        let stagedSidecarHTML = stagingDir.appendingPathComponent("\(base)-sdc.html")
-        let stagedSidecarDir = stagingDir.appendingPathComponent(base, isDirectory: true)
+        let stagedMD = stagingDir.appendingPathComponent(WETOutputNaming.markdownFilename(baseName: base))
+        let stagedSidecarHTML = stagingDir.appendingPathComponent(WETOutputNaming.sidecarHTMLFilename(baseName: base))
+        let stagedSidecarDir = stagingDir.appendingPathComponent(WETOutputNaming.sidecarFolderName(baseName: base), isDirectory: true)
 
         var thumbnailStore: ThumbnailStore? = nil
         if wantsThumbs, !exportSortedAttachments {
@@ -2876,7 +2880,7 @@ public enum WhatsAppExportService {
                 chatURL: chatPath,
                 messages: msgs,
                 outDir: stagingDir,
-                folderName: base,
+                folderName: WETOutputNaming.sidecarFolderName(baseName: base),
                 detectedPartnerRaw: "",
                 overridePartnerRaw: nil,
                 attachmentEntries: attachmentEntries
@@ -2905,7 +2909,7 @@ public enum WhatsAppExportService {
                 thumbnailStore = thumbContext.reader
             }
 
-            // Sidecar HTML: renders like -max but references media in the sidecar folder via relative links.
+            // Sidecar HTML: renders like -MaxHTML but references media in the sidecar folder via relative links.
             let sidecarChatURL = chatPath
             // Write sidecar HTML next to the other outputs (root of outDir) and name it consistently.
 
@@ -3041,10 +3045,10 @@ public enum WhatsAppExportService {
         try? fm.removeItem(at: stagingDir)
         didRemoveStaging = true
 
-        var artifactPaths: [String] = variants.map { "\(base)\($0.filenameSuffix).html" }
-        artifactPaths.append("\(base).md")
+        var artifactPaths: [String] = variants.map { WETOutputNaming.htmlVariantFilename(baseName: base, variant: $0) }
+        artifactPaths.append(WETOutputNaming.markdownFilename(baseName: base))
         if exportSortedAttachments {
-            artifactPaths.append("\(base)-sdc.html")
+            artifactPaths.append(WETOutputNaming.sidecarHTMLFilename(baseName: base))
         }
 
         let manifestFlags = ManifestArtifactFlags(
@@ -7758,14 +7762,14 @@ nonisolated private static func stageThumbnailForExport(
         candidates.append(contentsOf: requiredFiles)
 
         if flags.sidecar {
-            let sidecarDir = root.appendingPathComponent(baseName, isDirectory: true)
+            let sidecarDir = root.appendingPathComponent(WETOutputNaming.sidecarFolderName(baseName: baseName), isDirectory: true)
             if fm.fileExists(atPath: sidecarDir.path) {
                 candidates.append(sidecarDir)
             }
         }
 
         if flags.rawArchive {
-            let rawDir = root.appendingPathComponent("__raw", isDirectory: true)
+            let rawDir = root.appendingPathComponent(WETOutputNaming.sourcesFolderName, isDirectory: true)
             if fm.fileExists(atPath: rawDir.path) {
                 candidates.append(rawDir)
             } else {
