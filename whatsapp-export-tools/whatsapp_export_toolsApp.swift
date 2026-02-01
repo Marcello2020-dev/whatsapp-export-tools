@@ -16,6 +16,7 @@ struct whatsapp_export_toolsApp: App {
             WETBareDomainPreviewCheck.runIfNeeded()
             WETBareDomainLinkifyCheck.runIfNeeded()
             WETSystemMessageCheck.runIfNeeded()
+            WETExporterPlaceholderCheck.runIfNeeded()
             WETReplaceSelectionCheck.runIfNeeded()
             WETExternalAssetsCheck.runIfNeeded()
             WETDeterminismCheck.runIfNeeded()
@@ -41,6 +42,11 @@ struct whatsapp_export_toolsApp: App {
                         .padding()
                 } else if WETSystemMessageCheck.isEnabled {
                     Text("Running WET system message check…")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .padding()
+                } else if WETExporterPlaceholderCheck.isEnabled {
+                    Text("Running WET exporter placeholder check…")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                         .padding()
@@ -85,6 +91,7 @@ struct whatsapp_export_toolsApp: App {
                 WETBareDomainPreviewCheck.runIfNeeded()
                 WETBareDomainLinkifyCheck.runIfNeeded()
                 WETSystemMessageCheck.runIfNeeded()
+                WETExporterPlaceholderCheck.runIfNeeded()
                 WETReplaceSelectionCheck.runIfNeeded()
                 WETExternalAssetsCheck.runIfNeeded()
                 WETDeterminismCheck.runIfNeeded()

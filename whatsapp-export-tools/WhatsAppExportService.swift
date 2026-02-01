@@ -288,6 +288,7 @@ public struct WAParticipantDetectionResult: Sendable {
     public let chatTitleCandidate: String?
     public let otherPartyCandidate: String?
     public let exporterSelfCandidate: String?
+    public let exporterPlaceholderSeen: Bool
     public let confidence: WAParticipantDetectionConfidence
     public let evidence: [WAParticipantDetectionEvidence]
 }
@@ -797,6 +798,34 @@ public enum WhatsAppExportService {
         "messages to this chat are now secured",
         "nachrichten und anrufe sind ende-zu-ende-verschlüsselt",
     ]
+
+    // Placeholder used when exports label the exporter-side speaker as "Du/You/Me".
+    public nonisolated static let exporterPlaceholderToken = "__EXPORTER__"
+    public nonisolated static let exporterPlaceholderDisplayName = "Exporteur"
+    nonisolated private static let exporterPlaceholderLabels: Set<String> = [
+        "du",
+        "you",
+        "me"
+    ]
+
+    nonisolated private static func isExporterPlaceholderLabel(_ name: String) -> Bool {
+        let low = _normSpace(name).lowercased()
+        if low.isEmpty { return false }
+        if low == exporterPlaceholderToken.lowercased() { return true }
+        return exporterPlaceholderLabels.contains(low)
+    }
+
+    nonisolated private static func isExporterPlaceholderAuthor(_ name: String) -> Bool {
+        isExporterPlaceholderLabel(name)
+    }
+
+    nonisolated private static func normalizedAuthorLabel(_ raw: String) -> String {
+        let trimmed = _normSpace(raw)
+        if isExporterPlaceholderLabel(trimmed) {
+            return exporterPlaceholderToken
+        }
+        return trimmed
+    }
 
     nonisolated private static func isSystemAuthor(_ name: String) -> Bool {
         let low = _normSpace(name).lowercased()
@@ -1855,6 +1884,7 @@ public enum WhatsAppExportService {
         let chatPath = chatURL.standardizedFileURL
         let lines = try loadChatLines(chatPath)
         let msgs = parseMessages(lines)
+        let exporterPlaceholderSeen = containsExporterPlaceholder(messages: msgs)
 
         let participantsRaw = participants(from: msgs)
         let participants = participantsRaw.map { safeFinderFilename($0) }
@@ -2049,6 +2079,9 @@ public enum WhatsAppExportService {
         if !participantsRaw.isEmpty {
             evidence.append(WAParticipantDetectionEvidence(source: "sender-tokens", excerpt: "unique=\(participantsRaw.count)"))
         }
+        if exporterPlaceholderSeen {
+            evidence.append(WAParticipantDetectionEvidence(source: "policy:exporter-placeholder", excerpt: "placeholder-author"))
+        }
 
         var nonPhoneAlternatives: [(candidate: String, source: String)] = []
         let appendNonPhone: (String?, String) -> Void = { rawCandidate, source in
@@ -2157,6 +2190,7 @@ public enum WhatsAppExportService {
             chatTitleCandidate: chatTitleCandidateFinal,
             otherPartyCandidate: otherPartyCandidateFinal,
             exporterSelfCandidate: exporterSelfCandidate,
+            exporterPlaceholderSeen: exporterPlaceholderSeen,
             confidence: confidence,
             evidence: evidence
         )
@@ -2173,13 +2207,17 @@ public enum WhatsAppExportService {
         // Preserve first-seen order
         var uniq: [String] = []
         for m in messages {
-            let a = normalizedParticipantIdentifier(m.author)
+            let authorRaw = _normSpace(m.author)
+            if isExporterPlaceholderAuthor(authorRaw) { continue }
+            let textWoAttach = stripAttachmentMarkers(m.text)
+            if isSystemMessage(authorRaw: authorRaw, text: textWoAttach) { continue }
+            let a = normalizedParticipantIdentifier(authorRaw)
             if a.isEmpty { continue }
             if isSystemAuthor(a) { continue }
             if !uniq.contains(a) { uniq.append(a) }
         }
 
-        let filtered = uniq.filter { !isSystemAuthor($0) }
+        let filtered = uniq.filter { !isSystemAuthor($0) && !isExporterPlaceholderAuthor($0) }
         return filtered.isEmpty ? uniq : filtered
     }
 
@@ -2264,12 +2302,16 @@ public enum WhatsAppExportService {
         var deletedByOther: [String: Int] = [:]
 
         for m in messages {
-            let author = normalizedParticipantIdentifier(m.author)
+            let authorRaw = _normSpace(m.author)
+            if isExporterPlaceholderAuthor(authorRaw) { continue }
+            let textWoAttach = stripAttachmentMarkers(m.text)
+            if isSystemMessage(authorRaw: authorRaw, text: textWoAttach) { continue }
+            let author = normalizedParticipantIdentifier(authorRaw)
             if author.isEmpty { continue }
             if isSystemAuthor(author) { continue }
             candidates.insert(author)
 
-            let text = normalizedSystemText(m.text)
+            let text = normalizedSystemText(textWoAttach)
             if text.isEmpty { continue }
             if containsAny(text, otherDeletedMarkers) {
                 deletedByOther[author, default: 0] += 1
@@ -2288,14 +2330,22 @@ public enum WhatsAppExportService {
         var deletedByMe: [String: Int] = [:]
         var groupActionsByMe: [String: Int] = [:]
         var deletedByOther: [String: Int] = [:]
+        var sawExporterPlaceholder = false
 
         for m in messages {
-            let author = normalizedParticipantIdentifier(m.author)
+            let authorRaw = _normSpace(m.author)
+            if isExporterPlaceholderAuthor(authorRaw) {
+                sawExporterPlaceholder = true
+                continue
+            }
+            let textWoAttach = stripAttachmentMarkers(m.text)
+            if isSystemMessage(authorRaw: authorRaw, text: textWoAttach) { continue }
+            let author = normalizedParticipantIdentifier(authorRaw)
             if author.isEmpty { continue }
             if isSystemAuthor(author) { continue }
             candidates.insert(author)
 
-            let text = normalizedSystemText(m.text)
+            let text = normalizedSystemText(textWoAttach)
             if text.isEmpty { continue }
 
             if containsAny(text, meDeletedMarkers) {
@@ -2310,6 +2360,8 @@ public enum WhatsAppExportService {
                 deletedByOther[author, default: 0] += 1
             }
         }
+
+        if sawExporterPlaceholder { return nil }
 
         if deletedByMe.count == 1, let me = deletedByMe.keys.first {
             return (name: me, tag: "me_deleted_marker")
@@ -3350,6 +3402,7 @@ public enum WhatsAppExportService {
     /// If the string is not a phone candidate, it is returned unchanged (normalized whitespace only).
     nonisolated private static func normalizedParticipantIdentifier(_ s: String) -> String {
         let x = _normSpace(s)
+        if isExporterPlaceholderLabel(x) { return exporterPlaceholderToken }
         if !isPhoneCandidate(x) { return x }
         let k = normalizePhoneKey(x)
         return k.isEmpty ? x : k
@@ -3397,6 +3450,7 @@ public enum WhatsAppExportService {
     nonisolated private static func applyParticipantOverride(_ author: String, lookup: [String: String]) -> String {
         let a = _normSpace(author)
         if a.isEmpty { return author }
+        if isExporterPlaceholderLabel(a) { return exporterPlaceholderToken }
 
         if let v = lookup[a], !v.isEmpty { return v }
 
@@ -4658,12 +4712,15 @@ public enum WhatsAppExportService {
         meName: String,
         chatURL: URL
     ) -> String {
-        let authors = messages.map { $0.author }.filter { !normalizedParticipantLabel($0).isEmpty }
+        let authors = participants(from: messages)
         let uniqAuthors = Array(Set(authors.map { normalizedParticipantLabel($0) }))
-            .filter { !$0.isEmpty && !isSystemAuthor($0) }
+            .filter { !$0.isEmpty && !isSystemAuthor($0) && !isExporterPlaceholderLabel($0) }
             .sorted()
 
-        let meNorm = normalizedParticipantLabel(meName)
+        var meNorm = normalizedParticipantLabel(meName)
+        if isExporterPlaceholderLabel(meNorm) {
+            meNorm = ""
+        }
         let partners = uniqAuthors.filter { normalizedParticipantLabel($0).lowercased() != meNorm.lowercased() }
         let fallback = fallbackChatIdentifier(from: chatURL)
 
@@ -4795,7 +4852,7 @@ public enum WhatsAppExportService {
                     if let i = lastIndex { msgs[i].text += "\n" + line }
                     continue
                 }
-                let author = _normSpace(authorRaw)
+                let author = normalizedAuthorLabel(authorRaw)
                 msgs.append(WAMessage(ts: ts, author: author, text: text))
                 lastIndex = msgs.count - 1
                 continue
@@ -4808,7 +4865,7 @@ public enum WhatsAppExportService {
                     if let i = lastIndex { msgs[i].text += "\n" + line }
                     continue
                 }
-                let author = _normSpace(authorRaw)
+                let author = normalizedAuthorLabel(authorRaw)
                 msgs.append(WAMessage(ts: ts, author: author, text: text))
                 lastIndex = msgs.count - 1
                 continue
@@ -4821,7 +4878,7 @@ public enum WhatsAppExportService {
                     if let i = lastIndex { msgs[i].text += "\n" + line }
                     continue
                 }
-                let author = _normSpace(authorRaw)
+                let author = normalizedAuthorLabel(authorRaw)
                 msgs.append(WAMessage(ts: ts, author: author, text: text))
                 lastIndex = msgs.count - 1
                 continue
@@ -4879,6 +4936,47 @@ public enum WhatsAppExportService {
         return _normSpace(stripped).lowercased()
     }
 
+    nonisolated private static func containsExporterPlaceholder(messages: [WAMessage]) -> Bool {
+        for m in messages {
+            let authorRaw = _normSpace(m.author)
+            if isExporterPlaceholderAuthor(authorRaw) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private struct AuthorDisplay: Sendable {
+        let name: String
+        let isMe: Bool
+        let isPlaceholder: Bool
+    }
+
+    nonisolated private static func resolvedAuthorDisplay(authorRaw: String, meName: String) -> AuthorDisplay {
+        let authorNorm = _normSpace(authorRaw)
+        if isExporterPlaceholderAuthor(authorNorm) {
+            let meNorm = _normSpace(meName)
+            if meNorm.isEmpty || isExporterPlaceholderLabel(meNorm) {
+                return AuthorDisplay(
+                    name: exporterPlaceholderDisplayName,
+                    isMe: true,
+                    isPlaceholder: true
+                )
+            }
+            return AuthorDisplay(
+                name: meNorm,
+                isMe: true,
+                isPlaceholder: true
+            )
+        }
+        if authorNorm.isEmpty {
+            return AuthorDisplay(name: "Unbekannt", isMe: false, isPlaceholder: false)
+        }
+        let meNorm = _normSpace(meName)
+        let isMe = !meNorm.isEmpty && authorNorm.lowercased() == meNorm.lowercased()
+        return AuthorDisplay(name: authorNorm, isMe: isMe, isPlaceholder: false)
+    }
+
     nonisolated private static func containsAny(_ haystack: String, _ needles: [String]) -> Bool {
         for n in needles where haystack.contains(n) { return true }
         return false
@@ -4889,14 +4987,22 @@ public enum WhatsAppExportService {
         var deletedByMe: [String: Int] = [:]
         var groupActionsByMe: [String: Int] = [:]
         var deletedByOther: [String: Int] = [:]
+        var sawExporterPlaceholder = false
 
         for m in messages {
-            let author = normalizedParticipantIdentifier(m.author)
+            let authorRaw = _normSpace(m.author)
+            if isExporterPlaceholderAuthor(authorRaw) {
+                sawExporterPlaceholder = true
+                continue
+            }
+            let textWoAttach = stripAttachmentMarkers(m.text)
+            if isSystemMessage(authorRaw: authorRaw, text: textWoAttach) { continue }
+            let author = normalizedParticipantIdentifier(authorRaw)
             if author.isEmpty { continue }
             if isSystemAuthor(author) { continue }
             candidates.insert(author)
 
-            let text = normalizedSystemText(m.text)
+            let text = normalizedSystemText(textWoAttach)
             if text.isEmpty { continue }
 
             if containsAny(text, meDeletedMarkers) {
@@ -4911,6 +5017,8 @@ public enum WhatsAppExportService {
                 deletedByOther[author, default: 0] += 1
             }
         }
+
+        if sawExporterPlaceholder { return nil }
 
         if deletedByMe.count == 1, let me = deletedByMe.keys.first {
             return me
@@ -4940,6 +5048,9 @@ public enum WhatsAppExportService {
     nonisolated private static func chooseMeName(messages: [WAMessage]) -> String {
         if let guessed = inferMeName(messages: messages) {
             return guessed
+        }
+        if containsExporterPlaceholder(messages: messages) {
+            return exporterPlaceholderToken
         }
 
         var uniq: [String] = []
@@ -6594,6 +6705,11 @@ nonisolated private static func stageThumbnailForExport(
         return extractURLs(trimmed)
     }
 
+    nonisolated static func _messageCountForTesting(_ chatURL: URL) throws -> Int {
+        let msgs = try parseMessages(chatURL.standardizedFileURL)
+        return msgs.count
+    }
+
     // ---------------------------
     // Render HTML (1:1 layout + CSS)
     // ---------------------------
@@ -7099,7 +7215,8 @@ nonisolated private static func stageThumbnailForExport(
             }
 
             let authorRaw = _normSpace(message.author)
-            let author = authorRaw.isEmpty ? "Unbekannt" : authorRaw
+            let authorInfo = resolvedAuthorDisplay(authorRaw: authorRaw, meName: meName)
+            let author = authorInfo.name
 
             let textRaw = message.text
             // Minimal mode (no attachments): only include attachments when we either embed full files
@@ -7118,7 +7235,7 @@ nonisolated private static func stageThumbnailForExport(
                 return chunkParts.joined()
             }
 
-            let isMe = (!isSystemMsg) && (authorRaw.lowercased() == _normSpace(meName).lowercased())
+            let isMe = (!isSystemMsg) && authorInfo.isMe
             let rowCls: String = isSystemMsg ? "system" : (isMe ? "me" : "other")
             let bubCls: String = isSystemMsg ? "system" : (isMe ? "me" : "other")
 
@@ -7704,14 +7821,15 @@ nonisolated private static func stageThumbnailForExport(
             }
 
             let authorRaw = _normSpace(m.author)
-            let author = authorRaw.isEmpty ? "Unbekannt" : authorRaw
+            let authorInfo = resolvedAuthorDisplay(authorRaw: authorRaw, meName: meName)
+            let author = authorInfo.name
 
             let textRaw = m.text
             let attachmentsAll = findAttachments(textRaw)
             let textWoAttach = stripAttachmentMarkers(textRaw)
 
             let isSystemMsg = isSystemMessage(authorRaw: authorRaw, text: textWoAttach)
-            let isMe = (!isSystemMsg) && (authorRaw.lowercased() == _normSpace(meName).lowercased())
+            let isMe = (!isSystemMsg) && authorInfo.isMe
 
             let trimmedText = textWoAttach.trimmingCharacters(in: .whitespacesAndNewlines)
             if isSystemMsg {
@@ -7729,7 +7847,7 @@ nonisolated private static func stageThumbnailForExport(
             if isSystemMsg {
                 out.append("> **System** · \(fmtTime(m.ts)) · \(fmtDateFull(m.ts))")
             } else {
-                let who = isMe ? "\(author) (Ich)" : author
+                let who = (isMe && !authorInfo.isPlaceholder) ? "\(author) (Ich)" : author
                 out.append("**\(who)** · \(fmtTime(m.ts)) · \(fmtDateFull(m.ts))")
             }
 
@@ -8208,7 +8326,7 @@ nonisolated private static func stageThumbnailForExport(
         }
 
         let meLabel = safeFinderFilename(meName)
-        if !meLabel.isEmpty {
+        if !meLabel.isEmpty && !isExporterPlaceholderLabel(meLabel) {
             let meKey = normalizedKey(meLabel)
             if !meKey.isEmpty, !seen.contains(meKey) {
                 _ = seen.insert(meKey)

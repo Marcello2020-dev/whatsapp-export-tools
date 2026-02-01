@@ -956,7 +956,7 @@ struct ContentView: View {
             HStack(spacing: 12) {
                 Text("Exported by:")
                     .frame(width: Layout.labelWidth, alignment: .leading)
-                Text(resolvedExporterName())
+                Text(exporterDisplayName())
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .frame(width: Layout.chatPartnerWidth, alignment: .leading)
@@ -1824,27 +1824,32 @@ struct ContentView: View {
             let partnerHint = partnerHintRaw?.trimmingCharacters(in: .whitespacesAndNewlines)
 
             let detectedMeRaw = detection.exporterSelfCandidate
+            let placeholderSeen = detection.exporterPlaceholderSeen
             var detectedExporter: String? = nil
 
-            if let detectedMeRaw, let match = firstMatchingParticipant(detectedMeRaw, in: parts) {
-                detectedExporter = match
-            }
+            if !placeholderSeen {
+                if let detectedMeRaw, let match = firstMatchingParticipant(detectedMeRaw, in: parts) {
+                    detectedExporter = match
+                }
 
-            if detectedExporter == nil, let partnerHint, parts.count == 2 {
-                if let partnerMatch = firstMatchingParticipant(partnerHint, in: parts) {
-                    detectedExporter = parts.first { normalizedKey($0) != normalizedKey(partnerMatch) }
-                } else {
-                    let phoneCandidates = parts.filter { Self.isPhoneNumberLike($0) }
-                    if phoneCandidates.count == 1 {
-                        detectedExporter = parts.first { normalizedKey($0) != normalizedKey(phoneCandidates[0]) }
+                if detectedExporter == nil, let partnerHint, parts.count == 2 {
+                    if let partnerMatch = firstMatchingParticipant(partnerHint, in: parts) {
+                        detectedExporter = parts.first { normalizedKey($0) != normalizedKey(partnerMatch) }
+                    } else {
+                        let phoneCandidates = parts.filter { Self.isPhoneNumberLike($0) }
+                        if phoneCandidates.count == 1 {
+                            detectedExporter = parts.first { normalizedKey($0) != normalizedKey(phoneCandidates[0]) }
+                        }
                     }
+                }
+
+                if detectedExporter == nil {
+                    detectedExporter = parts.first
                 }
             }
 
-            if detectedExporter == nil {
-                detectedExporter = parts.first
-            }
-            exporterName = detectedExporter?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            exporterName = detectedExporter?.trimmingCharacters(in: .whitespacesAndNewlines)
+                ?? (placeholderSeen ? WhatsAppExportService.exporterPlaceholderToken : "")
 
             // Keep overrides only for phone-number-like participants; preserve existing typed names.
             let phones = parts.filter { Self.isPhoneNumberLike($0) }
@@ -1954,7 +1959,7 @@ struct ContentView: View {
             if chatPartnerSelection != Self.customChatPartnerTag {
                 chatPartnerSelection = fallbackPartner
             }
-            exporterName = "Me"
+            exporterName = WhatsAppExportService.exporterPlaceholderToken
             autoSuggestedPhoneNames = [:]
             appendLog("WARN: Participants could not be determined. \(error)")
         }
@@ -1995,10 +2000,21 @@ struct ContentView: View {
     private func resolvedExporterName() -> String {
         let trimmed = exporterName.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
+            if participantDetection?.exporterPlaceholderSeen == true {
+                return WhatsAppExportService.exporterPlaceholderToken
+            }
             let fallback = detectedParticipants.first ?? "Me"
             return applyPhoneOverrideIfNeeded(fallback)
         }
         return applyPhoneOverrideIfNeeded(trimmed)
+    }
+
+    private func exporterDisplayName() -> String {
+        let resolved = resolvedExporterName()
+        if resolved == WhatsAppExportService.exporterPlaceholderToken {
+            return WhatsAppExportService.exporterPlaceholderDisplayName
+        }
+        return resolved.isEmpty ? "—" : resolved
     }
 
     private func resolvedChatPartnerName() -> String {
