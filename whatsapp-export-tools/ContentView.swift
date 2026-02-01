@@ -390,6 +390,7 @@ struct ContentView: View {
     @State private var detectedDateRange: ClosedRange<Date>? = nil
     @State private var detectedMediaCounts: WAMediaCounts = .zero
     @State private var inputKindBadge: String? = nil
+    @State private var replayModeActive: Bool = false
 
     // Optional overrides for participants that appear only as phone numbers in the WhatsApp export
     // Key = phone-number-like participant string as it appears in the export; Value = user-provided display name
@@ -898,7 +899,7 @@ struct ContentView: View {
             }
         }
         .accessibilityLabel("Delete originals")
-        .disabled(isRunning || !exportSortedAttachments)
+        .disabled(isRunning || !exportSortedAttachments || replayModeActive)
         .onChange(of: deleteOriginalsAfterSidecar) {
             persistExportSettings()
         }
@@ -912,7 +913,7 @@ struct ContentView: View {
             }
         }
         .accessibilityLabel("Copy raw archive")
-        .disabled(isRunning)
+        .disabled(isRunning || replayModeActive)
         .onChange(of: includeRawArchive) {
             persistExportSettings()
         }
@@ -1679,6 +1680,7 @@ struct ContentView: View {
         guard let url else {
             chatURL = nil
             chatURLAccess = nil
+            replayModeActive = false
             if !isRestoringSettings { persistExportSettings() }
             return
         }
@@ -1731,10 +1733,17 @@ struct ContentView: View {
             snapshot = try WhatsAppExportService.resolveInputSnapshot(inputURL: inputURL)
         } catch {
             appendLog("ERROR: \(error.localizedDescription)")
+            replayModeActive = false
             return
         }
         defer {
             cleanupTempWorkspace(snapshot.tempWorkspaceURL, label: "InputPipeline")
+        }
+
+        replayModeActive = snapshot.inputMode.isReplay
+        if replayModeActive {
+            if includeRawArchive { includeRawArchive = false }
+            if deleteOriginalsAfterSidecar { deleteOriginalsAfterSidecar = false }
         }
 
         let chatURL = snapshot.chatURL
@@ -2618,6 +2627,14 @@ struct ContentView: View {
         return targetPath.hasPrefix(rootPrefix)
     }
 
+    nonisolated private static func isPath(_ candidate: URL, under root: URL) -> Bool {
+        let rootPath = root.standardizedFileURL.path
+        let candidatePath = candidate.standardizedFileURL.path
+        if candidatePath == rootPath { return true }
+        let prefix = rootPath.hasSuffix("/") ? rootPath : rootPath + "/"
+        return candidatePath.hasPrefix(prefix)
+    }
+
     private struct SidecarTimestampSnapshot: Sendable {
         let entries: [String: FileTimestamps]
     }
@@ -2942,6 +2959,7 @@ struct ContentView: View {
 
         let resolvedChatURL = snapshot.chatURL
         let provenance = snapshot.provenance
+        let replayMode = snapshot.inputMode
 
         let exporter = resolvedExporterName()
         if exporter.isEmpty {
@@ -2962,8 +2980,8 @@ struct ContentView: View {
 
         let wantsMD = exportMarkdown
         let wantsSidecar = exportSortedAttachments
-        let wantsDeleteOriginals = wantsSidecar && deleteOriginalsAfterSidecar
-        let wantsRawArchiveCopy = wantsRawArchiveCopy(wantsDeleteOriginals: wantsDeleteOriginals)
+        let wantsDeleteOriginals = wantsSidecar && deleteOriginalsAfterSidecar && !replayMode.isReplay
+        let wantsRawArchiveCopy = !replayMode.isReplay && wantsRawArchiveCopy(wantsDeleteOriginals: wantsDeleteOriginals)
 
         let htmlLabel: String = {
             var parts: [String] = []
@@ -3027,6 +3045,21 @@ struct ContentView: View {
         )
         debugLog("PARTNER DIR NAME: \"\(partnerFolderName)\" detected=\"\(detectedPartnerRaw)\" override=\"\(overridePartnerEffective ?? "")\" effective=\"\(partnerForNamingRaw)\"")
         let partnerRoot = outDir.appendingPathComponent(partnerFolderName, isDirectory: true)
+        if replayMode.isReplay, let sourcesRoot = replayMode.sourcesRoot {
+            appendLog("MODE: replay_sources")
+            appendLog("READ ROOT: \(sourcesRoot.path)")
+            appendLog("WRITE ROOT: \(partnerRoot.path)")
+            appendLog("Raw-Archive-Copy disabled (replay mode)")
+            appendLog("Delete Originals disabled (replay mode)")
+
+            if Self.isPath(outDir, under: sourcesRoot) || Self.isPath(partnerRoot, under: sourcesRoot) {
+                let msg = "Output folder is inside Sources. Choose a different output location."
+                appendLog("ERROR: \(msg)")
+                markRunFailure(summary: msg, artifact: "Validation")
+                isRunning = false
+                return
+            }
+        }
 
         let isOverwriteRetry = overwriteConfirmed
         let shouldReusePrepared = reusePrepared || isOverwriteRetry

@@ -19,6 +19,7 @@ struct whatsapp_export_toolsApp: App {
             WETReplaceSelectionCheck.runIfNeeded()
             WETExternalAssetsCheck.runIfNeeded()
             WETDeterminismCheck.runIfNeeded()
+            WETReplayGuardrailsCheck.runIfNeeded()
             AIGlowSnapshotRunner.runIfNeeded()
         }
     }
@@ -56,6 +57,11 @@ struct whatsapp_export_toolsApp: App {
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                         .padding()
+                } else if WETReplayGuardrailsCheck.isEnabled {
+                    Text("Running WET replay guardrails check…")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .padding()
                 } else if AIGlowSnapshotRunner.isEnabled {
                     AIGlowSnapshotView(isRunning: false)
                 } else {
@@ -70,6 +76,7 @@ struct whatsapp_export_toolsApp: App {
                 WETReplaceSelectionCheck.runIfNeeded()
                 WETExternalAssetsCheck.runIfNeeded()
                 WETDeterminismCheck.runIfNeeded()
+                WETReplayGuardrailsCheck.runIfNeeded()
                 AIGlowSnapshotRunner.runIfNeeded()
             }
         }

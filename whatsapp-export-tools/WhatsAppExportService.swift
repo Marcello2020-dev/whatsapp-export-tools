@@ -318,11 +318,32 @@ public struct WAInputSnapshot: Sendable {
     public let exportDir: URL
     public let tempWorkspaceURL: URL?
     public let provenance: WETSourceProvenance
+    public let inputMode: WETInputMode
 }
 
 public enum WETInputKind: Sendable {
     case folder
     case zip
+}
+
+public enum WETInputMode: Sendable {
+    case normal
+    case replayFromSources(sourcesRoot: URL, outputRoot: URL)
+
+    public var isReplay: Bool {
+        if case .replayFromSources = self { return true }
+        return false
+    }
+
+    public var sourcesRoot: URL? {
+        if case .replayFromSources(let sourcesRoot, _) = self { return sourcesRoot }
+        return nil
+    }
+
+    public var outputRoot: URL? {
+        if case .replayFromSources(_, let outputRoot) = self { return outputRoot }
+        return nil
+    }
 }
 
 public struct WETSourceProvenance: Sendable {
@@ -339,6 +360,7 @@ public enum WAInputError: Error, LocalizedError {
     case ambiguousTranscript(urls: [URL])
     case zipExtractionFailed(url: URL, reason: String)
     case tempWorkspaceCreateFailed(url: URL, underlying: Error)
+    case replaySourcesRequired(url: URL)
 
     public var errorDescription: String? {
         switch self {
@@ -352,6 +374,8 @@ public enum WAInputError: Error, LocalizedError {
             return "ZIP extraction failed for \(url.lastPathComponent): \(reason)"
         case .tempWorkspaceCreateFailed(let url, let underlying):
             return "Could not create temp workspace \(url.lastPathComponent): \(underlying.localizedDescription)"
+        case .replaySourcesRequired(let url):
+            return "Input looks like a WET export output. Select its Sources folder to replay safely. (\(url.lastPathComponent))"
         }
     }
 }
@@ -1559,6 +1583,115 @@ public enum WhatsAppExportService {
     // Public API
     // ---------------------------
 
+    private struct WETOutputFingerprint: Sendable {
+        let root: URL
+        let hasSources: Bool
+        let hasLegacyRaw: Bool
+        let hasArtifacts: Bool
+    }
+
+    nonisolated private static func wetOutputFingerprint(for dir: URL) -> WETOutputFingerprint {
+        let fm = FileManager.default
+        guard let entries = try? fm.contentsOfDirectory(
+            at: dir,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return WETOutputFingerprint(root: dir, hasSources: false, hasLegacyRaw: false, hasArtifacts: false)
+        }
+
+        let htmlSuffixes = [
+            "-\(WETOutputNaming.sidecarToken).html",
+            "-\(WETOutputNaming.maxHTMLToken).html",
+            "-\(WETOutputNaming.midHTMLToken).html",
+            "-\(WETOutputNaming.mailHTMLToken).html",
+            "-sdc.html",
+            "-max.html",
+            "-mid.html",
+            "-min.html"
+        ]
+
+        var hasSources = false
+        var hasLegacyRaw = false
+        var hasArtifacts = false
+
+        for entry in entries {
+            let name = entry.lastPathComponent
+            let isDir = (try? entry.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+
+            if isDir && name == WETOutputNaming.sourcesFolderName { hasSources = true }
+            if isDir && name == WETOutputNaming.legacyRawFolderName { hasLegacyRaw = true }
+
+            if name.hasSuffix(".manifest.json") || name.hasSuffix(".sha256") {
+                hasArtifacts = true
+            }
+            if htmlSuffixes.contains(where: { name.hasSuffix($0) }) {
+                hasArtifacts = true
+            }
+            if isDir && name.hasSuffix("-\(WETOutputNaming.sidecarToken)") {
+                hasArtifacts = true
+            }
+        }
+
+        return WETOutputFingerprint(root: dir, hasSources: hasSources, hasLegacyRaw: hasLegacyRaw, hasArtifacts: hasArtifacts)
+    }
+
+    nonisolated private static func nearestWETOutputRootCandidate(
+        for url: URL,
+        maxDepth: Int
+    ) -> WETOutputFingerprint? {
+        guard maxDepth > 0 else { return nil }
+        var current = url.standardizedFileURL
+        var depth = 0
+        while depth < maxDepth {
+            let fingerprint = wetOutputFingerprint(for: current)
+            if fingerprint.hasArtifacts { return fingerprint }
+            let parent = current.deletingLastPathComponent()
+            if parent.path == current.path { break }
+            current = parent
+            depth += 1
+        }
+        return nil
+    }
+
+    nonisolated private static func isPath(_ candidate: URL, under root: URL) -> Bool {
+        let rootPath = root.standardizedFileURL.path
+        let candidatePath = candidate.standardizedFileURL.path
+        if candidatePath == rootPath { return true }
+        let prefix = rootPath.hasSuffix("/") ? rootPath : rootPath + "/"
+        return candidatePath.hasPrefix(prefix)
+    }
+
+    nonisolated private static func resolveReplayContext(
+        for input: URL,
+        isDirectory: Bool
+    ) throws -> (mode: WETInputMode, effectiveRoot: URL?)? {
+        let standardized = input.standardizedFileURL
+        let scanRoot = isDirectory ? standardized : standardized.deletingLastPathComponent()
+        let maxDepth = 6
+        guard let candidate = nearestWETOutputRootCandidate(for: scanRoot, maxDepth: maxDepth) else { return nil }
+
+        let sourcesRoot = candidate.root.appendingPathComponent(WETOutputNaming.sourcesFolderName, isDirectory: true)
+        let mode = WETInputMode.replayFromSources(sourcesRoot: sourcesRoot, outputRoot: candidate.root)
+
+        if candidate.hasSources {
+            if isPath(standardized, under: sourcesRoot) {
+                let effectiveRoot = isDirectory ? standardized : nil
+                return (mode: mode, effectiveRoot: effectiveRoot)
+            }
+            if isDirectory && standardized.path == candidate.root.standardizedFileURL.path {
+                return (mode: mode, effectiveRoot: sourcesRoot)
+            }
+            throw WAInputError.replaySourcesRequired(url: standardized)
+        }
+
+        if candidate.hasLegacyRaw || candidate.hasArtifacts {
+            throw WAInputError.replaySourcesRequired(url: standardized)
+        }
+
+        return nil
+    }
+
     /// Resolve a user-selected input (folder, ZIP, or Chat.txt) into a transcript URL.
     public static func resolveInputSnapshot(
         inputURL: URL,
@@ -1570,7 +1703,9 @@ public enum WhatsAppExportService {
         let detectedRaw = detectedPartnerRaw ?? ""
         let values = try input.resourceValues(forKeys: [.isDirectoryKey])
         if values.isDirectory == true {
-            let (chatURL, exportDir) = try resolveTranscript(in: input)
+            let replayContext = try resolveReplayContext(for: input, isDirectory: true)
+            let effectiveRoot = replayContext?.effectiveRoot ?? input
+            let (chatURL, exportDir) = try resolveTranscript(in: effectiveRoot)
             let provenance = WETSourceProvenance(
                 inputKind: .folder,
                 detectedFolderURL: exportDir,
@@ -1583,11 +1718,13 @@ public enum WhatsAppExportService {
                 chatURL: chatURL,
                 exportDir: exportDir,
                 tempWorkspaceURL: nil,
-                provenance: provenance
+                provenance: provenance,
+                inputMode: replayContext?.mode ?? .normal
             )
         }
 
         if input.pathExtension.lowercased() == "zip" {
+            let replayContext = try resolveReplayContext(for: input, isDirectory: false)
             let workspace = deterministicInputWorkspace(for: input)
             do {
                 try recreateDirectory(workspace)
@@ -1615,7 +1752,8 @@ public enum WhatsAppExportService {
                     chatURL: chatURL,
                     exportDir: exportDir,
                     tempWorkspaceURL: workspace,
-                    provenance: provenance
+                    provenance: provenance,
+                    inputMode: replayContext?.mode ?? .normal
                 )
             } catch let error as WAInputError {
                 try? fm.removeItem(at: workspace)
@@ -1628,6 +1766,7 @@ public enum WhatsAppExportService {
 
         let lowerName = input.lastPathComponent.lowercased()
         if lowerName == "chat.txt" || lowerName == "_chat.txt" {
+            let replayContext = try resolveReplayContext(for: input, isDirectory: false)
             let exportDir = input.deletingLastPathComponent()
             let provenance = WETSourceProvenance(
                 inputKind: .folder,
@@ -1641,7 +1780,8 @@ public enum WhatsAppExportService {
                 chatURL: input,
                 exportDir: exportDir,
                 tempWorkspaceURL: nil,
-                provenance: provenance
+                provenance: provenance,
+                inputMode: replayContext?.mode ?? .normal
             )
         }
 
