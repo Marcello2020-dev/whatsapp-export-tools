@@ -1155,12 +1155,6 @@ struct ContentView: View {
                 .buttonStyle(.bordered)
             }
 
-            if runStatus == .completed, let sidecarURL = lastSidecarHTML {
-                Button("Open Sidecar HTML") {
-                    NSWorkspace.shared.open(sidecarURL)
-                }
-                .buttonStyle(.bordered)
-            }
         }
     }
 
@@ -1684,7 +1678,6 @@ struct ContentView: View {
 
         if panel.runModal() == .OK, let url = panel.url {
             setChatURL(url)
-            refreshParticipants(for: url)
         }
     }
 
@@ -1707,17 +1700,26 @@ struct ContentView: View {
     }
 
     private func setChatURL(_ url: URL?) {
+        let previousPath = chatURL?.standardizedFileURL.path
         chatURLAccess?.stopAccessing()
         guard let url else {
             chatURL = nil
             chatURLAccess = nil
             replayModeActive = false
             if !isRestoringSettings { persistExportSettings() }
+            Task { @MainActor in
+                if previousPath != nil {
+                    resetPartnerStateForNewSource()
+                }
+                self.resetRunStateIfIdle()
+            }
             return
         }
+        var resolvedURL: URL? = nil
         if let scoped = SecurityScopedURL(url: url) {
             chatURLAccess = scoped
-            chatURL = scoped.resourceURL
+            resolvedURL = scoped.resourceURL
+            chatURL = resolvedURL
         } else {
             appendLog("WARN: Security-scoped access to the chat export could not be enabled.")
             chatURL = nil
@@ -1728,6 +1730,14 @@ struct ContentView: View {
         }
         Task { @MainActor in
             self.resetRunStateIfIdle()
+            let currentURL = resolvedURL ?? chatURL
+            let currentPath = currentURL?.standardizedFileURL.path
+            if currentPath != previousPath {
+                resetPartnerStateForNewSource()
+                if let currentURL {
+                    refreshParticipants(for: currentURL)
+                }
+            }
         }
     }
 
@@ -1948,6 +1958,26 @@ struct ContentView: View {
             autoSuggestedPhoneNames = [:]
             appendLog("WARN: Participants could not be determined. \(error)")
         }
+    }
+
+    @MainActor
+    private func resetPartnerStateForNewSource() {
+        if debugLoggingEnabled {
+            appendLog("DEBUG: Reset chat partner state for new source.")
+        }
+        chatPartnerCustomName = ""
+        chatPartnerSelection = ""
+        chatPartnerCandidates = []
+        autoDetectedChatPartnerName = nil
+        detectedParticipants = []
+        participantDetection = nil
+        detectedChatTitle = nil
+        detectedDateRange = nil
+        detectedMediaCounts = .zero
+        inputKindBadge = nil
+        exporterName = ""
+        phoneParticipantOverrides = [:]
+        autoSuggestedPhoneNames = [:]
     }
 
     @MainActor
