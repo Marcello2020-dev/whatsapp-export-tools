@@ -557,6 +557,8 @@ enum SourceOps {
         let rawArchiveDir: URL
         let copiedExportDir: URL
         let copiedZip: URL?
+        let copiedFileCount: Int
+        let copiedDirCount: Int
     }
 
     struct DeleteResult: Sendable {
@@ -571,6 +573,7 @@ enum SourceOps {
     nonisolated static func copyRawArchive(
         baseName: String,
         exportDir: URL,
+        outputRoot: URL,
         provenance: WETSourceProvenance,
         allowOverwrite: Bool,
         debugEnabled: Bool,
@@ -597,7 +600,21 @@ enum SourceOps {
         try fm.createDirectory(at: stagedRawRoot, withIntermediateDirectories: true)
 
         let stagedExportDir = stagedRawRoot.appendingPathComponent(sourceDir.lastPathComponent, isDirectory: true)
-        try fm.copyItem(at: sourceDir, to: stagedExportDir)
+        let skipPrefixes: [String] = [
+            outputRoot.standardizedFileURL.path,
+            exportDir.standardizedFileURL.path,
+            sourceDir.standardizedFileURL.appendingPathComponent(WETOutputNaming.sourcesFolderName, isDirectory: true).path,
+            stagingBase.standardizedFileURL.path,
+            stagingDir.standardizedFileURL.path
+        ]
+        if debugEnabled {
+            debugLog?("RAW ARCHIVE SKIP PREFIXES: \(skipPrefixes)")
+        }
+        try WhatsAppExportService.copyDirectoryPreservingStructure(
+            from: sourceDir,
+            to: stagedExportDir,
+            skippingPathPrefixes: skipPrefixes
+        )
 
         var stagedZip: URL? = nil
         if let originalZip = provenance.originalZipURL, fm.fileExists(atPath: originalZip.path) {
@@ -627,11 +644,36 @@ enum SourceOps {
 
         let finalExportDir = finalRawArchiveDir.appendingPathComponent(sourceDir.lastPathComponent, isDirectory: true)
         let finalZip = stagedZip.map { finalRawArchiveDir.appendingPathComponent($0.lastPathComponent) }
+        let counts = countEntries(in: finalExportDir)
         return RawArchiveCopyResult(
             rawArchiveDir: finalRawArchiveDir,
             copiedExportDir: finalExportDir,
-            copiedZip: finalZip
+            copiedZip: finalZip,
+            copiedFileCount: counts.files,
+            copiedDirCount: counts.dirs
         )
+    }
+
+    nonisolated private static func countEntries(in root: URL) -> (files: Int, dirs: Int) {
+        let fm = FileManager.default
+        let base = root.standardizedFileURL
+        guard fm.fileExists(atPath: base.path) else { return (0, 0) }
+        guard let en = fm.enumerator(
+            at: base,
+            includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else {
+            return (0, 0)
+        }
+
+        var files = 0
+        var dirs = 0
+        for case let url as URL in en {
+            let rv = try? url.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey])
+            if rv?.isDirectory == true { dirs += 1 }
+            if rv?.isRegularFile == true { files += 1 }
+        }
+        return (files, dirs)
     }
 
     nonisolated static func verifyRawArchive(
@@ -8801,7 +8843,7 @@ nonisolated private static func stageThumbnailForExport(
         return mismatches
     }
 
-    nonisolated private static func copyDirectoryPreservingStructure(
+    nonisolated static func copyDirectoryPreservingStructure(
         from sourceDir: URL,
         to destDir: URL,
         skippingPathPrefixes: [String]

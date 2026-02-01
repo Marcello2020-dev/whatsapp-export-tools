@@ -21,6 +21,7 @@ struct whatsapp_export_toolsApp: App {
             WETDeterminismCheck.runIfNeeded()
             WETReplayGuardrailsCheck.runIfNeeded()
             WETOutputStructureDedupCheck.runIfNeeded()
+            WETDeleteOriginalsGateCheck.runIfNeeded()
             AIGlowSnapshotRunner.runIfNeeded()
         }
     }
@@ -68,6 +69,11 @@ struct whatsapp_export_toolsApp: App {
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                         .padding()
+                } else if WETDeleteOriginalsGateCheck.isEnabled {
+                    Text("Running WET delete-originals gate check…")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .padding()
                 } else if AIGlowSnapshotRunner.isEnabled {
                     AIGlowSnapshotView(isRunning: false)
                 } else {
@@ -84,6 +90,7 @@ struct whatsapp_export_toolsApp: App {
                 WETDeterminismCheck.runIfNeeded()
                 WETReplayGuardrailsCheck.runIfNeeded()
                 WETOutputStructureDedupCheck.runIfNeeded()
+                WETDeleteOriginalsGateCheck.runIfNeeded()
                 AIGlowSnapshotRunner.runIfNeeded()
             }
         }

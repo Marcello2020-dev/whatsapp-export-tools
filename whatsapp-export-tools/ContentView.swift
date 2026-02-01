@@ -111,6 +111,10 @@ struct ContentView: View {
 
         nonisolated var runSteps: [RunStep] {
             var steps: [RunStep] = []
+            if wantsRawArchiveCopy {
+                // Raw archive copy happens before artifacts and is independent of Sidecar.
+                steps.append(.rawArchive)
+            }
             if wantsSidecar {
                 steps.append(.sidecar)
             }
@@ -119,10 +123,6 @@ struct ContentView: View {
             }
             if wantsMD {
                 steps.append(.markdown)
-            }
-            if wantsRawArchiveCopy {
-                // Raw archive copy happens after artifacts and before checksums/deletion.
-                steps.append(.rawArchive)
             }
             return steps
         }
@@ -188,6 +188,14 @@ struct ContentView: View {
 
         var errorDescription: String? {
             "Could not delete existing output: \(url.lastPathComponent)"
+        }
+    }
+
+    private struct DeleteOriginalsGuardError: LocalizedError, Sendable {
+        let message: String
+
+        var errorDescription: String? {
+            message
         }
     }
 
@@ -567,8 +575,7 @@ struct ContentView: View {
                         exportHTMLMin ? .textOnly : nil
                     ].compactMap { $0 }
                     let wantsSidecar = exportSortedAttachments
-                    let wantsDeleteOriginals = wantsSidecar && deleteOriginalsAfterSidecar
-                    let wantsRawArchiveCopy = wantsRawArchiveCopy(wantsDeleteOriginals: wantsDeleteOriginals)
+                    let wantsRawArchiveCopy = wantsRawArchiveCopy()
                     guard let candidate = Self.deterministicKeepBothBaseName(
                         baseName: replaceBaseName,
                         variants: variants,
@@ -904,16 +911,26 @@ struct ContentView: View {
     }
 
     private var deleteOriginalsToggle: some View {
-        Toggle(isOn: $deleteOriginalsAfterSidecar) {
-            HStack(spacing: 6) {
-                Text("Delete originals after Sidecar (optional, after verification)")
-                helpIcon("Compares raw archive and originals. Delete only after verified match.")
+        let copySourcesEnabled = wantsRawArchiveCopy()
+        let disabled = isRunning || replayModeActive || !copySourcesEnabled
+        return VStack(alignment: .leading, spacing: 4) {
+            Toggle(isOn: $deleteOriginalsAfterSidecar) {
+                HStack(spacing: 6) {
+                    Text("Delete originals after Sidecar (optional, after verification)")
+                    helpIcon("Compares raw archive and originals. Delete only after verified match.")
+                }
             }
-        }
-        .accessibilityLabel("Delete originals")
-        .disabled(isRunning || !exportSortedAttachments || replayModeActive)
-        .onChange(of: deleteOriginalsAfterSidecar) {
-            persistExportSettings()
+            .accessibilityLabel("Delete originals")
+            .disabled(disabled)
+            .onChange(of: deleteOriginalsAfterSidecar) {
+                persistExportSettings()
+            }
+
+            if !copySourcesEnabled {
+                Text("Löschen der Quelldaten ist nur möglich, wenn zuvor die Rohdaten (Sources) kopiert wurden.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -927,6 +944,9 @@ struct ContentView: View {
         .accessibilityLabel("Copy raw archive")
         .disabled(isRunning || replayModeActive)
         .onChange(of: includeRawArchive) {
+            if !includeRawArchive {
+                deleteOriginalsAfterSidecar = false
+            }
             persistExportSettings()
         }
     }
@@ -1271,8 +1291,7 @@ struct ContentView: View {
     }
 
     private var previewRunPlan: RunPlan {
-        let wantsDeleteOriginals = exportSortedAttachments && deleteOriginalsAfterSidecar
-        let wantsRawArchiveCopy = wantsRawArchiveCopy(wantsDeleteOriginals: wantsDeleteOriginals)
+        let wantsRawArchiveCopy = wantsRawArchiveCopy()
         return RunPlan(
             variants: selectedVariantsInUI,
             wantsMD: exportMarkdown,
@@ -2834,10 +2853,16 @@ struct ContentView: View {
         return offenders.sorted()
     }
 
-    private func wantsRawArchiveCopy(wantsDeleteOriginals: Bool) -> Bool {
+    private func wantsRawArchiveCopy() -> Bool {
         let env = ProcessInfo.processInfo.environment
-        let wantsRawArchiveExplicit = includeRawArchive || env["WET_INCLUDE_RAW_ARCHIVE"] == "1"
-        return wantsRawArchiveExplicit || wantsDeleteOriginals
+        return includeRawArchive || env["WET_INCLUDE_RAW_ARCHIVE"] == "1"
+    }
+
+    nonisolated static func validateDeleteOriginals(copySourcesEnabled: Bool, deleteOriginalsEnabled: Bool) -> String? {
+        if deleteOriginalsEnabled && !copySourcesEnabled {
+            return "Löschen der Quelldaten ist nur möglich, wenn zuvor die Rohdaten (Sources) kopiert wurden."
+        }
+        return nil
     }
 
     private var selectedVariantsInUI: [HTMLVariant] {
@@ -2993,8 +3018,18 @@ struct ContentView: View {
 
         let wantsMD = exportMarkdown
         let wantsSidecar = exportSortedAttachments
-        let wantsDeleteOriginals = wantsSidecar && deleteOriginalsAfterSidecar && !replayMode.isReplay
-        let wantsRawArchiveCopy = !replayMode.isReplay && wantsRawArchiveCopy(wantsDeleteOriginals: wantsDeleteOriginals)
+        let wantsRawArchiveExplicit = wantsRawArchiveCopy()
+        if let message = Self.validateDeleteOriginals(
+            copySourcesEnabled: wantsRawArchiveExplicit,
+            deleteOriginalsEnabled: deleteOriginalsAfterSidecar
+        ) {
+            appendLog("ERROR: \(message)")
+            markRunFailure(summary: message, artifact: "Validation")
+            isRunning = false
+            return
+        }
+        let wantsDeleteOriginals = deleteOriginalsAfterSidecar && !replayMode.isReplay
+        let wantsRawArchiveCopy = !replayMode.isReplay && wantsRawArchiveExplicit
 
         let htmlLabel: String = {
             var parts: [String] = []
@@ -3188,6 +3223,15 @@ struct ContentView: View {
         let runContext = contextWithExportDir(context, exportDir: runRoot)
         targetFolderLabel = TargetFolderLabel(partner: runContext.partnerFolderName, baseName: baseName)
 
+        let inputRoot = runContext.provenance.detectedFolderURL.standardizedFileURL
+        let outputRoot = runContext.exportDir.standardizedFileURL
+        if Self.isPath(inputRoot, under: outputRoot) {
+            let msg = "Input folder cannot be inside the output folder."
+            logger.log("ERROR: \(msg)")
+            markRunFailure(summary: msg, artifact: "Validation")
+            return
+        }
+
         if let detection = context.participantDetection {
             let winner = detection.evidence.first(where: { $0.source == "decision:winner" })?.excerpt ?? "n/a"
             let rejectSummary = detection.evidence
@@ -3265,6 +3309,26 @@ struct ContentView: View {
             }
 
             currentRunStep = nil
+            if runContext.wantsRawArchiveCopy {
+                let rawStep = RunStep.rawArchive
+                markStepState(rawStep, state: .running)
+                logger.log("Start \(rawStep.label)")
+                let rawStart = ProcessInfo.processInfo.systemUptime
+                let rawResult = try await Task.detached(priority: .utility) {
+                    try SourceOps.copyRawArchive(
+                        baseName: baseName,
+                        exportDir: runContext.exportDir,
+                        outputRoot: runContext.outDir,
+                        provenance: runContext.provenance,
+                        allowOverwrite: runContext.allowOverwrite,
+                        debugEnabled: debugEnabled,
+                        debugLog: debugLog
+                    )
+                }.value
+                let rawDuration = ProcessInfo.processInfo.systemUptime - rawStart
+                logger.log("Sources kopiert: files=\(rawResult.copiedFileCount) dirs=\(rawResult.copiedDirCount) (\(Self.formatDuration(rawDuration)))")
+                markStepState(rawStep, state: .done, reportedDuration: rawDuration)
+            }
             let onStepStart: @Sendable (RunStep) -> Void = { step in
                 Task { @MainActor in
                     self.markStepState(step, state: .running)
@@ -3300,26 +3364,6 @@ struct ContentView: View {
                 htmls: workResult.htmls,
                 md: workResult.md
             )
-
-            if runContext.wantsRawArchiveCopy {
-                let rawStep = RunStep.rawArchive
-                markStepState(rawStep, state: .running)
-                logger.log("Start \(rawStep.label)")
-                let rawStart = ProcessInfo.processInfo.systemUptime
-                _ = try await Task.detached(priority: .utility) {
-                    try SourceOps.copyRawArchive(
-                        baseName: baseName,
-                        exportDir: workResult.exportDir,
-                        provenance: runContext.provenance,
-                        allowOverwrite: runContext.allowOverwrite,
-                        debugEnabled: debugEnabled,
-                        debugLog: debugLog
-                    )
-                }.value
-                let rawDuration = ProcessInfo.processInfo.systemUptime - rawStart
-                logger.log("Done \(rawStep.label) (\(Self.formatDuration(rawDuration)))")
-                markStepState(rawStep, state: .done, reportedDuration: rawDuration)
-            }
 
             do {
                 let checksumStart = ProcessInfo.processInfo.systemUptime
@@ -3477,6 +3521,12 @@ struct ContentView: View {
 
         var existing: [URL] = []
         let exportDir = context.exportDir.standardizedFileURL
+        if let message = validateDeleteOriginals(
+            copySourcesEnabled: context.wantsRawArchiveCopy,
+            deleteOriginalsEnabled: context.wantsDeleteOriginals
+        ) {
+            throw DeleteOriginalsGuardError(message: message)
+        }
 
         let existingNames: Set<String> = (try? fm.contentsOfDirectory(
             at: exportDir,
