@@ -18,6 +18,7 @@ struct WETExporterPlaceholderCheck {
         let chatURL = fixturesRoot.appendingPathComponent("wet-exporter-placeholder/_chat.txt")
         let weakPartnerChatURL = fixturesRoot.appendingPathComponent("wet-weak-partner/000000/Chat.txt")
         let twoPartyChatURL = fixturesRoot.appendingPathComponent("wet-two-party/000000/Chat.txt")
+        let groupChatURL = fixturesRoot.appendingPathComponent("wet-group-chat/_chat.txt")
 
         var failures: [String] = []
         func expect(_ condition: Bool, _ label: String) {
@@ -47,11 +48,10 @@ struct WETExporterPlaceholderCheck {
 
             let fallback = ContentView.resolveExporterFallback(
                 detected: detection.detection.exporterSelfCandidate,
-                confidence: detection.detection.exporterConfidence,
-                persisted: "Person A"
+                confidence: detection.detection.exporterConfidence
             )
-            expect(fallback.name == "Person A", "fallback exporter uses persisted name")
-            expect(fallback.confidence == .weak, "fallback exporter confidence is weak")
+            expect(fallback.name == "Ich", "fallback exporter uses Ich")
+            expect(fallback.confidence == .none, "fallback exporter confidence is none")
             expect(fallback.assumed, "fallback exporter marked assumed")
 
             let messageCount = try WhatsAppExportService._messageCountForTesting(chatURL)
@@ -121,6 +121,43 @@ struct WETExporterPlaceholderCheck {
             )
             expect(!resolvedTwoParty.exporter.isEmpty, "resolved exporter from partner hint")
             expect(resolvedTwoParty.partners.count == 1, "resolved partner count 1")
+
+            let groupSnapshot = try WhatsAppExportService.resolveInputSnapshot(inputURL: groupChatURL)
+            let groupDetection = try WhatsAppExportService.participantDetectionSnapshot(
+                chatURL: groupSnapshot.chatURL,
+                provenance: groupSnapshot.provenance,
+                preferredMeName: "Person A"
+            )
+            expect(groupDetection.detection.chatKind == .group, "group chat detected")
+            expect(groupDetection.detection.meta.groupTitle == "Group Chat", "group title parsed")
+            expect(!groupDetection.participants.contains("Group Chat"), "group title excluded from participants")
+            expect(groupDetection.participants.contains("Person A"), "group participants include Person A")
+            expect(groupDetection.participants.contains("Person B"), "group participants include Person B")
+            expect(groupDetection.participants.contains("Person C"), "group participants include Person C")
+
+            let groupPrepared = try WhatsAppExportService.prepareExport(
+                chatURL: groupSnapshot.chatURL,
+                meNameOverride: "Person A"
+            )
+            let groupTemp = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "wet-group-check-\(UUID().uuidString)",
+                isDirectory: true
+            )
+            try FileManager.default.createDirectory(at: groupTemp, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: groupTemp) }
+
+            let groupPartners = groupDetection.participants.filter {
+                $0.lowercased() != "person a".lowercased()
+            }
+            let mdURL = try WhatsAppExportService.renderMarkdown(
+                prepared: groupPrepared,
+                outDir: groupTemp,
+                partnerNamesOverride: groupPartners,
+                allowPlaceholderAsMe: true
+            )
+            let mdText = try String(contentsOf: mdURL, encoding: .utf8)
+            expect(mdText.contains("**Person A (Ich)**"), "override marks outgoing in markdown")
+            expect(mdText.contains("**Person B**"), "partner line present in markdown")
 
             let fm = FileManager.default
             let tempRoot = fm.temporaryDirectory.appendingPathComponent("wet-resolution-check-\(UUID().uuidString)", isDirectory: true)

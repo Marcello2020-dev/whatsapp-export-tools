@@ -276,6 +276,12 @@ public enum WAParticipantDetectionConfidence: String, Sendable {
     case high
     case medium
     case low
+    case unknown
+}
+
+public struct ConversationMeta: Sendable {
+    public let kind: WAParticipantChatKind
+    public let groupTitle: String?
 }
 
 public enum WETParticipantConfidence: String, Sendable {
@@ -290,6 +296,7 @@ public struct WAParticipantDetectionEvidence: Sendable {
 }
 
 public struct WAParticipantDetectionResult: Sendable {
+    public let meta: ConversationMeta
     public let chatKind: WAParticipantChatKind
     public let chatTitleCandidate: String?
     public let otherPartyCandidate: String?
@@ -298,6 +305,7 @@ public struct WAParticipantDetectionResult: Sendable {
     public let exporterConfidence: WETParticipantConfidence
     public let partnerConfidence: WETParticipantConfidence
     public let confidence: WAParticipantDetectionConfidence
+    public let needsConfirmation: Bool
     public let evidence: [WAParticipantDetectionEvidence]
 }
 
@@ -1887,19 +1895,27 @@ public enum WhatsAppExportService {
     /// Best-effort participant detection snapshot (participants + evidence + summary data).
     public static func participantDetectionSnapshot(
         chatURL: URL,
-        provenance: WETSourceProvenance
+        provenance: WETSourceProvenance,
+        preferredMeName: String? = nil
     ) throws -> WAParticipantDetectionSnapshot {
         let chatPath = chatURL.standardizedFileURL
         let lines = try loadChatLines(chatPath)
         let msgs = parseMessages(lines)
         let exporterPlaceholderSeen = containsExporterPlaceholder(messages: msgs)
 
-        let participantsRaw = participants(from: msgs)
+        let groupTitleRaw = groupTitleFromE2EHeader(lines: lines)
+        var participantsRaw = participants(from: msgs)
+        if let groupTitleRaw {
+            let groupKey = normalizedKey(normalizedParticipantIdentifier(groupTitleRaw))
+            if !groupKey.isEmpty {
+                participantsRaw.removeAll { normalizedKey(normalizedParticipantIdentifier($0)) == groupKey }
+            }
+        }
         let participants = participantsRaw.map { safeFinderFilename($0) }
         let dateRange = messageDateRange(messages: msgs)
         let mediaCounts = messageMediaCounts(messages: msgs)
 
-        let headerCandidateRaw = headerTitleCandidate(lines: lines)
+        let headerCandidateRaw = groupTitleRaw ?? headerTitleCandidate(lines: lines)
         let headerCandidate = headerCandidateRaw.map { safeFinderFilename($0) }
 
         let containerRaw = containerNameCandidates(provenance: provenance)
@@ -1951,7 +1967,7 @@ public enum WhatsAppExportService {
         }
 
         let selfEvidence = inferMeNameEvidence(messages: msgs)
-        let exporterSelfCandidate: String? = {
+        let exporterSelfCandidateFromEvidence: String? = {
             guard let raw = selfEvidence?.name else { return nil }
             if let match = participantByKey[participantKey(raw)] {
                 return match
@@ -1961,8 +1977,8 @@ public enum WhatsAppExportService {
 
         let otherEvidence = inferOtherPartyNameEvidence(messages: msgs)
 
-        let selfKey = exporterSelfCandidate.map { participantKey($0) } ?? ""
-        let selfLooseKey = exporterSelfCandidate.map { normalizedPersonKey($0) } ?? ""
+        let selfKey = exporterSelfCandidateFromEvidence.map { participantKey($0) } ?? ""
+        let selfLooseKey = exporterSelfCandidateFromEvidence.map { normalizedPersonKey($0) } ?? ""
         let hasSelf = !selfKey.isEmpty
         let isSelfCandidate: (String) -> Bool = { candidate in
             guard hasSelf else { return false }
@@ -2009,7 +2025,10 @@ public enum WhatsAppExportService {
             }
         }
 
-        let groupSignal = participantsRaw.count > 2 || selfEvidence?.tag == "me_group_action_marker"
+        let groupTitleCandidate = groupTitleRaw.map { safeFinderFilename($0) }
+        let groupSignal = groupTitleCandidate != nil
+            || participantsRaw.count > 2
+            || selfEvidence?.tag == "me_group_action_marker"
         let chatKind: WAParticipantChatKind = {
             if groupSignal { return .group }
             if otherPartyCandidate != nil { return .oneToOne }
@@ -2020,6 +2039,7 @@ public enum WhatsAppExportService {
         var chatTitleCandidate: String? = nil
         var chatTitleSource: String? = nil
         let titleOptions: [(candidate: String?, source: String)] = [
+            (groupTitleCandidate, "header:e2ee"),
             (headerCandidate, "header"),
             (topLevelContainerCandidate, "container:top-level"),
             (selectedContainerCandidate, "container:selected"),
@@ -2057,18 +2077,69 @@ public enum WhatsAppExportService {
             }
         }
 
-        var confidence: WAParticipantDetectionConfidence = .low
+        var exporterSelfCandidate = exporterSelfCandidateFromEvidence
+        var exporterConfidence: WETParticipantConfidence = .none
+        var meCandidateConfidence: WAParticipantDetectionConfidence = .low
+        var meCandidateReasons: [String] = []
+
+        if chatKind == .group {
+            let groupCandidate = groupMeCandidate(
+                messages: msgs,
+                participantsRaw: participantsRaw,
+                preferredMeName: preferredMeName,
+                selfEvidence: selfEvidence,
+                resolveCandidate: resolveCandidate,
+                participantKey: participantKey
+            )
+            exporterSelfCandidate = groupCandidate.candidate
+            meCandidateConfidence = groupCandidate.confidence
+            meCandidateReasons = groupCandidate.reasons
+            switch meCandidateConfidence {
+            case .high:
+                exporterConfidence = .strong
+            case .medium, .low:
+                exporterConfidence = .weak
+            case .unknown:
+                exporterConfidence = .none
+            }
+        } else {
+            if exporterPlaceholderSeen {
+                exporterConfidence = .none
+                meCandidateConfidence = .low
+            } else if selfEvidence != nil, exporterSelfCandidate != nil {
+                exporterConfidence = .strong
+                meCandidateConfidence = .high
+            } else {
+                exporterConfidence = .none
+                meCandidateConfidence = .low
+            }
+        }
+
+        if exporterPlaceholderSeen {
+            exporterSelfCandidate = nil
+            if chatKind == .group && meCandidateConfidence != .unknown {
+                meCandidateConfidence = .unknown
+                meCandidateReasons.append("policy:exporter-placeholder")
+            }
+        }
+
+        var contextConfidence: WAParticipantDetectionConfidence = .low
         let hasHeader = headerCandidate != nil
         let hasSystem = selfEvidence != nil || otherEvidence != nil
         let hasSenderTokens = !participantsRaw.isEmpty
-        if hasHeader || hasSystem { confidence = .medium }
-        if hasHeader && (hasSystem || hasSenderTokens) { confidence = .high }
-        if !hasHeader && hasSystem && hasSenderTokens { confidence = .high }
+        if hasHeader || hasSystem { contextConfidence = .medium }
+        if hasHeader && (hasSystem || hasSenderTokens) { contextConfidence = .high }
+        if !hasHeader && hasSystem && hasSenderTokens { contextConfidence = .high }
         if containerConflict && !(hasHeader || hasSystem) {
-            if confidence == .high { confidence = .medium }
+            if contextConfidence == .high { contextConfidence = .medium }
         }
 
+        var confidence: WAParticipantDetectionConfidence = (chatKind == .group ? meCandidateConfidence : contextConfidence)
+
         var evidence: [WAParticipantDetectionEvidence] = []
+        if let groupTitleCandidate {
+            evidence.append(WAParticipantDetectionEvidence(source: "group-title", excerpt: groupTitleCandidate))
+        }
         if let headerCandidate {
             evidence.append(WAParticipantDetectionEvidence(source: "header", excerpt: headerCandidate))
         }
@@ -2089,6 +2160,11 @@ public enum WhatsAppExportService {
         }
         if exporterPlaceholderSeen {
             evidence.append(WAParticipantDetectionEvidence(source: "policy:exporter-placeholder", excerpt: "placeholder-author"))
+        }
+        if !meCandidateReasons.isEmpty {
+            for reason in meCandidateReasons {
+                evidence.append(WAParticipantDetectionEvidence(source: "me-candidate", excerpt: reason))
+            }
         }
 
         var nonPhoneAlternatives: [(candidate: String, source: String)] = []
@@ -2193,12 +2269,6 @@ public enum WhatsAppExportService {
         }
         evidence.append(WAParticipantDetectionEvidence(source: "decision:confidence", excerpt: confidence.rawValue))
 
-        let exporterConfidence: WETParticipantConfidence = {
-            if exporterPlaceholderSeen { return .none }
-            if selfEvidence != nil, exporterSelfCandidate != nil { return .strong }
-            return .none
-        }()
-
         let partnerConfidence: WETParticipantConfidence = {
             switch chatKind {
             case .group:
@@ -2225,7 +2295,18 @@ public enum WhatsAppExportService {
             }
         }()
 
+        let needsConfirmation: Bool = {
+            if exporterPlaceholderSeen { return true }
+            switch chatKind {
+            case .group:
+                return confidence == .low || confidence == .unknown
+            case .oneToOne, .unknown:
+                return exporterConfidence != .strong
+            }
+        }()
+
         let detection = WAParticipantDetectionResult(
+            meta: ConversationMeta(kind: chatKind, groupTitle: groupTitleCandidate),
             chatKind: chatKind,
             chatTitleCandidate: chatTitleCandidateFinal,
             otherPartyCandidate: otherPartyCandidateFinal,
@@ -2234,6 +2315,7 @@ public enum WhatsAppExportService {
             exporterConfidence: exporterConfidence,
             partnerConfidence: partnerConfidence,
             confidence: confidence,
+            needsConfirmation: needsConfirmation,
             evidence: evidence
         )
 
@@ -2305,6 +2387,40 @@ public enum WhatsAppExportService {
         }
 
         return WAMediaCounts(images: images, videos: videos, audios: audios, documents: documents)
+    }
+
+    nonisolated private static func groupTitleFromE2EHeader(lines: [String], limit: Int = 120) -> String? {
+        var checked = 0
+        for line in lines {
+            if checked >= limit { break }
+            checked += 1
+
+            let stripped = _normSpace(stripBOMAndBidi(line))
+            if stripped.isEmpty { continue }
+            if isMessageLine(stripped) { continue }
+
+            guard let colon = stripped.firstIndex(of: ":") else { continue }
+            let prefix = _normSpace(String(stripped[..<colon]))
+            if prefix.isEmpty { continue }
+            let suffix = _normSpace(String(stripped[stripped.index(after: colon)...]))
+            if suffix.isEmpty { continue }
+            let suffixNorm = normalizedSystemText(suffix)
+            if isE2EDisclaimerText(suffixNorm) {
+                return prefix
+            }
+        }
+        return nil
+    }
+
+    nonisolated private static func isE2EDisclaimerText(_ text: String) -> Bool {
+        let low = _normSpace(text).lowercased()
+        if low.contains("nachrichten und anrufe") && low.contains("verschlüsselt") {
+            return true
+        }
+        if low.contains("messages and calls") && low.contains("end-to-end") && low.contains("encrypted") {
+            return true
+        }
+        return false
     }
 
     nonisolated private static func headerTitleCandidate(lines: [String], limit: Int = 120) -> String? {
@@ -2429,6 +2545,81 @@ public enum WhatsAppExportService {
         }
 
         return nil
+    }
+
+    nonisolated private static func groupMeCandidate(
+        messages: [WAMessage],
+        participantsRaw: [String],
+        preferredMeName: String?,
+        selfEvidence: (name: String, tag: String)?,
+        resolveCandidate: (String) -> String,
+        participantKey: (String) -> String
+    ) -> (candidate: String?, confidence: WAParticipantDetectionConfidence, reasons: [String]) {
+        var reasons: [String] = []
+
+        if let selfEvidence {
+            let candidate = resolveCandidate(selfEvidence.name)
+            if !candidate.isEmpty {
+                reasons.append("S1:\(selfEvidence.tag)")
+                return (candidate, .high, reasons)
+            }
+        }
+
+        let preferredTrimmed = _normSpace(preferredMeName ?? "")
+        if !preferredTrimmed.isEmpty {
+            let preferredKey = participantKey(preferredTrimmed)
+            if !preferredKey.isEmpty,
+               let match = participantsRaw.first(where: { participantKey($0) == preferredKey }) {
+                reasons.append("S2:preferred-me")
+                return (resolveCandidate(match), .medium, reasons)
+            }
+        }
+
+        if !preferredTrimmed.isEmpty {
+            let preferredKey = normalizedPersonKey(preferredTrimmed)
+            if !preferredKey.isEmpty,
+               let match = participantsRaw.first(where: { normalizedPersonKey($0) == preferredKey }) {
+                reasons.append("S3:preferred-key")
+                return (resolveCandidate(match), .medium, reasons)
+            }
+        }
+
+        var counts: [String: Int] = [:]
+        var firstIndex: [String: Int] = [:]
+        var addedYouIndex: Int? = nil
+
+        for (idx, m) in messages.enumerated() {
+            let authorRaw = _normSpace(m.author)
+            let textWoAttach = stripAttachmentMarkers(m.text)
+            let textNorm = normalizedSystemText(textWoAttach)
+            if addedYouIndex == nil, containsAny(textNorm, addedYouMarkers) {
+                addedYouIndex = idx
+            }
+
+            if isExporterPlaceholderAuthor(authorRaw) { continue }
+            if isSystemMessage(authorRaw: authorRaw, text: textWoAttach) { continue }
+            let author = normalizedParticipantIdentifier(authorRaw)
+            if author.isEmpty { continue }
+            if isSystemAuthor(author) { continue }
+            counts[author, default: 0] += 1
+            if firstIndex[author] == nil {
+                firstIndex[author] = idx
+            }
+        }
+
+        let total = counts.values.reduce(0, +)
+        if total >= 5, let top = counts.max(by: { $0.value < $1.value }) {
+            let ratio = Double(top.value) / Double(max(total, 1))
+            let anchor = addedYouIndex ?? 0
+            let first = firstIndex[top.key] ?? 0
+            if ratio >= 0.6 && first <= anchor + 5 {
+                reasons.append("S4:frequency")
+                return (resolveCandidate(top.key), .low, reasons)
+            }
+        }
+
+        reasons.append("S5:unknown")
+        return (nil, .unknown, reasons)
     }
 
     /// Compare the original WhatsApp export folder (and sibling zip, if present) with the sidecar copies.
@@ -4846,6 +5037,13 @@ public enum WhatsAppExportService {
         }
 
         let exporter = trim(exporterOverride) ?? trim(detectedExporter) ?? ""
+        if chatKind == .group {
+            if participants.isEmpty { return (exporter, []) }
+            if exporter.isEmpty { return (exporter, participants) }
+            let exporterKey = normalizedParticipantLabel(exporter).lowercased()
+            let partners = participants.filter { normalizedParticipantLabel($0).lowercased() != exporterKey }
+            return (exporter, partners)
+        }
         let partnerOverrideTrimmed = trim(partnerOverride)
         if let partnerOverrideTrimmed {
             return (exporter, [partnerOverrideTrimmed])
@@ -5146,6 +5344,11 @@ public enum WhatsAppExportService {
     nonisolated private static let otherDeletedMarkers: [String] = [
         "diese nachricht wurde gelöscht",
         "this message was deleted",
+    ]
+
+    nonisolated private static let addedYouMarkers: [String] = [
+        "hat dich hinzugefügt",
+        "you were added",
     ]
 
     nonisolated private static func normalizedSystemText(_ text: String) -> String {

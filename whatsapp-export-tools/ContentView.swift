@@ -149,6 +149,7 @@ struct ContentView: View {
         var exporterAssumed: Bool
         var wasSwapped: Bool
         var chatKind: WAParticipantChatKind
+        var groupTitle: String?
         var resolvedExporter: String
         var resolvedPartners: [String]
 
@@ -164,6 +165,7 @@ struct ContentView: View {
             exporterAssumed: false,
             wasSwapped: false,
             chatKind: .unknown,
+            groupTitle: nil,
             resolvedExporter: "",
             resolvedPartners: []
         )
@@ -178,6 +180,14 @@ struct ContentView: View {
         }
 
         var effectivePartners: [String] {
+            if chatKind == .group {
+                let exporter = Self.trimmedOrNil(exporterOverride) ?? resolvedExporter
+                let base = resolvedPartners.isEmpty ? participantsDetected : resolvedPartners
+                if exporter.isEmpty { return base }
+                let exporterKey = ContentView.normalizedKeyStatic(exporter)
+                let partners = base.filter { ContentView.normalizedKeyStatic($0) != exporterKey }
+                return partners.isEmpty ? base : partners
+            }
             if let override = Self.trimmedOrNil(partnerOverride) {
                 return [override]
             }
@@ -193,7 +203,16 @@ struct ContentView: View {
         }
 
         var effectivePartner: String {
-            effectivePartners.first ?? ""
+            if chatKind == .group {
+                if let override = Self.trimmedOrNil(partnerOverride) {
+                    return override
+                }
+                if let groupTitle, !groupTitle.isEmpty {
+                    return groupTitle
+                }
+                return effectivePartners.first ?? ""
+            }
+            return effectivePartners.first ?? ""
         }
 
         var exporterWasOverridden: Bool {
@@ -205,7 +224,11 @@ struct ContentView: View {
         }
 
         var allowPlaceholderAsMe: Bool {
-            exporterWasOverridden || exporterConfidence == .strong
+            if exporterWasOverridden { return true }
+            if chatKind == .group {
+                return detectionConfidence == .high || detectionConfidence == .medium
+            }
+            return exporterConfidence == .strong
         }
     }
 
@@ -1117,6 +1140,17 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                 }
             }
+
+            if participantResolution.chatKind == .group {
+                let partners = participantResolution.effectivePartners.map { applyPhoneOverrideIfNeeded($0) }
+                let count = partners.count
+                let compact = partners.prefix(5).joined(separator: ", ")
+                let suffix = count > 5 ? " …" : ""
+                Text("Participants (\(count)): \(compact)\(suffix)")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -1475,7 +1509,9 @@ struct ContentView: View {
     private var inputSummaryConfidenceText: String? {
         let exporter = participantResolution.exporterConfidence
         let partner = participantResolution.partnerConfidence
-        if participantResolution.detectionConfidence == .low { return "Needs confirmation" }
+        if participantResolution.detectionConfidence == .low || participantResolution.detectionConfidence == .unknown {
+            return "Needs confirmation"
+        }
         if participantResolution.exporterAssumed { return "Needs confirmation" }
         if exporter == .none || partner == .none { return "Needs confirmation" }
         if exporter == .strong && partner == .strong { return "Confident" }
@@ -1493,18 +1529,13 @@ struct ContentView: View {
 
     nonisolated static func resolveExporterFallback(
         detected: String?,
-        confidence: WETParticipantConfidence,
-        persisted: String?
+        confidence: WETParticipantConfidence
     ) -> (name: String?, confidence: WETParticipantConfidence, assumed: Bool) {
         let detectedTrimmed = detected?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !detectedTrimmed.isEmpty {
             return (detectedTrimmed, confidence, false)
         }
-        let persistedTrimmed = persisted?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !persistedTrimmed.isEmpty {
-            return (persistedTrimmed, .weak, true)
-        }
-        return (nil, confidence, false)
+        return ("Ich", .none, true)
     }
 
     nonisolated static func deriveExporterFromParticipants(
@@ -1927,12 +1958,13 @@ struct ContentView: View {
         do {
             let detectionSnapshot = try WhatsAppExportService.participantDetectionSnapshot(
                 chatURL: chatURL,
-                provenance: snapshot.provenance
+                provenance: snapshot.provenance,
+                preferredMeName: exporterName
             )
             let detection = detectionSnapshot.detection
 
             participantDetection = detection
-            detectedChatTitle = detection.chatTitleCandidate
+            detectedChatTitle = detection.meta.groupTitle ?? detection.chatTitleCandidate
             detectedDateRange = detectionSnapshot.dateRange
             detectedMediaCounts = detectionSnapshot.mediaCounts
             switch snapshot.provenance.inputKind {
@@ -1950,7 +1982,7 @@ struct ContentView: View {
             let partnerHintRaw: String? = {
                 switch detection.chatKind {
                 case .group:
-                    return detection.chatTitleCandidate ?? detection.otherPartyCandidate
+                    return detection.meta.groupTitle ?? detection.chatTitleCandidate ?? detection.otherPartyCandidate
                 case .oneToOne:
                     return detection.otherPartyCandidate ?? detection.chatTitleCandidate
                 case .unknown:
@@ -1962,10 +1994,11 @@ struct ContentView: View {
             let detectedMeRaw = detection.exporterSelfCandidate
             var detectedExporterRaw = detectedMeRaw.flatMap { firstMatchingParticipant($0, in: parts) } ?? detectedMeRaw
             var exporterConfidence = detection.exporterConfidence
+            var detectionConfidence = detection.confidence
             let detectedPartner: String? = {
                 switch detection.chatKind {
                 case .group:
-                    return detection.chatTitleCandidate ?? detection.otherPartyCandidate
+                    return detection.meta.groupTitle ?? detection.chatTitleCandidate ?? detection.otherPartyCandidate
                 case .oneToOne:
                     return detection.otherPartyCandidate ?? detection.chatTitleCandidate
                 case .unknown:
@@ -1980,24 +2013,40 @@ struct ContentView: View {
                ) {
                 detectedExporterRaw = derived
                 exporterConfidence = .weak
+                if detectionConfidence == .low {
+                    detectionConfidence = .medium
+                }
             }
 
             let exporterFallback = Self.resolveExporterFallback(
                 detected: detectedExporterRaw,
-                confidence: exporterConfidence,
-                persisted: exporterName
+                confidence: exporterConfidence
             )
             let detectedExporter = exporterFallback.name
+            let detectedForResolution: String? = {
+                switch detectionConfidence {
+                case .high, .medium:
+                    return detectedExporter
+                case .low, .unknown:
+                    return nil
+                }
+            }()
 
             let resolved = WhatsAppExportService.resolveParticipants(
                 participants: parts,
-                detectedExporter: detectedExporter,
+                detectedExporter: detectedForResolution,
                 detectedPartner: detectedPartner,
                 partnerHint: partnerHint,
                 exporterOverride: nil,
                 partnerOverride: nil,
                 chatKind: detection.chatKind
             )
+            var resolvedExporter = resolved.exporter
+            var exporterAssumed = exporterFallback.assumed
+            if resolvedExporter.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                resolvedExporter = "Ich"
+                exporterAssumed = true
+            }
 
             participantResolution = ParticipantResolution(
                 participantsDetected: parts,
@@ -2005,13 +2054,14 @@ struct ContentView: View {
                 detectedPartner: detectedPartner,
                 exporterConfidence: exporterFallback.confidence,
                 partnerConfidence: detection.partnerConfidence,
-                detectionConfidence: detection.confidence,
+                detectionConfidence: detectionConfidence,
                 exporterOverride: nil,
                 partnerOverride: nil,
-                exporterAssumed: exporterFallback.assumed,
+                exporterAssumed: exporterAssumed,
                 wasSwapped: false,
                 chatKind: detection.chatKind,
-                resolvedExporter: resolved.exporter,
+                groupTitle: detection.meta.groupTitle,
+                resolvedExporter: resolvedExporter,
                 resolvedPartners: resolved.partners
             )
             if debugLoggingEnabled {
@@ -2151,6 +2201,7 @@ struct ContentView: View {
                 exporterAssumed: false,
                 wasSwapped: false,
                 chatKind: .unknown,
+                groupTitle: nil,
                 resolvedExporter: "",
                 resolvedPartners: []
             )
@@ -2214,9 +2265,24 @@ struct ContentView: View {
             return false
         }
         if participantResolution.exporterAssumed { return true }
-        if participantResolution.detectionConfidence == .low { return true }
+        if participantResolution.chatKind == .group {
+            return participantResolution.detectionConfidence == .low
+                || participantResolution.detectionConfidence == .unknown
+        }
+        if participantResolution.detectionConfidence == .low || participantResolution.detectionConfidence == .unknown {
+            return true
+        }
         if participantResolution.exporterConfidence != .strong { return true }
         return false
+    }
+
+    private func detectedExporterForResolution() -> String? {
+        switch participantResolution.detectionConfidence {
+        case .high, .medium:
+            return participantResolution.detectedExporter
+        case .low, .unknown:
+            return nil
+        }
     }
 
     private func swapParticipantOverrides() {
@@ -2226,7 +2292,7 @@ struct ContentView: View {
         participantResolution.partnerOverride = normalizedOverrideValue(exporter)
         let swappedResolved = WhatsAppExportService.resolveParticipants(
             participants: participantResolution.participantsDetected,
-            detectedExporter: participantResolution.detectedExporter,
+            detectedExporter: detectedExporterForResolution(),
             detectedPartner: participantResolution.detectedPartner,
             partnerHint: autoDetectedChatPartnerName,
             exporterOverride: participantResolution.exporterOverride,
@@ -2253,7 +2319,7 @@ struct ContentView: View {
         participantResolution.exporterOverride = normalized
         let resolved = WhatsAppExportService.resolveParticipants(
             participants: participantResolution.participantsDetected,
-            detectedExporter: participantResolution.detectedExporter,
+            detectedExporter: detectedExporterForResolution(),
             detectedPartner: participantResolution.detectedPartner,
             partnerHint: autoDetectedChatPartnerName,
             exporterOverride: participantResolution.exporterOverride,
@@ -2271,7 +2337,7 @@ struct ContentView: View {
         participantResolution.partnerOverride = normalizedOverrideValue(value ?? "")
         let resolved = WhatsAppExportService.resolveParticipants(
             participants: participantResolution.participantsDetected,
-            detectedExporter: participantResolution.detectedExporter,
+            detectedExporter: detectedExporterForResolution(),
             detectedPartner: participantResolution.detectedPartner,
             partnerHint: autoDetectedChatPartnerName,
             exporterOverride: participantResolution.exporterOverride,
@@ -2305,7 +2371,20 @@ struct ContentView: View {
     }
 
     private func effectivePartnerForOutput() -> String {
-        var trimmed = applyPhoneOverrideIfNeeded(participantResolution.effectivePartner)
+        let rawPartner: String = {
+            if participantResolution.chatKind == .group {
+                if let override = participantResolution.partnerOverride?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !override.isEmpty {
+                    return override
+                }
+                if let groupTitle = participantResolution.groupTitle, !groupTitle.isEmpty {
+                    return groupTitle
+                }
+                return participantResolution.detectedPartner ?? participantResolution.effectivePartner
+            }
+            return participantResolution.effectivePartner
+        }()
+        var trimmed = applyPhoneOverrideIfNeeded(rawPartner)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty { trimmed = "Chat" }
         let exporter = applyPhoneOverrideIfNeeded(participantResolution.effectiveExporter)

@@ -1,0 +1,9 @@
+Group Chat: Nachrichten und Anrufe sind Ende-zu-Ende-verschlüsselt. Niemand außerhalb dieses Chats, nicht einmal WhatsApp, kann sie lesen oder anhören.
+
+01.01.2024, 09:59 - Person B: Person A hat die Gruppe erstellt.
+01.01.2024, 10:00 - Person A: Hallo zusammen
+01.01.2024, 10:01 - Person B: Hi
+01.01.2024, 10:02 - Person C: Moin
+01.01.2024, 10:03 - Person A: Willkommen
+01.01.2024, 10:04 - Person B: Danke
+01.01.2024, 10:05 - Person C: Alles klar
