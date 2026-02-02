@@ -25,8 +25,17 @@ struct ContentView: View {
         let baseNameOverride: String?
         let exporter: String
         let chatPartner: String
+        let chatPartners: [String]
         let chatPartnerSource: String
         let chatPartnerFolderOverride: String?
+        let exporterConfidence: WETParticipantConfidence
+        let partnerConfidence: WETParticipantConfidence
+        let exporterWasOverridden: Bool
+        let partnerWasOverridden: Bool
+        let wasSwapped: Bool
+        let allowPlaceholderAsMe: Bool
+        let chatKind: WAParticipantChatKind
+        let titleNamesOverride: String?
         let detectedPartnerRaw: String
         let overridePartnerRaw: String?
         let participantDetection: WAParticipantDetectionResult?
@@ -125,6 +134,78 @@ struct ContentView: View {
                 steps.append(.markdown)
             }
             return steps
+        }
+    }
+
+    private struct ParticipantResolution: Sendable, Equatable {
+        var participantsDetected: [String]
+        var detectedExporter: String?
+        var detectedPartner: String?
+        var exporterConfidence: WETParticipantConfidence
+        var partnerConfidence: WETParticipantConfidence
+        var detectionConfidence: WAParticipantDetectionConfidence
+        var exporterOverride: String?
+        var partnerOverride: String?
+        var exporterAssumed: Bool
+        var wasSwapped: Bool
+        var chatKind: WAParticipantChatKind
+        var resolvedExporter: String
+        var resolvedPartners: [String]
+
+        static let empty = ParticipantResolution(
+            participantsDetected: [],
+            detectedExporter: nil,
+            detectedPartner: nil,
+            exporterConfidence: .none,
+            partnerConfidence: .none,
+            detectionConfidence: .low,
+            exporterOverride: nil,
+            partnerOverride: nil,
+            exporterAssumed: false,
+            wasSwapped: false,
+            chatKind: .unknown,
+            resolvedExporter: "",
+            resolvedPartners: []
+        )
+
+        private static func trimmedOrNil(_ value: String?) -> String? {
+            let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return trimmed.isEmpty ? nil : trimmed
+        }
+
+        var effectiveExporter: String {
+            Self.trimmedOrNil(exporterOverride) ?? resolvedExporter
+        }
+
+        var effectivePartners: [String] {
+            if let override = Self.trimmedOrNil(partnerOverride) {
+                return [override]
+            }
+            let exporter = Self.trimmedOrNil(exporterOverride) ?? resolvedExporter
+            if !exporter.isEmpty, !participantsDetected.isEmpty {
+                let exporterKey = ContentView.normalizedKeyStatic(exporter)
+                let partners = participantsDetected.filter { ContentView.normalizedKeyStatic($0) != exporterKey }
+                if !partners.isEmpty {
+                    return partners
+                }
+            }
+            return resolvedPartners
+        }
+
+        var effectivePartner: String {
+            effectivePartners.first ?? ""
+        }
+
+        var exporterWasOverridden: Bool {
+            Self.trimmedOrNil(exporterOverride) != nil
+        }
+
+        var partnerWasOverridden: Bool {
+            Self.trimmedOrNil(partnerOverride) != nil
+        }
+
+        var allowPlaceholderAsMe: Bool {
+            exporterWasOverridden || exporterConfidence == .strong
         }
     }
 
@@ -404,6 +485,7 @@ struct ContentView: View {
     @State private var chatPartnerCustomName: String = ""
     @State private var autoDetectedChatPartnerName: String? = nil
     @State private var exporterName: String = ""
+    @State private var participantResolution: ParticipantResolution = .empty
     @State private var participantDetection: WAParticipantDetectionResult? = nil
     @State private var detectedChatTitle: String? = nil
     @State private var detectedDateRange: ClosedRange<Date>? = nil
@@ -428,7 +510,6 @@ struct ContentView: View {
     @State private var currentRunStep: RunStep? = nil
     @State private var lastExportDir: URL? = nil
     @State private var targetFolderLabel: TargetFolderLabel = .placeholder
-    @State private var lastSidecarHTML: URL? = nil
     @State private var showReplaceSheet: Bool = false
     @State private var replaceExistingNames: [String] = []
     @State private var replaceOutputPath: String = ""
@@ -740,7 +821,7 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                         .frame(width: Layout.labelWidth, alignment: .leading)
                     HStack(spacing: 6) {
-                        Text(autoDetectedChatPartnerName ?? "—")
+                        Text(participantResolution.detectedPartner ?? "—")
                         if let confidence = inputSummaryConfidenceText {
                             Text(confidence)
                                 .foregroundStyle(.secondary)
@@ -954,94 +1035,87 @@ struct ContentView: View {
     private var chatPartnerSelectionRow: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {
-                Text("Exported by:")
-                    .frame(width: Layout.labelWidth, alignment: .leading)
-                Text(exporterDisplayName())
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .frame(width: Layout.chatPartnerWidth, alignment: .leading)
+                HStack(spacing: 6) {
+                    Text("Exporter name:")
+                    helpIcon("Name of the person who created the export.")
+                }
+                .frame(width: Layout.labelWidth, alignment: .leading)
+
+                TextField(
+                    exporterDetectedPlaceholder,
+                    text: exporterOverrideBinding
+                )
+                .textFieldStyle(.roundedBorder)
+                .accessibilityLabel("Exporter name")
+                .frame(width: Layout.chatPartnerWidth, alignment: .leading)
+                .disabled(isRunning)
+
+                if let detected = participantResolution.detectedExporter, !detected.isEmpty {
+                    Menu("Use detected") {
+                        Button(detected) {
+                            updateExporterOverride(detected)
+                        }
+                        Divider()
+                        Button("Clear override") {
+                            updateExporterOverride(nil)
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(isRunning)
+                }
+
                 Spacer(minLength: 0)
             }
 
             HStack(spacing: 12) {
                 HStack(spacing: 6) {
-                    Text("Chat partner:")
-                    helpIcon("Choose the person you chatted with (name or number).")
+                    Text("Partner name:")
+                    helpIcon("Name of the other person (or group title).")
                 }
                 .frame(width: Layout.labelWidth, alignment: .leading)
 
-                VStack(alignment: .leading, spacing: 6) {
-                    Menu {
+                TextField(
+                    participantResolution.detectedPartner?.isEmpty == false
+                        ? "Detected: \(participantResolution.detectedPartner ?? "")"
+                        : "Detected: —",
+                    text: partnerOverrideBinding
+                )
+                .textFieldStyle(.roundedBorder)
+                .accessibilityLabel("Partner name")
+                .frame(width: Layout.chatPartnerWidth, alignment: .leading)
+                .disabled(isRunning)
+
+                if !chatPartnerCandidates.isEmpty {
+                    Menu("Use detected") {
                         ForEach(chatPartnerCandidates, id: \.self) { name in
-                            Toggle(isOn: Binding(
-                                get: { chatPartnerSelection == name },
-                                set: { if $0 { chatPartnerSelection = name } }
-                            )) {
-                                Label {
-                                    Text(name)
-                                } icon: {
-                                    if autoDetectedChatPartnerName == name {
-                                        Image(nsImage: Self.aiMenuBadgeImage)
-                                            .renderingMode(.original)
-                                    } else {
-                                        Image(systemName: "circle")
-                                            .opacity(0)
-                                    }
-                                }
+                            Button(name) {
+                                updatePartnerOverride(name)
                             }
                         }
                         Divider()
-                        Toggle(isOn: Binding(
-                            get: { chatPartnerSelection == Self.customChatPartnerTag },
-                            set: { if $0 { chatPartnerSelection = Self.customChatPartnerTag } }
-                        )) {
-                            Label {
-                                Text("Custom…")
-                            } icon: {
-                                Image(systemName: "circle")
-                                    .opacity(0)
-                            }
+                        Button("Clear override") {
+                            updatePartnerOverride(nil)
                         }
-                    } label: {
-                        HStack(spacing: 8) {
-                            Text(chatPartnerSelectionDisplayName)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                            Spacer(minLength: 0)
-                            Image(systemName: "chevron.up.chevron.down")
-                                .font(.system(size: 10, weight: .semibold))
-                                .foregroundStyle(.secondary)
-                        }
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .frame(width: Layout.chatPartnerWidth, alignment: .leading)
-                        .background(
-                            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                .stroke(.white.opacity(0.10), lineWidth: 1)
-                        )
-                        .contentShape(Rectangle())
-                        .aiGlow(
-                            active: shouldShowAIGlow,
-                            isRunning: false,
-                            cornerRadius: 6,
-                            style: WETAIGlowStyle.defaultStyle()
-                        )
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Chat partner")
+                    .buttonStyle(.bordered)
                     .disabled(isRunning)
-
-                    if chatPartnerSelection == Self.customChatPartnerTag {
-                        TextField("e.g. Alex", text: $chatPartnerCustomName)
-                            .textFieldStyle(.roundedBorder)
-                            .accessibilityLabel("Custom chat partner")
-                            .frame(width: Layout.chatPartnerWidth, alignment: .leading)
-                            .disabled(isRunning)
-                    }
                 }
-                .frame(width: Layout.chatPartnerWidth, alignment: .leading)
 
                 Spacer(minLength: 0)
+            }
+
+            HStack(spacing: 12) {
+                Button("Swap exporter ↔ partner") {
+                    swapParticipantOverrides()
+                }
+                .buttonStyle(.bordered)
+                .disabled(isRunning || participantResolution.chatKind == .group)
+
+                if needsParticipantConfirmation {
+                    Text("Best-effort detection uncertain — please confirm or use Swap.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1399,12 +1473,65 @@ struct ContentView: View {
     }
 
     private var inputSummaryConfidenceText: String? {
-        guard let confidence = participantDetection?.confidence else { return nil }
-        switch confidence {
-        case .high: return "Confident"
-        case .medium: return "Likely"
-        case .low: return "Uncertain"
+        let exporter = participantResolution.exporterConfidence
+        let partner = participantResolution.partnerConfidence
+        if participantResolution.detectionConfidence == .low { return "Needs confirmation" }
+        if participantResolution.exporterAssumed { return "Needs confirmation" }
+        if exporter == .none || partner == .none { return "Needs confirmation" }
+        if exporter == .strong && partner == .strong { return "Confident" }
+        return "Likely"
+    }
+
+    private var exporterDetectedPlaceholder: String {
+        let detected = participantResolution.detectedExporter?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if detected.isEmpty { return "Detected: —" }
+        if participantResolution.exporterAssumed && participantResolution.exporterOverride == nil {
+            return "Detected: \(detected) (assumed)"
         }
+        return "Detected: \(detected)"
+    }
+
+    nonisolated static func resolveExporterFallback(
+        detected: String?,
+        confidence: WETParticipantConfidence,
+        persisted: String?
+    ) -> (name: String?, confidence: WETParticipantConfidence, assumed: Bool) {
+        let detectedTrimmed = detected?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !detectedTrimmed.isEmpty {
+            return (detectedTrimmed, confidence, false)
+        }
+        let persistedTrimmed = persisted?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !persistedTrimmed.isEmpty {
+            return (persistedTrimmed, .weak, true)
+        }
+        return (nil, confidence, false)
+    }
+
+    nonisolated static func deriveExporterFromParticipants(
+        detectedExporter: String?,
+        detectedPartner: String?,
+        participants: [String]
+    ) -> String? {
+        let detectedTrimmed = detectedExporter?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !detectedTrimmed.isEmpty { return detectedTrimmed }
+        let partnerTrimmed = detectedPartner?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if partnerTrimmed.isEmpty { return nil }
+        if participants.count != 2 { return nil }
+
+        let partnerKey = normalizedKeyStatic(partnerTrimmed)
+        guard !partnerKey.isEmpty else { return nil }
+        let others = participants.filter { normalizedKeyStatic($0) != partnerKey }
+        if others.count == 1 {
+            return others[0]
+        }
+        return nil
+    }
+
+    nonisolated private static func normalizedKeyStatic(_ s: String) -> String {
+        let filteredScalars = s.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }
+        let cleaned = String(String.UnicodeScalarView(filteredScalars))
+        let normalized = cleaned.precomposedStringWithCanonicalMapping
+        return normalized.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ").lowercased()
     }
 
     private func suggestedChatSubfolderName(
@@ -1450,8 +1577,17 @@ struct ContentView: View {
             baseNameOverride: context.baseNameOverride,
             exporter: context.exporter,
             chatPartner: context.chatPartner,
+            chatPartners: context.chatPartners,
             chatPartnerSource: context.chatPartnerSource,
             chatPartnerFolderOverride: context.chatPartnerFolderOverride,
+            exporterConfidence: context.exporterConfidence,
+            partnerConfidence: context.partnerConfidence,
+            exporterWasOverridden: context.exporterWasOverridden,
+            partnerWasOverridden: context.partnerWasOverridden,
+            wasSwapped: context.wasSwapped,
+            allowPlaceholderAsMe: context.allowPlaceholderAsMe,
+            chatKind: context.chatKind,
+            titleNamesOverride: context.titleNamesOverride,
             detectedPartnerRaw: context.detectedPartnerRaw,
             overridePartnerRaw: context.overridePartnerRaw,
             participantDetection: context.participantDetection,
@@ -1824,32 +1960,75 @@ struct ContentView: View {
             let partnerHint = partnerHintRaw?.trimmingCharacters(in: .whitespacesAndNewlines)
 
             let detectedMeRaw = detection.exporterSelfCandidate
-            let placeholderSeen = detection.exporterPlaceholderSeen
-            var detectedExporter: String? = nil
-
-            if !placeholderSeen {
-                if let detectedMeRaw, let match = firstMatchingParticipant(detectedMeRaw, in: parts) {
-                    detectedExporter = match
+            var detectedExporterRaw = detectedMeRaw.flatMap { firstMatchingParticipant($0, in: parts) } ?? detectedMeRaw
+            var exporterConfidence = detection.exporterConfidence
+            let detectedPartner: String? = {
+                switch detection.chatKind {
+                case .group:
+                    return detection.chatTitleCandidate ?? detection.otherPartyCandidate
+                case .oneToOne:
+                    return detection.otherPartyCandidate ?? detection.chatTitleCandidate
+                case .unknown:
+                    return detection.otherPartyCandidate ?? detection.chatTitleCandidate
                 }
-
-                if detectedExporter == nil, let partnerHint, parts.count == 2 {
-                    if let partnerMatch = firstMatchingParticipant(partnerHint, in: parts) {
-                        detectedExporter = parts.first { normalizedKey($0) != normalizedKey(partnerMatch) }
-                    } else {
-                        let phoneCandidates = parts.filter { Self.isPhoneNumberLike($0) }
-                        if phoneCandidates.count == 1 {
-                            detectedExporter = parts.first { normalizedKey($0) != normalizedKey(phoneCandidates[0]) }
-                        }
-                    }
-                }
-
-                if detectedExporter == nil {
-                    detectedExporter = parts.first
-                }
+            }()
+            if (detectedExporterRaw?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "").isEmpty,
+               let derived = Self.deriveExporterFromParticipants(
+                   detectedExporter: detectedExporterRaw,
+                   detectedPartner: detectedPartner,
+                   participants: parts
+               ) {
+                detectedExporterRaw = derived
+                exporterConfidence = .weak
             }
 
-            exporterName = detectedExporter?.trimmingCharacters(in: .whitespacesAndNewlines)
-                ?? (placeholderSeen ? WhatsAppExportService.exporterPlaceholderToken : "")
+            let exporterFallback = Self.resolveExporterFallback(
+                detected: detectedExporterRaw,
+                confidence: exporterConfidence,
+                persisted: exporterName
+            )
+            let detectedExporter = exporterFallback.name
+
+            let resolved = WhatsAppExportService.resolveParticipants(
+                participants: parts,
+                detectedExporter: detectedExporter,
+                detectedPartner: detectedPartner,
+                partnerHint: partnerHint,
+                exporterOverride: nil,
+                partnerOverride: nil,
+                chatKind: detection.chatKind
+            )
+
+            participantResolution = ParticipantResolution(
+                participantsDetected: parts,
+                detectedExporter: detectedExporter,
+                detectedPartner: detectedPartner,
+                exporterConfidence: exporterFallback.confidence,
+                partnerConfidence: detection.partnerConfidence,
+                detectionConfidence: detection.confidence,
+                exporterOverride: nil,
+                partnerOverride: nil,
+                exporterAssumed: exporterFallback.assumed,
+                wasSwapped: false,
+                chatKind: detection.chatKind,
+                resolvedExporter: resolved.exporter,
+                resolvedPartners: resolved.partners
+            )
+            if debugLoggingEnabled {
+                appendLog(
+                    "DEBUG: participant resolution exporter=\"\(participantResolution.effectiveExporter)\" " +
+                    "partner=\"\(participantResolution.effectivePartner)\" " +
+                    "swapped=\(participantResolution.wasSwapped) " +
+                    "exporterConfidence=\(participantResolution.exporterConfidence.rawValue) " +
+                    "partnerConfidence=\(participantResolution.partnerConfidence.rawValue) " +
+                    "detectionConfidence=\(participantResolution.detectionConfidence.rawValue)"
+                )
+            }
+            if exporterFallback.confidence == .strong,
+               let detectedExporter,
+               !detectedExporter.isEmpty {
+                updatePersistedExporterName(detectedExporter)
+            }
 
             // Keep overrides only for phone-number-like participants; preserve existing typed names.
             let phones = parts.filter { Self.isPhoneNumberLike($0) }
@@ -1894,8 +2073,9 @@ struct ContentView: View {
                     candidates = [groupName]
                 }
             } else {
-                if let detectedExporter {
-                    candidates = parts.filter { normalizedKey($0) != normalizedKey(detectedExporter) }
+                let resolvedExporter = participantResolution.resolvedExporter
+                if !resolvedExporter.isEmpty {
+                    candidates = parts.filter { normalizedKey($0) != normalizedKey(resolvedExporter) }
                 } else {
                     candidates = parts
                 }
@@ -1959,7 +2139,21 @@ struct ContentView: View {
             if chatPartnerSelection != Self.customChatPartnerTag {
                 chatPartnerSelection = fallbackPartner
             }
-            exporterName = WhatsAppExportService.exporterPlaceholderToken
+            participantResolution = ParticipantResolution(
+                participantsDetected: [],
+                detectedExporter: nil,
+                detectedPartner: fallbackPartner,
+                exporterConfidence: .none,
+                partnerConfidence: .none,
+                detectionConfidence: .low,
+                exporterOverride: nil,
+                partnerOverride: nil,
+                exporterAssumed: false,
+                wasSwapped: false,
+                chatKind: .unknown,
+                resolvedExporter: "",
+                resolvedPartners: []
+            )
             autoSuggestedPhoneNames = [:]
             appendLog("WARN: Participants could not be determined. \(error)")
         }
@@ -1980,7 +2174,7 @@ struct ContentView: View {
         detectedDateRange = nil
         detectedMediaCounts = .zero
         inputKindBadge = nil
-        exporterName = ""
+        participantResolution = .empty
         phoneParticipantOverrides = [:]
         autoSuggestedPhoneNames = [:]
     }
@@ -1997,42 +2191,129 @@ struct ContentView: View {
         }
     }
 
-    private func resolvedExporterName() -> String {
-        let trimmed = exporterName.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty {
-            if participantDetection?.exporterPlaceholderSeen == true {
-                return WhatsAppExportService.exporterPlaceholderToken
+    private var exporterOverrideBinding: Binding<String> {
+        Binding(
+            get: { participantResolution.exporterOverride ?? "" },
+            set: { newValue in
+                updateExporterOverride(newValue)
             }
-            let fallback = detectedParticipants.first ?? "Me"
-            return applyPhoneOverrideIfNeeded(fallback)
-        }
-        return applyPhoneOverrideIfNeeded(trimmed)
+        )
     }
 
-    private func exporterDisplayName() -> String {
-        let resolved = resolvedExporterName()
-        if resolved == WhatsAppExportService.exporterPlaceholderToken {
+    private var partnerOverrideBinding: Binding<String> {
+        Binding(
+            get: { participantResolution.partnerOverride ?? "" },
+            set: { newValue in
+                updatePartnerOverride(newValue)
+            }
+        )
+    }
+
+    private var needsParticipantConfirmation: Bool {
+        if participantResolution.exporterWasOverridden || participantResolution.wasSwapped {
+            return false
+        }
+        if participantResolution.exporterAssumed { return true }
+        if participantResolution.detectionConfidence == .low { return true }
+        if participantResolution.exporterConfidence != .strong { return true }
+        return false
+    }
+
+    private func swapParticipantOverrides() {
+        let exporter = participantResolution.effectiveExporter
+        let partner = participantResolution.effectivePartner
+        participantResolution.exporterOverride = normalizedOverrideValue(partner)
+        participantResolution.partnerOverride = normalizedOverrideValue(exporter)
+        let swappedResolved = WhatsAppExportService.resolveParticipants(
+            participants: participantResolution.participantsDetected,
+            detectedExporter: participantResolution.detectedExporter,
+            detectedPartner: participantResolution.detectedPartner,
+            partnerHint: autoDetectedChatPartnerName,
+            exporterOverride: participantResolution.exporterOverride,
+            partnerOverride: participantResolution.partnerOverride,
+            chatKind: participantResolution.chatKind
+        )
+        participantResolution.resolvedExporter = swappedResolved.exporter
+        participantResolution.resolvedPartners = swappedResolved.partners
+        participantResolution.wasSwapped = true
+        if let override = participantResolution.exporterOverride {
+            updatePersistedExporterName(override)
+        }
+    }
+
+    private func normalizedOverrideValue(_ value: String) -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return nil }
+        if trimmed == WhatsAppExportService.exporterPlaceholderToken { return nil }
+        return trimmed
+    }
+
+    private func updateExporterOverride(_ value: String?) {
+        let normalized = normalizedOverrideValue(value ?? "")
+        participantResolution.exporterOverride = normalized
+        let resolved = WhatsAppExportService.resolveParticipants(
+            participants: participantResolution.participantsDetected,
+            detectedExporter: participantResolution.detectedExporter,
+            detectedPartner: participantResolution.detectedPartner,
+            partnerHint: autoDetectedChatPartnerName,
+            exporterOverride: participantResolution.exporterOverride,
+            partnerOverride: participantResolution.partnerOverride,
+            chatKind: participantResolution.chatKind
+        )
+        participantResolution.resolvedExporter = resolved.exporter
+        participantResolution.resolvedPartners = resolved.partners
+        if let normalized {
+            updatePersistedExporterName(normalized)
+        }
+    }
+
+    private func updatePartnerOverride(_ value: String?) {
+        participantResolution.partnerOverride = normalizedOverrideValue(value ?? "")
+        let resolved = WhatsAppExportService.resolveParticipants(
+            participants: participantResolution.participantsDetected,
+            detectedExporter: participantResolution.detectedExporter,
+            detectedPartner: participantResolution.detectedPartner,
+            partnerHint: autoDetectedChatPartnerName,
+            exporterOverride: participantResolution.exporterOverride,
+            partnerOverride: participantResolution.partnerOverride,
+            chatKind: participantResolution.chatKind
+        )
+        participantResolution.resolvedExporter = resolved.exporter
+        participantResolution.resolvedPartners = resolved.partners
+    }
+
+    private func updatePersistedExporterName(_ value: String) {
+        let normalized = normalizedDisplayName(value).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return }
+        if normalized == exporterName { return }
+        exporterName = normalized
+        persistExportSettings()
+    }
+
+    private func defaultExporterName() -> String {
+        let raw = NSFullUserName()
+        return normalizedDisplayName(raw).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func effectiveExporterForOutput() -> String {
+        let raw = participantResolution.effectiveExporter
+        let trimmed = applyPhoneOverrideIfNeeded(raw).trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
             return WhatsAppExportService.exporterPlaceholderDisplayName
         }
-        return resolved.isEmpty ? "—" : resolved
+        return trimmed
     }
 
-    private func resolvedChatPartnerName() -> String {
-        if chatPartnerSelection == Self.customChatPartnerTag {
-            let trimmed = chatPartnerCustomName.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty { return trimmed }
+    private func effectivePartnerForOutput() -> String {
+        var trimmed = applyPhoneOverrideIfNeeded(participantResolution.effectivePartner)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { trimmed = "Chat" }
+        let exporter = applyPhoneOverrideIfNeeded(participantResolution.effectiveExporter)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !exporter.isEmpty && normalizedKey(trimmed) == normalizedKey(exporter) {
+            trimmed = "Chat"
         }
-        let trimmed = chatPartnerSelection.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmed.isEmpty {
-            return applyPhoneOverrideIfNeeded(trimmed)
-        }
-        if let auto = autoDetectedChatPartnerName {
-            return applyPhoneOverrideIfNeeded(auto)
-        }
-        if let fallback = chatPartnerCandidates.first {
-            return applyPhoneOverrideIfNeeded(fallback)
-        }
-        return ""
+        return trimmed
     }
 
     // MARK: - Logging
@@ -2059,7 +2340,7 @@ struct ContentView: View {
     }
 
     private var canStartExport: Bool {
-        !isRunning && chatURL != nil && outBaseURL != nil
+        !isRunning && chatURL != nil && outBaseURL != nil && !needsParticipantConfirmation
     }
 
     private var debugLoggingEnabled: Bool {
@@ -2937,7 +3218,6 @@ struct ContentView: View {
         currentRunStep = nil
         lastExportDir = nil
         targetFolderLabel = .placeholder
-        lastSidecarHTML = nil
         runProgress = []
         runStepTimings = [:]
         runStepTick = DispatchTime.now()
@@ -2963,33 +3243,12 @@ struct ContentView: View {
             refreshParticipants(for: chatURL)
         }
 
-        let chatPartnerSelectionTrimmed = chatPartnerSelection.trimmingCharacters(in: .whitespacesAndNewlines)
-        let chatPartnerCustomTrimmed = chatPartnerCustomName.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        let uiChatPartnerRaw: String
-        let uiChatPartnerSource: String
-        if chatPartnerSelection == Self.customChatPartnerTag, !chatPartnerCustomTrimmed.isEmpty {
-            uiChatPartnerRaw = chatPartnerCustomTrimmed
-            uiChatPartnerSource = "ui_override"
-        } else if !chatPartnerSelectionTrimmed.isEmpty {
-            uiChatPartnerRaw = chatPartnerSelectionTrimmed
-            uiChatPartnerSource = "ui_selection"
-        } else if let auto = autoDetectedChatPartnerName, !auto.isEmpty {
-            uiChatPartnerRaw = auto
-            uiChatPartnerSource = "auto"
-        } else if let fallback = chatPartnerCandidates.first {
-            uiChatPartnerRaw = fallback
-            uiChatPartnerSource = "fallback"
-        } else {
-            uiChatPartnerRaw = ""
-            uiChatPartnerSource = "fallback"
-        }
-
-        let detectedPartnerRaw: String = {
-            let auto = autoDetectedChatPartnerName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            if !auto.isEmpty { return auto }
-            let first = chatPartnerCandidates.first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            return first
+        let resolution = participantResolution
+        let detectedPartnerRaw = resolution.detectedPartner?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let uiChatPartnerSource: String = {
+            if resolution.wasSwapped { return "swap" }
+            if resolution.partnerWasOverridden { return "override" }
+            return "detected"
         }()
 
         var participantNameOverrides: [String: String] = phoneParticipantOverrides.reduce(into: [:]) { acc, kv in
@@ -2999,26 +3258,28 @@ struct ContentView: View {
                 acc[key] = val
             }
         }
-        if chatPartnerSelection == Self.customChatPartnerTag {
-            let custom = chatPartnerCustomName.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !custom.isEmpty, let raw = rawChatPartnerOverrideCandidate() {
-                participantNameOverrides[raw] = custom
-            }
+        if let override = resolution.exporterOverride?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !override.isEmpty,
+           let detected = resolution.detectedExporter?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !detected.isEmpty,
+           normalizedKey(override) != normalizedKey(detected) {
+            participantNameOverrides[detected] = override
+        }
+        if let override = resolution.partnerOverride?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !override.isEmpty,
+           let detected = resolution.detectedPartner?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !detected.isEmpty,
+           normalizedKey(override) != normalizedKey(detected) {
+            participantNameOverrides[detected] = override
         }
 
-        let outputChatPartner = resolvedChatPartnerName()
-        let normalizedDetected = normalizedDisplayName(detectedPartnerRaw)
-        let normalizedOutput = normalizedDisplayName(outputChatPartner)
+        let outputChatPartner = effectivePartnerForOutput()
+        let outputChatPartners = participantResolution.effectivePartners
+            .map { applyPhoneOverrideIfNeeded($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
         let overridePartnerEffective: String? = {
-            let trimmedOutput = outputChatPartner.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmedOutput.isEmpty { return nil }
-            if uiChatPartnerSource == "ui_override" || uiChatPartnerSource == "ui_selection" {
-                return trimmedOutput
-            }
-            if !normalizedOutput.isEmpty && normalizedOutput != normalizedDetected {
-                return trimmedOutput
-            }
-            return nil
+            let trimmed = resolution.partnerOverride?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return trimmed.isEmpty ? nil : trimmed
         }()
 
         let snapshot: WAInputSnapshot
@@ -3045,20 +3306,14 @@ struct ContentView: View {
         let provenance = snapshot.provenance
         let replayMode = snapshot.inputMode
 
-        let exporter = resolvedExporterName()
-        if exporter.isEmpty {
-            appendLog("ERROR: Could not determine exporter.")
-            markRunFailure(summary: "Could not determine exporter.", artifact: "Validation")
-            isRunning = false
-            return
-        }
-
-        if uiChatPartnerRaw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            appendLog("ERROR: Please choose a chat partner.")
-            markRunFailure(summary: "Please choose a chat partner.", artifact: "Validation")
-            isRunning = false
-            return
-        }
+        let exporter = effectiveExporterForOutput()
+        let allowPlaceholderAsMe = resolution.allowPlaceholderAsMe
+        let titleNamesOverride = WhatsAppExportService.conversationLabelForOutput(
+            exporter: exporter,
+            partners: outputChatPartners.isEmpty ? nil : outputChatPartners,
+            chatKind: resolution.chatKind,
+            chatURL: resolvedChatURL
+        )
 
         let selectedVariantsInOrder = selectedVariantsInUI
 
@@ -3184,8 +3439,17 @@ struct ContentView: View {
             baseNameOverride: baseNameOverride?.trimmingCharacters(in: .whitespacesAndNewlines),
             exporter: exporter,
             chatPartner: outputChatPartner,
+            chatPartners: outputChatPartners,
             chatPartnerSource: uiChatPartnerSource,
             chatPartnerFolderOverride: outputChatPartnerFolderOverride,
+            exporterConfidence: resolution.exporterConfidence,
+            partnerConfidence: resolution.partnerConfidence,
+            exporterWasOverridden: resolution.exporterWasOverridden,
+            partnerWasOverridden: resolution.partnerWasOverridden,
+            wasSwapped: resolution.wasSwapped,
+            allowPlaceholderAsMe: allowPlaceholderAsMe,
+            chatKind: resolution.chatKind,
+            titleNamesOverride: titleNamesOverride,
             detectedPartnerRaw: detectedPartnerRaw,
             overridePartnerRaw: overridePartnerEffective,
             participantDetection: participantDetection,
@@ -3259,7 +3523,14 @@ struct ContentView: View {
             return
         }
         let overrideTrimmed = context.baseNameOverride?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let baseName = overrideTrimmed.isEmpty ? prepared.baseName : overrideTrimmed
+        let computedBaseName = WhatsAppExportService.composeExportBaseNameForOutput(
+            messages: prepared.messages,
+            chatURL: prepared.chatURL,
+            exporter: context.exporter,
+            partner: context.chatPartner,
+            chatKind: context.chatKind
+        )
+        let baseName = overrideTrimmed.isEmpty ? computedBaseName : overrideTrimmed
         let preparedForRun = Self.preparedWithBaseName(prepared, baseName: baseName)
         let runRoot = Self.runRootDirectory(
             outDir: context.outDir,
@@ -3429,6 +3700,13 @@ struct ContentView: View {
                     deleteOriginals: runContext.wantsDeleteOriginals,
                     rawArchive: runContext.wantsRawArchiveCopy
                 )
+                let resolution = WhatsAppExportService.ManifestParticipantResolution(
+                    exporterConfidence: runContext.exporterConfidence,
+                    partnerConfidence: runContext.partnerConfidence,
+                    exporterWasOverridden: runContext.exporterWasOverridden,
+                    partnerWasOverridden: runContext.partnerWasOverridden,
+                    wasSwapped: runContext.wasSwapped
+                )
                 _ = try WhatsAppExportService.writeDeterministicManifestAndChecksums(
                     exportDir: workResult.exportDir,
                     baseName: baseName,
@@ -3437,6 +3715,7 @@ struct ContentView: View {
                     meName: prepared.meName,
                     artifactRelativePaths: artifactPaths,
                     flags: flags,
+                    resolution: resolution,
                     allowOverwrite: runContext.allowOverwrite,
                     debugEnabled: debugEnabled,
                     debugLog: debugLog
@@ -3487,9 +3766,6 @@ struct ContentView: View {
             )
             lastRunDuration = totalDuration
             lastExportDir = workResult.exportDir
-            lastSidecarHTML = runContext.wantsSidecar
-                ? Self.outputSidecarHTML(baseName: baseName, in: workResult.exportDir)
-                : nil
             lastRunFailureSummary = nil
             lastRunFailureArtifact = nil
             currentRunStep = nil
@@ -4074,7 +4350,10 @@ struct ContentView: View {
                             detectedPartnerRaw: context.detectedPartnerRaw,
                             overridePartnerRaw: context.overridePartnerRaw,
                             originalZipURL: context.provenance.originalZipURL,
-                            attachmentEntries: attachmentEntries
+                            attachmentEntries: attachmentEntries,
+                            titleNamesOverride: context.titleNamesOverride,
+                            partnerNamesOverride: context.chatPartners,
+                            allowPlaceholderAsMe: context.allowPlaceholderAsMe
                         )
                     }
                     if debugEnabled {
@@ -4221,6 +4500,9 @@ struct ContentView: View {
                             enablePreviews: variant.enablePreviews,
                             embedAttachments: variant.embedAttachments,
                             embedAttachmentThumbnailsOnly: variant.thumbnailsOnly,
+                            titleNamesOverride: context.titleNamesOverride,
+                            partnerNamesOverride: context.chatPartners,
+                            allowPlaceholderAsMe: context.allowPlaceholderAsMe,
                             thumbnailsUseStoreHref: useThumbHrefs,
                             attachmentRelBaseDir: thumbRelBaseDir,
                             thumbnailStore: thumbnailStore,
@@ -4286,6 +4568,9 @@ struct ContentView: View {
                             prepared: prepared,
                             outDir: stagingDir,
                             chatURLOverride: mdChatURL,
+                            titleNamesOverride: context.titleNamesOverride,
+                            partnerNamesOverride: context.chatPartners,
+                            allowPlaceholderAsMe: context.allowPlaceholderAsMe,
                             attachmentRelBaseDir: mdAttachmentRelBaseDir,
                             attachmentOverrideByName: mdAttachmentOverrides
                         )
@@ -4459,7 +4744,12 @@ struct ContentView: View {
     }
 
     private func restorePersistedSettings() {
-        guard let snapshot = WETExportSettingsStorage.shared.load() else { return }
+        guard let snapshot = WETExportSettingsStorage.shared.load() else {
+            if exporterName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                exporterName = defaultExporterName()
+            }
+            return
+        }
         isRestoringSettings = true
         defer {
             isRestoringSettings = false
@@ -4473,6 +4763,10 @@ struct ContentView: View {
         exportSortedAttachments = snapshot.exportSortedAttachments
         includeRawArchive = snapshot.includeRawArchive
         deleteOriginalsAfterSidecar = snapshot.deleteOriginalsAfterSidecar
+        exporterName = snapshot.exporterName ?? ""
+        if exporterName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            exporterName = defaultExporterName()
+        }
 
         if let chatBookmark = snapshot.chatBookmark {
             if let url = resolveBookmark(chatBookmark, expectDirectory: false) {
@@ -4495,6 +4789,10 @@ struct ContentView: View {
 
     private func persistExportSettings() {
         guard !isRestoringSettings else { return }
+        let exporterNameSnapshot: String? = {
+            let trimmed = normalizedDisplayName(exporterName).trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }()
         let snapshot = WETExportSettingsSnapshot(
             schemaVersion: WETExportSettingsSnapshot.currentVersion,
             chatBookmark: bookmarkData(for: chatURL),
@@ -4505,7 +4803,8 @@ struct ContentView: View {
             exportMarkdown: exportMarkdown,
             exportSortedAttachments: exportSortedAttachments,
             includeRawArchive: includeRawArchive,
-            deleteOriginalsAfterSidecar: deleteOriginalsAfterSidecar
+            deleteOriginalsAfterSidecar: deleteOriginalsAfterSidecar,
+            exporterName: exporterNameSnapshot
         )
         WETExportSettingsStorage.shared.save(snapshot)
     }
@@ -4642,7 +4941,7 @@ private final class SecurityScopedURL {
 }
 
 private struct WETExportSettingsSnapshot: Codable {
-    static let currentVersion = 3
+    static let currentVersion = 4
 
     let schemaVersion: Int
     let chatBookmark: Data?
@@ -4654,6 +4953,7 @@ private struct WETExportSettingsSnapshot: Codable {
     let exportSortedAttachments: Bool
     let includeRawArchive: Bool
     let deleteOriginalsAfterSidecar: Bool
+    let exporterName: String?
 
     private enum CodingKeys: String, CodingKey {
         case schemaVersion
@@ -4666,6 +4966,7 @@ private struct WETExportSettingsSnapshot: Codable {
         case exportSortedAttachments
         case includeRawArchive
         case deleteOriginalsAfterSidecar
+        case exporterName
     }
 
     init(
@@ -4678,7 +4979,8 @@ private struct WETExportSettingsSnapshot: Codable {
         exportMarkdown: Bool,
         exportSortedAttachments: Bool,
         includeRawArchive: Bool,
-        deleteOriginalsAfterSidecar: Bool
+        deleteOriginalsAfterSidecar: Bool,
+        exporterName: String?
     ) {
         self.schemaVersion = schemaVersion
         self.chatBookmark = chatBookmark
@@ -4690,6 +4992,7 @@ private struct WETExportSettingsSnapshot: Codable {
         self.exportSortedAttachments = exportSortedAttachments
         self.includeRawArchive = includeRawArchive
         self.deleteOriginalsAfterSidecar = deleteOriginalsAfterSidecar
+        self.exporterName = exporterName
     }
 
     init(from decoder: Decoder) throws {
@@ -4704,6 +5007,7 @@ private struct WETExportSettingsSnapshot: Codable {
         exportSortedAttachments = (try? container.decode(Bool.self, forKey: .exportSortedAttachments)) ?? true
         includeRawArchive = (try? container.decode(Bool.self, forKey: .includeRawArchive)) ?? false
         deleteOriginalsAfterSidecar = (try? container.decode(Bool.self, forKey: .deleteOriginalsAfterSidecar)) ?? false
+        exporterName = try? container.decode(String.self, forKey: .exporterName)
     }
 }
 

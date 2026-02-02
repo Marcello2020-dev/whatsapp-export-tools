@@ -278,6 +278,12 @@ public enum WAParticipantDetectionConfidence: String, Sendable {
     case low
 }
 
+public enum WETParticipantConfidence: String, Sendable {
+    case strong
+    case weak
+    case none
+}
+
 public struct WAParticipantDetectionEvidence: Sendable {
     public let source: String
     public let excerpt: String
@@ -289,6 +295,8 @@ public struct WAParticipantDetectionResult: Sendable {
     public let otherPartyCandidate: String?
     public let exporterSelfCandidate: String?
     public let exporterPlaceholderSeen: Bool
+    public let exporterConfidence: WETParticipantConfidence
+    public let partnerConfidence: WETParticipantConfidence
     public let confidence: WAParticipantDetectionConfidence
     public let evidence: [WAParticipantDetectionEvidence]
 }
@@ -2185,12 +2193,46 @@ public enum WhatsAppExportService {
         }
         evidence.append(WAParticipantDetectionEvidence(source: "decision:confidence", excerpt: confidence.rawValue))
 
+        let exporterConfidence: WETParticipantConfidence = {
+            if exporterPlaceholderSeen { return .none }
+            if selfEvidence != nil, exporterSelfCandidate != nil { return .strong }
+            return .none
+        }()
+
+        let partnerConfidence: WETParticipantConfidence = {
+            switch chatKind {
+            case .group:
+                return .strong
+            case .oneToOne, .unknown:
+                let candidate = otherPartyCandidateFinal ?? chatTitleCandidateFinal
+                guard let candidate else { return .none }
+                var confidence: WETParticipantConfidence = .weak
+                let source = otherPartySourceFinal ?? chatTitleSourceFinal
+                if let source,
+                   source.hasPrefix("header") || source.hasPrefix("system") || source.hasPrefix("container") {
+                    confidence = .strong
+                }
+                if isPhoneCandidate(candidate) {
+                    confidence = .weak
+                }
+                let nonPhoneCount = participantsRaw.filter {
+                    !isPhoneCandidate($0) && !isExporterPlaceholderLabel($0) && !isSystemAuthor($0)
+                }.count
+                if nonPhoneCount <= 1 {
+                    confidence = .weak
+                }
+                return confidence
+            }
+        }()
+
         let detection = WAParticipantDetectionResult(
             chatKind: chatKind,
             chatTitleCandidate: chatTitleCandidateFinal,
             otherPartyCandidate: otherPartyCandidateFinal,
             exporterSelfCandidate: exporterSelfCandidate,
             exporterPlaceholderSeen: exporterPlaceholderSeen,
+            exporterConfidence: exporterConfidence,
+            partnerConfidence: partnerConfidence,
             confidence: confidence,
             evidence: evidence
         )
@@ -2482,6 +2524,8 @@ public enum WhatsAppExportService {
             return chooseMeName(messages: msgs)
         }()
 
+        let partnerNamesForRender = partnerNamesForRender(messages: msgs, meName: meName)
+
         let base = composeExportBaseName(
             messages: msgs,
             chatURL: chatPath,
@@ -2619,6 +2663,7 @@ public enum WhatsAppExportService {
                 chatURL: sidecarChatURL,
                 outHTML: stagedSidecarHTML,
                 meName: meName,
+                partnerNamesOverride: partnerNamesForRender,
                 enablePreviews: true,
                 // Sidecar must stay small: do NOT embed media as data-URLs; reference files in the copied export folder.
                 embedAttachments: false,
@@ -2659,6 +2704,7 @@ public enum WhatsAppExportService {
             chatURL: chatPath,
             outHTML: stagedHTML,
             meName: meName,
+            partnerNamesOverride: partnerNamesForRender,
             enablePreviews: enablePreviews,
             embedAttachments: embedAttachments,
             embedAttachmentThumbnailsOnly: embedAttachmentThumbnailsOnly,
@@ -2677,6 +2723,7 @@ public enum WhatsAppExportService {
             chatURL: mdChatURL,
             outMD: stagedMD,
             meName: meName,
+            partnerNamesOverride: partnerNamesForRender,
             enablePreviews: enablePreviews,
             embedAttachments: embedAttachments,
             embedAttachmentThumbnailsOnly: embedAttachmentThumbnailsOnly,
@@ -2829,6 +2876,9 @@ public enum WhatsAppExportService {
         enablePreviews: Bool,
         embedAttachments: Bool,
         embedAttachmentThumbnailsOnly: Bool,
+        titleNamesOverride: String? = nil,
+        partnerNamesOverride: [String]? = nil,
+        allowPlaceholderAsMe: Bool = true,
         thumbnailsUseStoreHref: Bool = false,
         attachmentRelBaseDir: URL? = nil,
         attachmentOverrideByName: [String: URL]? = nil,
@@ -2845,6 +2895,9 @@ public enum WhatsAppExportService {
             chatURL: prepared.chatURL,
             outHTML: outHTML,
             meName: prepared.meName,
+            titleNamesOverride: titleNamesOverride,
+            partnerNamesOverride: partnerNamesOverride,
+            allowPlaceholderAsMe: allowPlaceholderAsMe,
             enablePreviews: enablePreviews,
             embedAttachments: embedAttachments,
             embedAttachmentThumbnailsOnly: embedAttachmentThumbnailsOnly,
@@ -2862,6 +2915,9 @@ public enum WhatsAppExportService {
         prepared: PreparedExport,
         outDir: URL,
         chatURLOverride: URL? = nil,
+        titleNamesOverride: String? = nil,
+        partnerNamesOverride: [String]? = nil,
+        allowPlaceholderAsMe: Bool = true,
         attachmentRelBaseDir: URL? = nil,
         attachmentOverrideByName: [String: URL]? = nil
     ) throws -> URL {
@@ -2876,6 +2932,9 @@ public enum WhatsAppExportService {
             chatURL: chatURL,
             outMD: outMD,
             meName: prepared.meName,
+            titleNamesOverride: titleNamesOverride,
+            partnerNamesOverride: partnerNamesOverride,
+            allowPlaceholderAsMe: allowPlaceholderAsMe,
             enablePreviews: true,
             embedAttachments: false,
             embedAttachmentThumbnailsOnly: false,
@@ -2893,7 +2952,10 @@ public enum WhatsAppExportService {
         detectedPartnerRaw: String,
         overridePartnerRaw: String? = nil,
         originalZipURL: URL? = nil,
-        attachmentEntries: [AttachmentCanonicalEntry] = []
+        attachmentEntries: [AttachmentCanonicalEntry] = [],
+        titleNamesOverride: String? = nil,
+        partnerNamesOverride: [String]? = nil,
+        allowPlaceholderAsMe: Bool = true
     ) async throws -> (sidecarBaseDir: URL?, sidecarHTML: URL, expectedAttachments: Int) {
         resetStagedAttachmentCache()
 
@@ -2909,6 +2971,9 @@ public enum WhatsAppExportService {
                 chatURL: prepared.chatURL,
                 outHTML: sidecarHTML,
                 meName: prepared.meName,
+                titleNamesOverride: titleNamesOverride,
+                partnerNamesOverride: partnerNamesOverride,
+                allowPlaceholderAsMe: allowPlaceholderAsMe,
                 enablePreviews: true,
                 embedAttachments: false,
                 embedAttachmentThumbnailsOnly: false,
@@ -2961,6 +3026,9 @@ public enum WhatsAppExportService {
             chatURL: sidecarChatURL,
             outHTML: sidecarHTML,
             meName: prepared.meName,
+            titleNamesOverride: titleNamesOverride,
+            partnerNamesOverride: partnerNamesOverride,
+            allowPlaceholderAsMe: allowPlaceholderAsMe,
             enablePreviews: true,
             embedAttachments: false,
             embedAttachmentThumbnailsOnly: false,
@@ -3018,6 +3086,8 @@ public enum WhatsAppExportService {
             }
             return chooseMeName(messages: msgs)
         }()
+
+        let partnerNamesForRender = partnerNamesForRender(messages: msgs, meName: meName)
 
         let base = composeExportBaseName(messages: msgs, chatURL: chatPath, meName: meName)
 
@@ -3152,6 +3222,7 @@ public enum WhatsAppExportService {
                 chatURL: sidecarChatURL,
                 outHTML: stagedSidecarHTML,
                 meName: meName,
+                partnerNamesOverride: partnerNamesForRender,
                 enablePreviews: true,
                 // Sidecar must stay small: do NOT embed media as data-URLs; reference files in the copied export folder.
                 embedAttachments: false,
@@ -3196,6 +3267,7 @@ public enum WhatsAppExportService {
                 chatURL: chatPath,
                 outHTML: outHTML,
                 meName: meName,
+                partnerNamesOverride: partnerNamesForRender,
                 enablePreviews: v.enablePreviews,
                 embedAttachments: v.embedAttachments,
                 embedAttachmentThumbnailsOnly: v.embedAttachmentThumbnailsOnly,
@@ -3215,6 +3287,7 @@ public enum WhatsAppExportService {
             chatURL: mdChatURL,
             outMD: stagedMD,
             meName: meName,
+            partnerNamesOverride: partnerNamesForRender,
             enablePreviews: true,
             embedAttachments: false,
             embedAttachmentThumbnailsOnly: false,
@@ -4741,6 +4814,150 @@ public enum WhatsAppExportService {
         return "\(meNorm) ↔ \(groupLabel)"
     }
 
+    nonisolated private static func partnerNamesForRender(
+        messages: [WAMessage],
+        meName: String
+    ) -> [String] {
+        let authors = participants(from: messages)
+        let uniqAuthors = Array(Set(authors.map { normalizedParticipantLabel($0) }))
+            .filter { !$0.isEmpty && !isSystemAuthor($0) && !isExporterPlaceholderLabel($0) }
+            .sorted()
+
+        var meNorm = normalizedParticipantLabel(meName)
+        if isExporterPlaceholderLabel(meNorm) {
+            meNorm = ""
+        }
+        let partners = uniqAuthors.filter { normalizedParticipantLabel($0).lowercased() != meNorm.lowercased() }
+        return partners
+    }
+
+    nonisolated static func resolveParticipants(
+        participants: [String],
+        detectedExporter: String?,
+        detectedPartner: String?,
+        partnerHint: String?,
+        exporterOverride: String?,
+        partnerOverride: String?,
+        chatKind: WAParticipantChatKind
+    ) -> (exporter: String, partners: [String]) {
+        func trim(_ value: String?) -> String? {
+            let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return trimmed.isEmpty ? nil : trimmed
+        }
+
+        let exporter = trim(exporterOverride) ?? trim(detectedExporter) ?? ""
+        let partnerOverrideTrimmed = trim(partnerOverride)
+        if let partnerOverrideTrimmed {
+            return (exporter, [partnerOverrideTrimmed])
+        }
+
+        let partnerHintTrimmed = trim(partnerHint)
+        if chatKind == .group {
+            let groupName = partnerHintTrimmed ?? ""
+            if !groupName.isEmpty { return (exporter, [groupName]) }
+        }
+
+        if participants.isEmpty {
+            if let partnerHintTrimmed { return (exporter, [partnerHintTrimmed]) }
+            return (exporter, [])
+        }
+
+        if !exporter.isEmpty {
+            let exporterKey = normalizedParticipantLabel(exporter).lowercased()
+            var partners = participants.filter { normalizedParticipantLabel($0).lowercased() != exporterKey }
+            if partners.isEmpty, let partnerHintTrimmed {
+                partners = [partnerHintTrimmed]
+            }
+            return (exporter, partners)
+        }
+
+        if let partnerHintTrimmed {
+            let partnerKey = normalizedParticipantLabel(partnerHintTrimmed).lowercased()
+            let filtered = participants.filter { normalizedParticipantLabel($0).lowercased() != partnerKey }
+            if filtered.count == 1 {
+                return (filtered[0], [partnerHintTrimmed])
+            }
+            return (exporter, [partnerHintTrimmed])
+        }
+
+        return (exporter, participants)
+    }
+
+    nonisolated static func conversationLabelForOutput(
+        exporter: String?,
+        partner: String?,
+        chatKind: WAParticipantChatKind,
+        chatURL: URL
+    ) -> String {
+        conversationLabelForOutput(
+            exporter: exporter,
+            partners: partner == nil ? nil : [partner!],
+            chatKind: chatKind,
+            chatURL: chatURL
+        )
+    }
+
+    nonisolated static func conversationLabelForOutput(
+        exporter: String?,
+        partners: [String]?,
+        chatKind: WAParticipantChatKind,
+        chatURL: URL
+    ) -> String {
+        var exporterLabel = normalizedParticipantLabel(exporter ?? "")
+        if exporterLabel.isEmpty || isExporterPlaceholderLabel(exporterLabel) {
+            exporterLabel = exporterPlaceholderDisplayName
+        }
+
+        var partnerLabels = partners?
+            .map { normalizedParticipantLabel($0) }
+            .filter { !$0.isEmpty && !isExporterPlaceholderLabel($0) } ?? []
+
+        let fallback = fallbackChatIdentifier(from: chatURL)
+
+        if chatKind == .group {
+            let groupLabel = partnerLabels.first ?? fallback
+            return groupLabel.isEmpty ? "Chat" : groupLabel
+        }
+
+        if partnerLabels.count == 1 {
+            let partnerLabel = partnerLabels[0]
+            if !partnerLabel.isEmpty,
+               !exporterLabel.isEmpty,
+               partnerLabel.lowercased() == exporterLabel.lowercased() {
+                partnerLabels = []
+            }
+        }
+
+        let partnerLabel: String = {
+            if partnerLabels.count == 1 { return partnerLabels[0] }
+            if partnerLabels.count > 1 { return partnerLabels.joined(separator: ", ") }
+            return ""
+        }()
+
+        let finalPartner = partnerLabel.isEmpty ? "Chat" : partnerLabel
+        let finalExporter = exporterLabel.isEmpty ? exporterPlaceholderDisplayName : exporterLabel
+        return "\(finalExporter) ↔ \(finalPartner)"
+    }
+
+    nonisolated static func composeExportBaseNameForOutput(
+        messages: [WAMessage],
+        chatURL: URL,
+        exporter: String?,
+        partner: String?,
+        chatKind: WAParticipantChatKind
+    ) -> String {
+        let convoPart = conversationLabelForOutput(
+            exporter: exporter,
+            partner: partner,
+            chatKind: chatKind,
+            chatURL: chatURL
+        )
+        let periodPart = exportDateRangeLabel(messages: messages)
+        let createdStamp = exportCreatedStamp(for: chatURL)
+        let baseRaw = "WhatsApp Chat · \(convoPart) · \(periodPart) · Chat.txt created \(createdStamp)"
+        return safeFinderFilename(baseRaw)
+    }
+
     nonisolated private static func composeExportBaseName(
         messages: [WAMessage],
         chatURL: URL,
@@ -4952,20 +5169,31 @@ public enum WhatsAppExportService {
         let isPlaceholder: Bool
     }
 
-    nonisolated private static func resolvedAuthorDisplay(authorRaw: String, meName: String) -> AuthorDisplay {
+    nonisolated private static func resolvedAuthorDisplay(
+        authorRaw: String,
+        meName: String,
+        allowPlaceholderAsMe: Bool
+    ) -> AuthorDisplay {
         let authorNorm = _normSpace(authorRaw)
         if isExporterPlaceholderAuthor(authorNorm) {
-            let meNorm = _normSpace(meName)
-            if meNorm.isEmpty || isExporterPlaceholderLabel(meNorm) {
+            if allowPlaceholderAsMe {
+                let meNorm = _normSpace(meName)
+                if meNorm.isEmpty || isExporterPlaceholderLabel(meNorm) {
+                    return AuthorDisplay(
+                        name: exporterPlaceholderDisplayName,
+                        isMe: true,
+                        isPlaceholder: true
+                    )
+                }
                 return AuthorDisplay(
-                    name: exporterPlaceholderDisplayName,
+                    name: meNorm,
                     isMe: true,
                     isPlaceholder: true
                 )
             }
             return AuthorDisplay(
-                name: meNorm,
-                isMe: true,
+                name: exporterPlaceholderDisplayName,
+                isMe: false,
                 isPlaceholder: true
             )
         }
@@ -6714,98 +6942,8 @@ nonisolated private static func stageThumbnailForExport(
     // Render HTML (1:1 layout + CSS)
     // ---------------------------
 
-    private struct BufferedFileWriter {
-        private let handle: FileHandle
-        private let flushThreshold: Int
-        private var buffer = Data()
-        private(set) var bytesWritten: Int = 0
-
-        nonisolated init(url: URL, flushThresholdBytes: Int = 1_048_576) throws {
-            let fm = FileManager.default
-            if fm.fileExists(atPath: url.path) {
-                try? fm.removeItem(at: url)
-            }
-            fm.createFile(atPath: url.path, contents: nil)
-            self.handle = try FileHandle(forWritingTo: url)
-            self.flushThreshold = max(64 * 1024, flushThresholdBytes)
-        }
-
-        nonisolated mutating func append(_ string: String) throws {
-            guard !string.isEmpty else { return }
-            try append(Data(string.utf8))
-        }
-
-        nonisolated mutating func append(_ data: Data) throws {
-            guard !data.isEmpty else { return }
-            buffer.append(data)
-            if buffer.count >= flushThreshold {
-                try flush()
-            }
-        }
-
-        nonisolated mutating func flush() throws {
-            guard !buffer.isEmpty else { return }
-            try handle.write(contentsOf: buffer)
-            bytesWritten += buffer.count
-            buffer.removeAll(keepingCapacity: true)
-        }
-
-        nonisolated mutating func close() throws {
-            try flush()
-            try handle.close()
-        }
-    }
-
-    nonisolated private static func renderHTML(
-        msgs: [WAMessage],
-        chatURL: URL,
-        outHTML: URL,
-        meName: String,
-        enablePreviews: Bool,
-        embedAttachments: Bool,
-        embedAttachmentThumbnailsOnly: Bool,
-        thumbnailsUseStoreHref: Bool = false,
-        attachmentRelBaseDir: URL? = nil,
-        attachmentOverrideByName: [String: URL]? = nil,
-        disableThumbStaging: Bool = false,
-        externalAttachments: Bool = false,
-        externalPreviews: Bool = false,
-        externalAssetsDir: URL? = nil,
-        thumbnailStore: ThumbnailStore? = nil,
-        perfLabel: String? = nil
-    ) async throws {
-
-        let renderStart = ProcessInfo.processInfo.systemUptime
-        let perfEnabled = ProcessInfo.processInfo.environment["WET_PERF"] == "1"
-
-        // participants -> title_names
-        var authors: [String] = []
-        for m in msgs {
-            let a = _normSpace(m.author)
-            if a.isEmpty { continue }
-            if isSystemAuthor(a) { continue }
-            if !authors.contains(a) { authors.append(a) }
-        }
-        let others = authors.filter { _normSpace($0).lowercased() != _normSpace(meName).lowercased() }
-        let titleNames: String = {
-            if others.count == 1 { return "\(meName) ↔ \(others[0])" }
-            if others.count > 1 { return "\(meName) ↔ \(others.joined(separator: ", "))" }
-            return "\(meName) ↔ Chat"
-        }()
-
-        // export time = transcript creation date (fallback: modification date)
-        let exportCreatedAt = exportCreatedDate(chatURL: chatURL)
-        let exportCreatedStr = exportCreatedAt.map { exportDTFormatter.string(from: $0) } ?? "(unknown)"
-
-        // message count (exclude WhatsApp system messages)
-        let messageCount: Int = msgs.reduce(0) { acc, m in
-            let authorNorm = _normSpace(m.author)
-            let textWoAttach = stripAttachmentMarkers(m.text)
-            return acc + (isSystemMessage(authorRaw: authorNorm, text: textWoAttach) ? 0 : 1)
-        }
-
-        // CSS is intentionally kept stable to preserve HTML rendering.
-        let css = #"""
+    nonisolated private static func htmlCSS() -> String {
+        #"""
         :root{
           --bg:#e5ddd5;
           --bubble-me:#DCF8C6;
@@ -6843,6 +6981,16 @@ nonisolated private static func stageThumbnailForExport(
           margin-bottom: 14px;
         }
         .h-title{font-weight:700; font-size: 24px; margin:0 0 6px;}
+        .h-participants{
+          display:flex;
+          justify-content:space-between;
+          gap:12px;
+          margin:0 0 6px;
+          font-size: 16px;
+          font-weight:600;
+        }
+        .h-partner{flex:1; text-align:left;}
+        .h-me{flex:1; text-align:right;}
         .h-meta{margin:0; color: var(--muted); font-size: 15px; line-height:1.4;}
         .day{
           display:flex;
@@ -6881,13 +7029,14 @@ nonisolated private static func stageThumbnailForExport(
           max-width: 90%;
         }
         .bubble{
-          max-width: 78%;
+          max-width: 72%;
           min-width: 220px;
           padding: 10px 12px 8px;
           border-radius: 18px;
           box-shadow: var(--shadow);
           position:relative;
           overflow:hidden;
+          text-align: left;
         }
         .bubble.system{
           background: rgba(0,0,0,.22);
@@ -6906,6 +7055,8 @@ nonisolated private static func stageThumbnailForExport(
         }
         .bubble.me{background: var(--bubble-me);}
         .bubble.other{background: var(--bubble-other);}
+        .bubble .name,
+        .bubble .text{ text-align: left; }
         .name{
           font-weight: 700;
           margin: 0 0 8px;
@@ -6983,7 +7134,118 @@ nonisolated private static func stageThumbnailForExport(
         .linkline{margin-top:8px;font-size:15px;color:#2a5db0;word-break:break-all;}
         .fileline{margin-top:10px;font-size:15px;color:#2b2b2b;opacity:.85;word-break:break-all;}
         """#
+    }
 
+#if DEBUG
+    nonisolated static func _htmlCSSForTesting() -> String {
+        htmlCSS()
+    }
+#endif
+
+    private struct BufferedFileWriter {
+        private let handle: FileHandle
+        private let flushThreshold: Int
+        private var buffer = Data()
+        private(set) var bytesWritten: Int = 0
+
+        nonisolated init(url: URL, flushThresholdBytes: Int = 1_048_576) throws {
+            let fm = FileManager.default
+            if fm.fileExists(atPath: url.path) {
+                try? fm.removeItem(at: url)
+            }
+            fm.createFile(atPath: url.path, contents: nil)
+            self.handle = try FileHandle(forWritingTo: url)
+            self.flushThreshold = max(64 * 1024, flushThresholdBytes)
+        }
+
+        nonisolated mutating func append(_ string: String) throws {
+            guard !string.isEmpty else { return }
+            try append(Data(string.utf8))
+        }
+
+        nonisolated mutating func append(_ data: Data) throws {
+            guard !data.isEmpty else { return }
+            buffer.append(data)
+            if buffer.count >= flushThreshold {
+                try flush()
+            }
+        }
+
+        nonisolated mutating func flush() throws {
+            guard !buffer.isEmpty else { return }
+            try handle.write(contentsOf: buffer)
+            bytesWritten += buffer.count
+            buffer.removeAll(keepingCapacity: true)
+        }
+
+        nonisolated mutating func close() throws {
+            try flush()
+            try handle.close()
+        }
+    }
+
+    nonisolated private static func renderHTML(
+        msgs: [WAMessage],
+        chatURL: URL,
+        outHTML: URL,
+        meName: String,
+        titleNamesOverride: String? = nil,
+        partnerNamesOverride: [String]? = nil,
+        allowPlaceholderAsMe: Bool = true,
+        enablePreviews: Bool,
+        embedAttachments: Bool,
+        embedAttachmentThumbnailsOnly: Bool,
+        thumbnailsUseStoreHref: Bool = false,
+        attachmentRelBaseDir: URL? = nil,
+        attachmentOverrideByName: [String: URL]? = nil,
+        disableThumbStaging: Bool = false,
+        externalAttachments: Bool = false,
+        externalPreviews: Bool = false,
+        externalAssetsDir: URL? = nil,
+        thumbnailStore: ThumbnailStore? = nil,
+        perfLabel: String? = nil
+    ) async throws {
+
+        let renderStart = ProcessInfo.processInfo.systemUptime
+        let perfEnabled = ProcessInfo.processInfo.environment["WET_PERF"] == "1"
+
+        // participants -> title_names (renderer uses resolved identities when provided)
+        let partnerNames: [String] = {
+            let overrides = partnerNamesOverride?
+                .map { _normSpace($0) }
+                .filter { !$0.isEmpty && !isExporterPlaceholderLabel($0) } ?? []
+            if !overrides.isEmpty { return overrides }
+
+            var authors: [String] = []
+            for m in msgs {
+                let a = _normSpace(m.author)
+                if a.isEmpty { continue }
+                if isExporterPlaceholderAuthor(a) { continue }
+                if isSystemAuthor(a) { continue }
+                if !authors.contains(a) { authors.append(a) }
+            }
+            return authors
+        }()
+        let others = partnerNames.filter { _normSpace($0).lowercased() != _normSpace(meName).lowercased() }
+        let titleNames: String = titleNamesOverride ?? {
+            if others.count == 1 { return "\(meName) ↔ \(others[0])" }
+            if others.count > 1 { return "\(meName) ↔ \(others.joined(separator: ", "))" }
+            return "\(meName) ↔ Chat"
+        }()
+
+        // export time = transcript creation date (fallback: modification date)
+        let exportCreatedAt = exportCreatedDate(chatURL: chatURL)
+        let exportCreatedStr = exportCreatedAt.map { exportDTFormatter.string(from: $0) } ?? "(unknown)"
+
+        // message count (exclude WhatsApp system messages)
+        let messageCount: Int = msgs.reduce(0) { acc, m in
+            let authorNorm = _normSpace(m.author)
+            let textWoAttach = stripAttachmentMarkers(m.text)
+            return acc + (isSystemMessage(authorRaw: authorNorm, text: textWoAttach) ? 0 : 1)
+        }
+
+        // CSS is intentionally kept stable to preserve HTML rendering.
+        let css = htmlCSS()
         // Keep the <style> block formatted with a newline after <style> and 4-space indentation.
         // This keeps output deterministic while preserving readable source formatting.
         let cssIndented = "    " + css.replacingOccurrences(of: "\n", with: "\n    ")
@@ -7124,8 +7386,22 @@ nonisolated private static func stageThumbnailForExport(
     </head><body><div class='wrap'>
     """)
 
+            let partnerDisplay: String = {
+                if others.count == 1 { return others[0] }
+                if others.count > 1 { return others.joined(separator: ", ") }
+                return "Chat"
+            }()
+            let meNameDisplay: String = {
+                let trimmed = _normSpace(meName)
+                return trimmed.isEmpty ? "Ich" : trimmed
+            }()
+
             parts.append("<div class='header'>")
-            parts.append("<p class='h-title'>WhatsApp Chat<br>\(htmlEscape(titleNames))</p>")
+            parts.append("<p class='h-title'>WhatsApp Chat</p>")
+            parts.append("<div class='h-participants'>")
+            parts.append("<div class='h-partner'>\(htmlEscape(partnerDisplay))</div>")
+            parts.append("<div class='h-me'>\(htmlEscape(meNameDisplay))</div>")
+            parts.append("</div>")
             parts.append("<p class='h-meta'>Quelle: \(htmlEscape(chatURL.lastPathComponent))<br>"
                          + "Export: \(htmlEscape(exportCreatedStr))<br>"
                          + "Nachrichten: \(messageCount)</p>")
@@ -7215,7 +7491,11 @@ nonisolated private static func stageThumbnailForExport(
             }
 
             let authorRaw = _normSpace(message.author)
-            let authorInfo = resolvedAuthorDisplay(authorRaw: authorRaw, meName: meName)
+            let authorInfo = resolvedAuthorDisplay(
+                authorRaw: authorRaw,
+                meName: meName,
+                allowPlaceholderAsMe: allowPlaceholderAsMe
+            )
             let author = authorInfo.name
 
             let textRaw = message.text
@@ -7764,6 +8044,9 @@ nonisolated private static func stageThumbnailForExport(
         chatURL: URL,
         outMD: URL,
         meName: String,
+        titleNamesOverride: String? = nil,
+        partnerNamesOverride: [String]? = nil,
+        allowPlaceholderAsMe: Bool = true,
         enablePreviews: Bool,
         embedAttachments: Bool,
         embedAttachmentThumbnailsOnly: Bool,
@@ -7771,16 +8054,25 @@ nonisolated private static func stageThumbnailForExport(
         attachmentOverrideByName: [String: URL]? = nil
     ) throws {
 
-        var authors: [String] = []
-        for m in msgs {
-            let a = _normSpace(m.author)
-            if a.isEmpty { continue }
-            if isSystemAuthor(a) { continue }
-            if !authors.contains(a) { authors.append(a) }
-        }
+        let partnerNames: [String] = {
+            let overrides = partnerNamesOverride?
+                .map { _normSpace($0) }
+                .filter { !$0.isEmpty && !isExporterPlaceholderLabel($0) } ?? []
+            if !overrides.isEmpty { return overrides }
 
-        let others = authors.filter { _normSpace($0).lowercased() != _normSpace(meName).lowercased() }
-        let titleNames: String = {
+            var authors: [String] = []
+            for m in msgs {
+                let a = _normSpace(m.author)
+                if a.isEmpty { continue }
+                if isExporterPlaceholderAuthor(a) { continue }
+                if isSystemAuthor(a) { continue }
+                if !authors.contains(a) { authors.append(a) }
+            }
+            return authors
+        }()
+
+        let others = partnerNames.filter { _normSpace($0).lowercased() != _normSpace(meName).lowercased() }
+        let titleNames: String = titleNamesOverride ?? {
             if others.count == 1 { return "\(meName) ↔ \(others[0])" }
             if others.count > 1 { return "\(meName) ↔ \(others.joined(separator: ", "))" }
             return "\(meName) ↔ Chat"
@@ -7821,7 +8113,11 @@ nonisolated private static func stageThumbnailForExport(
             }
 
             let authorRaw = _normSpace(m.author)
-            let authorInfo = resolvedAuthorDisplay(authorRaw: authorRaw, meName: meName)
+            let authorInfo = resolvedAuthorDisplay(
+                authorRaw: authorRaw,
+                meName: meName,
+                allowPlaceholderAsMe: allowPlaceholderAsMe
+            )
             let author = authorInfo.name
 
             let textRaw = m.text
@@ -8007,6 +8303,14 @@ nonisolated private static func stageThumbnailForExport(
         let rawArchive: Bool
     }
 
+    struct ManifestParticipantResolution: Sendable {
+        let exporterConfidence: WETParticipantConfidence
+        let partnerConfidence: WETParticipantConfidence
+        let exporterWasOverridden: Bool
+        let partnerWasOverridden: Bool
+        let wasSwapped: Bool
+    }
+
     struct ChecksumEntry: Sendable {
         let path: String
         let sha256: String
@@ -8037,6 +8341,7 @@ nonisolated private static func stageThumbnailForExport(
         meName: String,
         artifactRelativePaths: [String],
         flags: ManifestArtifactFlags,
+        resolution: ManifestParticipantResolution? = nil,
         allowOverwrite: Bool,
         debugEnabled: Bool = false,
         debugLog: ((String) -> Void)? = nil
@@ -8202,7 +8507,17 @@ nonisolated private static func stageThumbnailForExport(
             flags.rawArchive ? ("rawArchive", .null) : nil
         ].compactMap { $0 }
 
-        let manifestValue = WETJSONValue.object([
+        let resolutionValue: WETJSONValue? = resolution.map { res in
+            .object([
+                ("exporterConfidence", .string(res.exporterConfidence.rawValue)),
+                ("partnerConfidence", .string(res.partnerConfidence.rawValue)),
+                ("exporterWasOverridden", .bool(res.exporterWasOverridden)),
+                ("partnerWasOverridden", .bool(res.partnerWasOverridden)),
+                ("wasSwapped", .bool(res.wasSwapped))
+            ])
+        }
+
+        var manifestFields: [(String, WETJSONValue)] = [
             ("appVersion", .string(appVersion)),
             ("buildNumber", .string(buildNumber)),
             ("exportBase", .string(baseName)),
@@ -8241,7 +8556,13 @@ nonisolated private static func stageThumbnailForExport(
             ])),
             ("fileHashesSha256", .array(fileHashValues)),
             ("bundleHashSha256", .string(bundleHash))
-        ])
+        ]
+
+        if let resolutionValue {
+            manifestFields.append(("resolution", resolutionValue))
+        }
+
+        let manifestValue = WETJSONValue.object(manifestFields)
 
         let manifestContent = wetEncodeJSON(manifestValue) + "\n"
         let manifestData = manifestContent.data(using: .utf8) ?? Data()

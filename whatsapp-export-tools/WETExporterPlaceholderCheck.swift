@@ -14,7 +14,10 @@ struct WETExporterPlaceholderCheck {
 
     private static func run() {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-        let chatURL = root.appendingPathComponent("Fixtures/wet-exporter-placeholder/_chat.txt")
+        let fixturesRoot = root.deletingLastPathComponent().appendingPathComponent("Fixtures")
+        let chatURL = fixturesRoot.appendingPathComponent("wet-exporter-placeholder/_chat.txt")
+        let weakPartnerChatURL = fixturesRoot.appendingPathComponent("wet-weak-partner/000000/Chat.txt")
+        let twoPartyChatURL = fixturesRoot.appendingPathComponent("wet-two-party/000000/Chat.txt")
 
         var failures: [String] = []
         func expect(_ condition: Bool, _ label: String) {
@@ -39,9 +42,139 @@ struct WETExporterPlaceholderCheck {
             expect(meName == nil, "exporter inference is unknown")
             expect(detection.detection.exporterSelfCandidate == nil, "exporterSelfCandidate is nil")
             expect(detection.detection.exporterPlaceholderSeen, "exporter placeholder detected")
+            expect(detection.detection.exporterConfidence == .none, "exporterConfidence is none")
+            expect(detection.detection.partnerConfidence != .none, "partnerConfidence is not none")
+
+            let fallback = ContentView.resolveExporterFallback(
+                detected: detection.detection.exporterSelfCandidate,
+                confidence: detection.detection.exporterConfidence,
+                persisted: "Person A"
+            )
+            expect(fallback.name == "Person A", "fallback exporter uses persisted name")
+            expect(fallback.confidence == .weak, "fallback exporter confidence is weak")
+            expect(fallback.assumed, "fallback exporter marked assumed")
 
             let messageCount = try WhatsAppExportService._messageCountForTesting(chatURL)
             expect(messageCount == 5, "message count == 5")
+
+            let swapLabel = WhatsAppExportService.conversationLabelForOutput(
+                exporter: "Person A",
+                partner: "Person B",
+                chatKind: .oneToOne,
+                chatURL: snapshot.chatURL
+            )
+            expect(swapLabel == "Person A ↔ Person B", "label uses exporter/partner")
+            let swapLabelReversed = WhatsAppExportService.conversationLabelForOutput(
+                exporter: "Person B",
+                partner: "Person A",
+                chatKind: .oneToOne,
+                chatURL: snapshot.chatURL
+            )
+            expect(swapLabelReversed == "Person B ↔ Person A", "label swaps exporter/partner")
+            let noDupLabel = WhatsAppExportService.conversationLabelForOutput(
+                exporter: "Person A",
+                partner: "Person A",
+                chatKind: .oneToOne,
+                chatURL: snapshot.chatURL
+            )
+            expect(!noDupLabel.contains("Person A ↔ Person A"), "label avoids duplicate names")
+
+            let prepared = try WhatsAppExportService.prepareExport(
+                chatURL: snapshot.chatURL,
+                meNameOverride: "Person A"
+            )
+            let baseName = WhatsAppExportService.composeExportBaseNameForOutput(
+                messages: prepared.messages,
+                chatURL: snapshot.chatURL,
+                exporter: "Person A",
+                partner: "Person A",
+                chatKind: .oneToOne
+            )
+            expect(!baseName.contains("Person A ↔ Person A"), "baseName avoids duplicate names")
+
+            let weakSnapshot = try WhatsAppExportService.resolveInputSnapshot(inputURL: weakPartnerChatURL)
+            let weakDetection = try WhatsAppExportService.participantDetectionSnapshot(
+                chatURL: weakSnapshot.chatURL,
+                provenance: weakSnapshot.provenance
+            )
+            expect(weakDetection.detection.partnerConfidence == .weak, "weak partner confidence for phone-only export")
+
+            let twoPartySnapshot = try WhatsAppExportService.resolveInputSnapshot(inputURL: twoPartyChatURL)
+            let twoPartyDetection = try WhatsAppExportService.participantDetectionSnapshot(
+                chatURL: twoPartySnapshot.chatURL,
+                provenance: twoPartySnapshot.provenance
+            )
+            let derived = ContentView.deriveExporterFromParticipants(
+                detectedExporter: twoPartyDetection.detection.exporterSelfCandidate,
+                detectedPartner: twoPartyDetection.detection.otherPartyCandidate ?? twoPartyDetection.detection.chatTitleCandidate,
+                participants: twoPartyDetection.participants
+            )
+            expect(derived != nil, "derived exporter from 2 participants")
+            let resolvedTwoParty = WhatsAppExportService.resolveParticipants(
+                participants: twoPartyDetection.participants,
+                detectedExporter: nil,
+                detectedPartner: twoPartyDetection.detection.otherPartyCandidate ?? twoPartyDetection.detection.chatTitleCandidate,
+                partnerHint: twoPartyDetection.detection.otherPartyCandidate ?? twoPartyDetection.detection.chatTitleCandidate,
+                exporterOverride: nil,
+                partnerOverride: nil,
+                chatKind: twoPartyDetection.detection.chatKind
+            )
+            expect(!resolvedTwoParty.exporter.isEmpty, "resolved exporter from partner hint")
+            expect(resolvedTwoParty.partners.count == 1, "resolved partner count 1")
+
+            let fm = FileManager.default
+            let tempRoot = fm.temporaryDirectory.appendingPathComponent("wet-resolution-check-\(UUID().uuidString)", isDirectory: true)
+            try fm.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+            defer { try? fm.removeItem(at: tempRoot) }
+
+            let htmlName = WETOutputNaming.htmlVariantFilename(baseName: baseName, variant: .embedAll)
+            let htmlURL = tempRoot.appendingPathComponent(htmlName)
+            try "ok".write(to: htmlURL, atomically: true, encoding: .utf8)
+
+            let flags = WhatsAppExportService.ManifestArtifactFlags(
+                sidecar: false,
+                max: true,
+                compact: false,
+                email: false,
+                markdown: false,
+                deleteOriginals: false,
+                rawArchive: false
+            )
+            let resolution = WhatsAppExportService.ManifestParticipantResolution(
+                exporterConfidence: .none,
+                partnerConfidence: .weak,
+                exporterWasOverridden: true,
+                partnerWasOverridden: true,
+                wasSwapped: true
+            )
+            let result = try WhatsAppExportService.writeDeterministicManifestAndChecksums(
+                exportDir: tempRoot,
+                baseName: baseName,
+                chatURL: snapshot.chatURL,
+                messages: prepared.messages,
+                meName: prepared.meName,
+                artifactRelativePaths: [htmlName],
+                flags: flags,
+                resolution: resolution,
+                allowOverwrite: true,
+                debugEnabled: false,
+                debugLog: nil
+            )
+            let manifestText = try String(contentsOf: result.manifestURL, encoding: .utf8)
+            expect(manifestText.contains("\"resolution\""), "manifest includes resolution")
+            expect(manifestText.contains("\"exporterConfidence\""), "manifest includes exporterConfidence")
+            expect(manifestText.contains("\"partnerConfidence\""), "manifest includes partnerConfidence")
+
+#if DEBUG
+            let css = WhatsAppExportService._htmlCSSForTesting()
+            expect(css.contains(".row.me{justify-content:flex-end;}"), "CSS aligns outgoing rows right")
+            expect(css.contains(".row.other{justify-content:flex-start;}"), "CSS aligns incoming rows left")
+            expect(css.contains(".bubble{") && css.contains("text-align: left;"), "bubble text aligns left")
+            expect(css.contains(".bubble.me .meta{ text-align: right; }"), "outgoing timestamp aligns right")
+            if let bubbleMeBlock = cssBlock(css, selector: ".bubble.me") {
+                expect(!bubbleMeBlock.contains("text-align"), "bubble.me has no text-align override")
+            }
+#endif
         } catch {
             failures.append("unexpected error: \(error)")
         }
@@ -56,5 +189,11 @@ struct WETExporterPlaceholderCheck {
         }
 
         NSApp.terminate(nil)
+    }
+
+    private static func cssBlock(_ css: String, selector: String) -> String? {
+        guard let start = css.range(of: "\(selector){") else { return nil }
+        guard let end = css.range(of: "}", range: start.upperBound..<css.endIndex) else { return nil }
+        return String(css[start.upperBound..<end.lowerBound])
     }
 }
