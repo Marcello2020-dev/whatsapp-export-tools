@@ -1178,7 +1178,7 @@ struct ContentView: View {
                 .disabled(isRunning)
 
                 if let detected = participantResolution.detectedExporter, !detected.isEmpty {
-                    Menu("wet.participants.useDetected") {
+                    Menu {
                         Button(detected) {
                             updateExporterOverride(detected)
                         }
@@ -1186,6 +1186,9 @@ struct ContentView: View {
                         Button("wet.participants.clearOverride") {
                             updateExporterOverride(nil)
                         }
+                    } label: {
+                        Text("wet.participants.useDetected")
+                            .foregroundStyle(.primary)
                     }
                     .buttonStyle(.bordered)
                     .disabled(isRunning)
@@ -1214,7 +1217,7 @@ struct ContentView: View {
                 .disabled(isRunning)
 
                 if !chatPartnerCandidates.isEmpty {
-                    Menu("wet.participants.useDetected") {
+                    Menu {
                         ForEach(chatPartnerCandidates, id: \.self) { name in
                             Button(name) {
                                 updatePartnerOverride(name)
@@ -1224,6 +1227,9 @@ struct ContentView: View {
                         Button("wet.participants.clearOverride") {
                             updatePartnerOverride(nil)
                         }
+                    } label: {
+                        Text("wet.participants.useDetected")
+                            .foregroundStyle(.primary)
                     }
                     .buttonStyle(.bordered)
                     .disabled(isRunning)
