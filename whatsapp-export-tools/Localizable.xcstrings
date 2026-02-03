@@ -672,6 +672,7 @@
       }
     },
     "wet.help.artifacts.compact" : {
+      "extractionState" : "stale",
       "localizations" : {
         "de" : {
           "stringUnit" : {
@@ -688,6 +689,7 @@
       }
     },
     "wet.help.artifacts.email" : {
+      "extractionState" : "stale",
       "localizations" : {
         "de" : {
           "stringUnit" : {
@@ -704,6 +706,7 @@
       }
     },
     "wet.help.artifacts.header" : {
+      "extractionState" : "stale",
       "localizations" : {
         "de" : {
           "stringUnit" : {
@@ -720,6 +723,7 @@
       }
     },
     "wet.help.artifacts.markdown" : {
+      "extractionState" : "stale",
       "localizations" : {
         "de" : {
           "stringUnit" : {
@@ -736,6 +740,7 @@
       }
     },
     "wet.help.artifacts.max" : {
+      "extractionState" : "stale",
       "localizations" : {
         "de" : {
           "stringUnit" : {
@@ -752,6 +757,7 @@
       }
     },
     "wet.help.artifacts.sidecar" : {
+      "extractionState" : "stale",
       "localizations" : {
         "de" : {
           "stringUnit" : {
@@ -768,6 +774,7 @@
       }
     },
     "wet.help.participants.exporter" : {
+      "extractionState" : "stale",
       "localizations" : {
         "de" : {
           "stringUnit" : {
@@ -784,6 +791,7 @@
       }
     },
     "wet.help.participants.partner" : {
+      "extractionState" : "stale",
       "localizations" : {
         "de" : {
           "stringUnit" : {
@@ -800,6 +808,7 @@
       }
     },
     "wet.help.participants.phoneOverrides" : {
+      "extractionState" : "stale",
       "localizations" : {
         "de" : {
           "stringUnit" : {
@@ -816,6 +825,7 @@
       }
     },
     "wet.help.source.copyRaw" : {
+      "extractionState" : "stale",
       "localizations" : {
         "de" : {
           "stringUnit" : {
@@ -832,6 +842,7 @@
       }
     },
     "wet.help.source.deleteOriginals" : {
+      "extractionState" : "stale",
       "localizations" : {
         "de" : {
           "stringUnit" : {
@@ -848,6 +859,7 @@
       }
     },
     "wet.input.badge.folder" : {
+      "extractionState" : "stale",
       "localizations" : {
         "de" : {
           "stringUnit" : {
@@ -864,6 +876,7 @@
       }
     },
     "wet.input.badge.zip" : {
+      "extractionState" : "stale",
       "localizations" : {
         "de" : {
           "stringUnit" : {

@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 struct DiagnosticsLogView: View {
     static let windowID = "diagnostics-log"
 
+    @Environment(\.locale) private var locale
     @EnvironmentObject private var diagnosticsLog: DiagnosticsLogStore
 
     var body: some View {
@@ -43,8 +44,8 @@ struct DiagnosticsLogView: View {
 
     private func saveLog() {
         let panel = NSSavePanel()
-        panel.title = String(localized: "wet.diagnostics.save.title")
-        panel.prompt = String(localized: "wet.diagnostics.save.prompt")
+        panel.title = String(localized: "wet.diagnostics.save.title", locale: locale)
+        panel.prompt = String(localized: "wet.diagnostics.save.prompt", locale: locale)
         panel.nameFieldStringValue = "wet-log.txt"
         panel.allowedContentTypes = [.plainText]
         if panel.runModal() == .OK, let url = panel.url {

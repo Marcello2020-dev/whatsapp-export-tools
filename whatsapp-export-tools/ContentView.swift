@@ -91,15 +91,32 @@ struct ContentView: View {
         }
 
         nonisolated var label: String {
+            logLabel
+        }
+
+        nonisolated var logLabel: String {
             switch self {
             case .sidecar:
-                return String(localized: "wet.run.step.sidecar")
+                return "Sidecar"
             case .html(let variant):
-                return variant.uiLabel
+                return variant.logLabel
             case .markdown:
-                return String(localized: "wet.run.step.markdown")
+                return "Markdown"
             case .rawArchive:
-                return String(localized: "wet.run.step.rawArchive")
+                return "Raw archive"
+            }
+        }
+
+        nonisolated func localizedLabel(locale: Locale) -> String {
+            switch self {
+            case .sidecar:
+                return String(localized: "wet.run.step.sidecar", locale: locale)
+            case .html(let variant):
+                return variant.localizedLabel(locale: locale)
+            case .markdown:
+                return String(localized: "wet.run.step.markdown", locale: locale)
+            case .rawArchive:
+                return String(localized: "wet.run.step.rawArchive", locale: locale)
             }
         }
     }
@@ -253,13 +270,13 @@ struct ContentView: View {
         case failed
         case cancelled
 
-        var label: String {
+        func localizedLabel(locale: Locale) -> String {
             switch self {
-            case .pending: return String(localized: "wet.run.stepState.pending")
-            case .running: return String(localized: "wet.run.stepState.running")
-            case .done: return String(localized: "wet.run.stepState.done")
-            case .failed: return String(localized: "wet.run.stepState.failed")
-            case .cancelled: return String(localized: "wet.run.stepState.cancelled")
+            case .pending: return String(localized: "wet.run.stepState.pending", locale: locale)
+            case .running: return String(localized: "wet.run.stepState.running", locale: locale)
+            case .done: return String(localized: "wet.run.stepState.done", locale: locale)
+            case .failed: return String(localized: "wet.run.stepState.failed", locale: locale)
+            case .cancelled: return String(localized: "wet.run.stepState.cancelled", locale: locale)
             }
         }
     }
@@ -340,6 +357,7 @@ struct ContentView: View {
     private enum Layout {
         static let labelWidth: CGFloat = 110
         static let chatPartnerWidth: CGFloat = 320
+        static let participantsLabelMinWidth: CGFloat = 150
         static let overviewMaxWidth: CGFloat = 360
         static let topColumnSpacing: CGFloat = 16
         static let topLeftMinWidth: CGFloat = 520
@@ -391,14 +409,14 @@ struct ContentView: View {
             }
         }
 
-        nonisolated var uiLabel: String {
+        nonisolated func localizedLabel(locale: Locale) -> String {
             switch self {
             case .embedAll:
-                return String(localized: "wet.variant.max")
+                return String(localized: "wet.variant.max", locale: locale)
             case .thumbnailsOnly:
-                return String(localized: "wet.variant.compact")
+                return String(localized: "wet.variant.compact", locale: locale)
             case .textOnly:
-                return String(localized: "wet.variant.email")
+                return String(localized: "wet.variant.email", locale: locale)
             }
         }
         
@@ -540,7 +558,7 @@ struct ContentView: View {
     @State private var detectedChatTitle: String? = nil
     @State private var detectedDateRange: ClosedRange<Date>? = nil
     @State private var detectedMediaCounts: WAMediaCounts = .zero
-    @State private var inputKindBadge: String? = nil
+    @State private var inputKindBadgeKey: String? = nil
     @State private var replayModeActive: Bool = false
 
     // Optional overrides for participants that appear only as phone numbers in the WhatsApp export
@@ -576,6 +594,7 @@ struct ContentView: View {
     @State private var cancelRequested: Bool = false
 
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.locale) private var locale
     @EnvironmentObject private var diagnosticsLog: DiagnosticsLogStore
 
     // MARK: - View
@@ -616,7 +635,7 @@ struct ContentView: View {
             }
         } message: {
             let lines = deleteOriginalCandidates.map { $0.path }.joined(separator: "\n")
-            Text(String(format: String(localized: "wet.deleteOriginals.alert.message"), lines))
+            Text(String(format: String(localized: "wet.deleteOriginals.alert.message", locale: locale), lines))
         }
         .frame(minWidth: 980, minHeight: 720)
     }
@@ -904,8 +923,8 @@ struct ContentView: View {
 
     private var overviewSummary: some View {
         VStack(alignment: .leading, spacing: 6) {
-            if let badge = inputKindBadge {
-                Text(badge)
+            if let badgeKey = inputKindBadgeKey {
+                Text(LocalizedStringKey(badgeKey))
                     .font(.system(size: 11, weight: .semibold))
                     .padding(.horizontal, 8)
                     .padding(.vertical, 2)
@@ -1142,9 +1161,12 @@ struct ContentView: View {
             HStack(spacing: 12) {
                 HStack(spacing: 6) {
                     Text("wet.participants.exporter.label")
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                     helpIcon("wet.help.participants.exporter")
                 }
-                .frame(width: Layout.labelWidth, alignment: .leading)
+                .frame(minWidth: Layout.participantsLabelMinWidth, alignment: .leading)
+                .layoutPriority(1)
 
                 TextField(
                     exporterDetectedPlaceholder,
@@ -1175,9 +1197,12 @@ struct ContentView: View {
             HStack(spacing: 12) {
                 HStack(spacing: 6) {
                     Text("wet.participants.partner.label")
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                     helpIcon("wet.help.participants.partner")
                 }
-                .frame(width: Layout.labelWidth, alignment: .leading)
+                .frame(minWidth: Layout.participantsLabelMinWidth, alignment: .leading)
+                .layoutPriority(1)
 
                 TextField(
                     partnerDetectedPlaceholder,
@@ -1226,7 +1251,9 @@ struct ContentView: View {
                 let count = partners.count
                 let compact = partners.prefix(5).joined(separator: ", ")
                 let suffix = count > 5 ? " …" : ""
-                Text(String(format: String(localized: "wet.participants.groupSummary"), count, "\(compact)\(suffix)"))
+                Text(String(format: String(localized: "wet.participants.groupSummary", locale: locale),
+                            count,
+                            "\(compact)\(suffix)"))
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
@@ -1238,7 +1265,7 @@ struct ContentView: View {
     private var chatPartnerSelectionDisplayName: String {
         if chatPartnerSelection == Self.customChatPartnerTag {
             let trimmed = chatPartnerCustomName.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? String(localized: "wet.participants.custom") : trimmed
+            return trimmed.isEmpty ? String(localized: "wet.participants.custom", locale: locale) : trimmed
         }
         let trimmed = chatPartnerSelection.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
@@ -1248,7 +1275,7 @@ struct ContentView: View {
             if let fallback = chatPartnerCandidates.first {
                 return applyPhoneOverrideIfNeeded(fallback)
             }
-            return String(localized: "wet.participants.defaultLabel")
+            return String(localized: "wet.participants.defaultLabel", locale: locale)
         }
         return applyPhoneOverrideIfNeeded(trimmed)
     }
@@ -1411,7 +1438,8 @@ struct ContentView: View {
         switch runStatus {
         case .completed:
             if let duration = lastRunDuration {
-                Text(String(format: String(localized: "wet.run.totalDuration"), Self.formatDuration(duration)))
+                Text(String(format: String(localized: "wet.run.totalDuration", locale: locale),
+                            Self.formatDuration(duration)))
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
             }
@@ -1441,7 +1469,7 @@ struct ContentView: View {
                 HStack(spacing: 6) {
                     Image(systemName: progressIconName(for: step.state))
                         .foregroundStyle(progressIconColor(for: step.state))
-                    Text(step.step.label)
+                    Text(step.step.localizedLabel(locale: locale))
                     Spacer()
                     Text(runStepDurationText(for: step))
                         .monospacedDigit()
@@ -1450,9 +1478,9 @@ struct ContentView: View {
                 }
                 .font(.system(size: 12))
                 .accessibilityLabel(
-                    Text(String(format: String(localized: "wet.run.step.accessibility"),
-                                step.step.label,
-                                step.state.label,
+                    Text(String(format: String(localized: "wet.run.step.accessibility", locale: locale),
+                                step.step.localizedLabel(locale: locale),
+                                step.state.localizedLabel(locale: locale),
                                 runStepDurationText(for: step)))
                 )
             }
@@ -1593,7 +1621,7 @@ struct ContentView: View {
         let counts = detectedMediaCounts
         if counts.total == 0 { return "—" }
         return String(
-            format: String(localized: "wet.overview.mediaCounts.format"),
+            format: String(localized: "wet.overview.mediaCounts.format", locale: locale),
             counts.images,
             counts.videos,
             counts.audios,
@@ -1605,18 +1633,18 @@ struct ContentView: View {
         let exporter = participantResolution.exporterConfidence
         let partner = participantResolution.partnerConfidence
         if participantResolution.detectionConfidence == .low || participantResolution.detectionConfidence == .unknown {
-            return String(localized: "wet.participants.confidence.needsConfirmation")
+            return String(localized: "wet.participants.confidence.needsConfirmation", locale: locale)
         }
         if participantResolution.exporterAssumed {
-            return String(localized: "wet.participants.confidence.needsConfirmation")
+            return String(localized: "wet.participants.confidence.needsConfirmation", locale: locale)
         }
         if exporter == .none || partner == .none {
-            return String(localized: "wet.participants.confidence.needsConfirmation")
+            return String(localized: "wet.participants.confidence.needsConfirmation", locale: locale)
         }
         if exporter == .strong && partner == .strong {
-            return String(localized: "wet.participants.confidence.confident")
+            return String(localized: "wet.participants.confidence.confident", locale: locale)
         }
-        return String(localized: "wet.participants.confidence.likely")
+        return String(localized: "wet.participants.confidence.likely", locale: locale)
     }
 
     private var exporterDetectedPlaceholder: String {
@@ -1636,12 +1664,12 @@ struct ContentView: View {
     private func detectedPlaceholderText(detected: String?, assumed: Bool) -> String {
         let trimmed = detected?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if trimmed.isEmpty {
-            return String(localized: "wet.detected.none")
+            return String(localized: "wet.detected.none", locale: locale)
         }
         if assumed {
-            return String(format: String(localized: "wet.detected.assumed"), trimmed)
+            return String(format: String(localized: "wet.detected.assumed", locale: locale), trimmed)
         }
-        return String(format: String(localized: "wet.detected.value"), trimmed)
+        return String(format: String(localized: "wet.detected.value", locale: locale), trimmed)
     }
 
     nonisolated static func resolveExporterFallback(
@@ -1874,8 +1902,8 @@ struct ContentView: View {
         WETPartnerNaming.safeFolderName(s, maxLen: maxLen)
     }
 
-    private func helpIcon(_ text: LocalizedStringKey) -> some View {
-        HelpButton(text: text)
+    private func helpIcon(_ key: String) -> some View {
+        HelpButton(key: key)
     }
 
     private var shouldShowAIGlow: Bool {
@@ -1948,9 +1976,9 @@ struct ContentView: View {
 
     private func pickChatFile() {
         let panel = NSOpenPanel()
-        panel.title = String(localized: "wet.input.panel.title")
-        panel.message = String(localized: "wet.input.panel.message")
-        panel.prompt = String(localized: "wet.action.choose")
+        panel.title = String(localized: "wet.input.panel.title", locale: locale)
+        panel.message = String(localized: "wet.input.panel.message", locale: locale)
+        panel.prompt = String(localized: "wet.action.choose", locale: locale)
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = true
         panel.canChooseFiles = true
@@ -1967,9 +1995,9 @@ struct ContentView: View {
 
     private func pickOutputFolder() {
         let panel = NSOpenPanel()
-        panel.title = String(localized: "wet.output.panel.title")
-        panel.message = String(localized: "wet.output.panel.message")
-        panel.prompt = String(localized: "wet.action.choose")
+        panel.title = String(localized: "wet.output.panel.title", locale: locale)
+        panel.message = String(localized: "wet.output.panel.message", locale: locale)
+        panel.prompt = String(localized: "wet.action.choose", locale: locale)
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
@@ -2086,9 +2114,9 @@ struct ContentView: View {
             detectedMediaCounts = detectionSnapshot.mediaCounts
             switch snapshot.provenance.inputKind {
             case .folder:
-                inputKindBadge = String(localized: "wet.input.badge.folder")
+                inputKindBadgeKey = "wet.input.badge.folder"
             case .zip:
-                inputKindBadge = String(localized: "wet.input.badge.zip")
+                inputKindBadgeKey = "wet.input.badge.zip"
             }
 
             var parts = detectionSnapshot.participants
@@ -2299,7 +2327,7 @@ struct ContentView: View {
             detectedChatTitle = nil
             detectedDateRange = nil
             detectedMediaCounts = .zero
-            inputKindBadge = nil
+            inputKindBadgeKey = nil
             let fallbackPartner = "WhatsApp Chat"
             chatPartnerCandidates = [fallbackPartner]
             autoDetectedChatPartnerName = fallbackPartner
@@ -2341,7 +2369,7 @@ struct ContentView: View {
         detectedChatTitle = nil
         detectedDateRange = nil
         detectedMediaCounts = .zero
-        inputKindBadge = nil
+        inputKindBadgeKey = nil
         participantResolution = .empty
         phoneParticipantOverrides = [:]
         autoSuggestedPhoneNames = [:]
@@ -2547,28 +2575,32 @@ struct ContentView: View {
     private var runStatusText: String {
         switch runStatus {
         case .ready:
-            return String(localized: "wet.run.status.ready")
+            return String(localized: "wet.run.status.ready", locale: locale)
         case .validating:
-            return String(localized: "wet.run.status.validating")
+            return String(localized: "wet.run.status.validating", locale: locale)
         case .exporting(let step):
-            return String(format: String(localized: "wet.run.status.exporting"), step.label)
+            return String(format: String(localized: "wet.run.status.exporting", locale: locale),
+                          step.localizedLabel(locale: locale))
         case .completed:
-            return String(localized: "wet.run.status.completed")
+            return String(localized: "wet.run.status.completed", locale: locale)
         case .failed:
-            return String(localized: "wet.run.status.failed")
+            return String(localized: "wet.run.status.failed", locale: locale)
         case .cancelled:
-            return String(localized: "wet.run.status.cancelled")
+            return String(localized: "wet.run.status.cancelled", locale: locale)
         }
     }
 
     private var failureSummaryText: String {
         if let artifact = lastRunFailureArtifact, let summary = lastRunFailureSummary {
-            return String(format: String(localized: "wet.run.failure.withArtifact"), artifact, summary)
+            return String(format: String(localized: "wet.run.failure.withArtifact", locale: locale),
+                          artifact,
+                          summary)
         }
         if let summary = lastRunFailureSummary {
-            return String(format: String(localized: "wet.run.failure.withoutArtifact"), summary)
+            return String(format: String(localized: "wet.run.failure.withoutArtifact", locale: locale),
+                          summary)
         }
-        return String(localized: "wet.run.failure.generic")
+        return String(localized: "wet.run.failure.generic", locale: locale)
     }
 
     private func progressIconName(for state: RunStepState) -> String {
@@ -2998,15 +3030,15 @@ struct ContentView: View {
         return urls
     }
 
-    nonisolated static func replaceDialogLabels(existingNames: [String], baseName: String) -> [String] {
-        let sidecarLabel = String(localized: "wet.replace.label.sidecar")
-        let rawArchiveLabel = String(localized: "wet.replace.label.rawArchive")
-        let manifestLabel = String(localized: "wet.replace.label.manifest")
-        let checksumLabel = String(localized: "wet.replace.label.checksum")
-        let maxLabel = String(localized: "wet.replace.label.max")
-        let compactLabel = String(localized: "wet.replace.label.compact")
-        let emailLabel = String(localized: "wet.replace.label.email")
-        let markdownLabel = String(localized: "wet.replace.label.markdown")
+    nonisolated static func replaceDialogLabels(existingNames: [String], baseName: String, locale: Locale) -> [String] {
+        let sidecarLabel = String(localized: "wet.replace.label.sidecar", locale: locale)
+        let rawArchiveLabel = String(localized: "wet.replace.label.rawArchive", locale: locale)
+        let manifestLabel = String(localized: "wet.replace.label.manifest", locale: locale)
+        let checksumLabel = String(localized: "wet.replace.label.checksum", locale: locale)
+        let maxLabel = String(localized: "wet.replace.label.max", locale: locale)
+        let compactLabel = String(localized: "wet.replace.label.compact", locale: locale)
+        let emailLabel = String(localized: "wet.replace.label.email", locale: locale)
+        let markdownLabel = String(localized: "wet.replace.label.markdown", locale: locale)
 
         var labels: Set<String> = []
 
@@ -4029,7 +4061,7 @@ struct ContentView: View {
                         .filter { fm.fileExists(atPath: $0.path) }
                         .map { $0.lastPathComponent }
                         + suffixArtifacts.filter { fm.fileExists(atPath: exportDir.appendingPathComponent($0).path) }
-                    replaceExistingNames = Self.replaceDialogLabels(existingNames: existingNames, baseName: baseName)
+                    replaceExistingNames = Self.replaceDialogLabels(existingNames: existingNames, baseName: baseName, locale: locale)
                     replaceOutputPath = exportDir.path
                     replaceBaseName = baseName
                     replaceExportDir = exportDir
@@ -5070,8 +5102,17 @@ private struct WASection<Content: View>: View {
 }
 
 private struct HelpButton: View {
-    let text: LocalizedStringKey
+    let key: String
+    @AppStorage("app.language") private var appLanguageRaw: String = AppLanguage.en.rawValue
     @State private var isPresented = false
+
+    private var localizedBundle: Bundle {
+        guard let path = Bundle.main.path(forResource: appLanguageRaw, ofType: "lproj"),
+              let bundle = Bundle(path: path) else {
+            return .main
+        }
+        return bundle
+    }
 
     var body: some View {
         Button {
@@ -5087,7 +5128,7 @@ private struct HelpButton: View {
         }
         .buttonStyle(.plain)
         .popover(isPresented: $isPresented, arrowEdge: .bottom) {
-            Text(text)
+            Text(localizedBundle.localizedString(forKey: key, value: nil, table: nil))
                 .font(.system(size: 12))
                 .multilineTextAlignment(.leading)
                 .frame(maxWidth: 360, alignment: .leading)
