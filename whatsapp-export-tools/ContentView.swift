@@ -241,6 +241,11 @@ struct ContentView: View {
         case cancelled
     }
 
+    private enum WETTab: Hashable {
+        case input
+        case output
+    }
+
     private enum RunStepState: String {
         case pending = "Pending"
         case running = "Running"
@@ -489,6 +494,7 @@ struct ContentView: View {
     @State private var outBaseURLAccess: SecurityScopedURL? = nil
     @State private var didRestoreSettings: Bool = false
     @State private var isRestoringSettings: Bool = false
+    @State private var selectedTab: WETTab = .input
 
     // Independent export toggles (default: all enabled)
     @State private var exportHTMLMax: Bool = true
@@ -603,23 +609,81 @@ struct ContentView: View {
                 header
                     .waCard()
 
-                topAreaSection
+                tabSelector
 
-                optionsSection
-
-                runSection
-                    .waCard()
-                    .aiGlow(
-                        active: isRunning,
-                        isRunning: isRunning,
-                        cornerRadius: 14,
-                        style: runGlowStyle,
-                        debugTag: "run"
-                    )
+                tabContent
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .scrollClipDisabled(true)
+    }
+
+    private var tabSelector: some View {
+        Picker("View", selection: $selectedTab) {
+            Text("Input")
+                .tag(WETTab.input)
+            Text("Output")
+                .tag(WETTab.output)
+        }
+        .pickerStyle(.segmented)
+        .accessibilityLabel("WET tab selection")
+    }
+
+    @ViewBuilder
+    private var tabContent: some View {
+        switch selectedTab {
+        case .input:
+            WETInputTabView {
+                topAreaSection
+            }
+        case .output:
+            WETOutputTabView {
+                outputTabContent
+            }
+        }
+    }
+
+    private var outputTabContent: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            optionsSection
+            runCard
+        }
+    }
+
+    private var runCard: some View {
+        runSection
+            .waCard()
+            .aiGlow(
+                active: isRunning,
+                isRunning: isRunning,
+                cornerRadius: 14,
+                style: runGlowStyle,
+                debugTag: "run"
+            )
+    }
+
+    private struct WETInputTabView<Content: View>: View {
+        let content: () -> Content
+
+        init(@ViewBuilder content: @escaping () -> Content) {
+            self.content = content
+        }
+
+        var body: some View {
+            content()
+        }
+    }
+
+    private struct WETOutputTabView<Content: View>: View {
+        let content: () -> Content
+
+        init(@ViewBuilder content: @escaping () -> Content) {
+            self.content = content
+        }
+
+        var body: some View {
+            content()
+        }
     }
 
     private var replaceConfirmationSheet: some View {
