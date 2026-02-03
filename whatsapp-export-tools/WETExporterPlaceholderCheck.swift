@@ -19,6 +19,7 @@ struct WETExporterPlaceholderCheck {
         let weakPartnerChatURL = fixturesRoot.appendingPathComponent("wet-weak-partner/000000/Chat.txt")
         let twoPartyChatURL = fixturesRoot.appendingPathComponent("wet-two-party/000000/Chat.txt")
         let groupChatURL = fixturesRoot.appendingPathComponent("wet-group-chat/_chat.txt")
+        let groupEventChatURL = fixturesRoot.appendingPathComponent("wet-group-event-bracket/_chat.txt")
 
         var failures: [String] = []
         func expect(_ condition: Bool, _ label: String) {
@@ -158,6 +159,25 @@ struct WETExporterPlaceholderCheck {
             let mdText = try String(contentsOf: mdURL, encoding: .utf8)
             expect(mdText.contains("**Person A (Ich)**"), "override marks outgoing in markdown")
             expect(mdText.contains("**Person B**"), "partner line present in markdown")
+
+            let eventMessages = try WhatsAppExportService._messagesForTesting(groupEventChatURL)
+            expect(eventMessages.count >= 2, "group event fixture has at least 2 messages")
+            if eventMessages.count >= 2 {
+                let penultimate = eventMessages[eventMessages.count - 2]
+                let last = eventMessages[eventMessages.count - 1]
+                let penultimateIsSystem = WhatsAppExportService._isSystemMessageForTesting(
+                    authorRaw: penultimate.author,
+                    text: penultimate.text
+                )
+                let lastIsSystem = WhatsAppExportService._isSystemMessageForTesting(
+                    authorRaw: last.author,
+                    text: last.text
+                )
+                expect(!penultimateIsSystem, "penultimate user message remains non-system")
+                expect(lastIsSystem, "event line parsed as system message")
+                expect(last.author.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, "event line has empty author")
+                expect(last.text.contains("hat dich entfernt"), "event text captured in system message")
+            }
 
             let fm = FileManager.default
             let tempRoot = fm.temporaryDirectory.appendingPathComponent("wet-resolution-check-\(UUID().uuidString)", isDirectory: true)

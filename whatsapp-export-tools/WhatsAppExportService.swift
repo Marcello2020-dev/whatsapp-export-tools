@@ -977,8 +977,9 @@ public enum WhatsAppExportService {
     )
 
     // Bracketed timestamp format (often used in exports).
+    // Supports author-less system/event lines (no "Author:" delimiter).
     nonisolated private static let patBracket = try! NSRegularExpression(
-        pattern: #"^\[(\d{1,2}\.\d{1,2}\.\d{2,4}),\s+(\d{1,2}:\d{2})(?::(\d{2}))?\]\s+([^:]+?):\s*(.*)$"#,
+        pattern: #"^\s*\u200E?\[(\d{1,2}\.\d{1,2}\.\d{2,4}),\s(\d{2}:\d{2}:\d{2})\]\s(?:(.+?):\s)?(.*)$"#,
         options: []
     )
 
@@ -5287,7 +5288,20 @@ public enum WhatsAppExportService {
             }
 
             if let g = match(patBracket, line) {
-                let d = g[0], hm = g[1], sec = g[2].isEmpty ? nil : g[2], authorRaw = g[3], text = g[4]
+                let d = g[0]
+                let timeRaw = g[1]
+                let authorRaw = g[2]
+                let text = g[3]
+                let timeParts = timeRaw.split(separator: ":")
+                let hm: String
+                let sec: String?
+                if timeParts.count >= 2 {
+                    hm = "\(timeParts[0]):\(timeParts[1])"
+                    sec = timeParts.count >= 3 ? String(timeParts[2]) : nil
+                } else {
+                    hm = timeRaw
+                    sec = nil
+                }
                 guard let ts = parseDT_DE(date: d, hm: hm, sec: sec) else {
                     // If the timestamp cannot be parsed, treat the line as a continuation to avoid corrupting chronology.
                     if let i = lastIndex { msgs[i].text += "\n" + line }
@@ -7139,6 +7153,14 @@ nonisolated private static func stageThumbnailForExport(
     nonisolated static func _messageCountForTesting(_ chatURL: URL) throws -> Int {
         let msgs = try parseMessages(chatURL.standardizedFileURL)
         return msgs.count
+    }
+
+    nonisolated static func _messagesForTesting(_ chatURL: URL) throws -> [WAMessage] {
+        try parseMessages(chatURL.standardizedFileURL)
+    }
+
+    nonisolated static func _isSystemMessageForTesting(authorRaw: String, text: String) -> Bool {
+        isSystemMessage(authorRaw: authorRaw, text: text)
     }
 
     // ---------------------------
