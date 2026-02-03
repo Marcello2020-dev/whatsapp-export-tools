@@ -7,9 +7,25 @@
 
 import SwiftUI
 
+enum AppLanguage: String, CaseIterable, Identifiable {
+    case en
+    case de
+
+    var id: String { rawValue }
+
+    var locale: Locale {
+        Locale(identifier: rawValue)
+    }
+}
+
 @main
 struct whatsapp_export_toolsApp: App {
     @StateObject private var diagnosticsLog = DiagnosticsLogStore()
+    @AppStorage("app.language") private var appLanguageRaw: String = AppLanguage.en.rawValue
+
+    private var appLanguage: AppLanguage {
+        AppLanguage(rawValue: appLanguageRaw) ?? .en
+    }
 
     init() {
         Task { @MainActor in
@@ -28,55 +44,55 @@ struct whatsapp_export_toolsApp: App {
     }
 
     var body: some Scene {
-        WindowGroup("WhatsApp Export Tools") {
+        WindowGroup("wet.app.windowTitle") {
             Group {
                 if WETBareDomainPreviewCheck.isEnabled {
-                    Text("Running WET bare-domain preview check…")
+                    Text("wet.checks.preview")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                         .padding()
                 } else if WETBareDomainLinkifyCheck.isEnabled {
-                    Text("Running WET bare-domain linkify check…")
+                    Text("wet.checks.linkify")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                         .padding()
                 } else if WETSystemMessageCheck.isEnabled {
-                    Text("Running WET system message check…")
+                    Text("wet.checks.systemMessages")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                         .padding()
                 } else if WETExporterPlaceholderCheck.isEnabled {
-                    Text("Running WET exporter placeholder check…")
+                    Text("wet.checks.exporterPlaceholder")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                         .padding()
                 } else if WETReplaceSelectionCheck.isEnabled {
-                    Text("Running WET replace selection check…")
+                    Text("wet.checks.replaceSelection")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                         .padding()
                 } else if WETExternalAssetsCheck.isEnabled {
-                    Text("Running WET external assets check…")
+                    Text("wet.checks.externalAssets")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                         .padding()
                 } else if WETDeterminismCheck.isEnabled {
-                    Text("Running WET determinism check…")
+                    Text("wet.checks.determinism")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                         .padding()
                 } else if WETReplayGuardrailsCheck.isEnabled {
-                    Text("Running WET replay guardrails check…")
+                    Text("wet.checks.replayGuardrails")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                         .padding()
                 } else if WETOutputStructureDedupCheck.isEnabled {
-                    Text("Running WET output-structure dedup check…")
+                    Text("wet.checks.outputStructureDedup")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                         .padding()
                 } else if WETDeleteOriginalsGateCheck.isEnabled {
-                    Text("Running WET delete-originals gate check…")
+                    Text("wet.checks.deleteOriginalsGate")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                         .padding()
@@ -87,6 +103,7 @@ struct whatsapp_export_toolsApp: App {
                 }
             }
             .environmentObject(diagnosticsLog)
+            .environment(\.locale, appLanguage.locale)
             .onAppear {
                 WETBareDomainPreviewCheck.runIfNeeded()
                 WETBareDomainLinkifyCheck.runIfNeeded()
@@ -104,11 +121,13 @@ struct whatsapp_export_toolsApp: App {
         .defaultSize(width: 980, height: 780)
         .commands {
             DiagnosticsLogCommands()
+            LanguageCommands()
         }
 
-        WindowGroup(DiagnosticsLogView.windowTitle, id: DiagnosticsLogView.windowID) {
+        WindowGroup("wet.diagnostics.title", id: DiagnosticsLogView.windowID) {
             DiagnosticsLogView()
                 .environmentObject(diagnosticsLog)
+                .environment(\.locale, appLanguage.locale)
         }
     }
 }
@@ -118,8 +137,23 @@ private struct DiagnosticsLogCommands: Commands {
 
     var body: some Commands {
         CommandGroup(after: .windowArrangement) {
-            Button("Diagnostics Log") {
+            Button("wet.diagnostics.menuItem") {
                 openWindow(id: DiagnosticsLogView.windowID)
+            }
+        }
+    }
+}
+
+private struct LanguageCommands: Commands {
+    @AppStorage("app.language") private var appLanguageRaw: String = AppLanguage.en.rawValue
+
+    var body: some Commands {
+        CommandMenu("wet.menu.language") {
+            Picker("wet.menu.language.label", selection: $appLanguageRaw) {
+                Text("wet.menu.language.english")
+                    .tag(AppLanguage.en.rawValue)
+                Text("wet.menu.language.german")
+                    .tag(AppLanguage.de.rawValue)
             }
         }
     }

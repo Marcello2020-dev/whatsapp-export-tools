@@ -93,13 +93,13 @@ struct ContentView: View {
         nonisolated var label: String {
             switch self {
             case .sidecar:
-                return "Sidecar"
+                return String(localized: "wet.run.step.sidecar")
             case .html(let variant):
-                return variant.logLabel
+                return variant.uiLabel
             case .markdown:
-                return "Markdown"
+                return String(localized: "wet.run.step.markdown")
             case .rawArchive:
-                return "Raw archive"
+                return String(localized: "wet.run.step.rawArchive")
             }
         }
     }
@@ -246,12 +246,22 @@ struct ContentView: View {
         case output
     }
 
-    private enum RunStepState: String {
-        case pending = "Pending"
-        case running = "Running"
-        case done = "Done"
-        case failed = "Failed"
-        case cancelled = "Cancelled"
+    private enum RunStepState {
+        case pending
+        case running
+        case done
+        case failed
+        case cancelled
+
+        var label: String {
+            switch self {
+            case .pending: return String(localized: "wet.run.stepState.pending")
+            case .running: return String(localized: "wet.run.stepState.running")
+            case .done: return String(localized: "wet.run.stepState.done")
+            case .failed: return String(localized: "wet.run.stepState.failed")
+            case .cancelled: return String(localized: "wet.run.stepState.cancelled")
+            }
+        }
     }
 
     private struct RunStepProgress: Identifiable, Equatable {
@@ -378,6 +388,17 @@ struct ContentView: View {
                 return "Compact"
             case .textOnly:
                 return "E-Mail"
+            }
+        }
+
+        nonisolated var uiLabel: String {
+            switch self {
+            case .embedAll:
+                return String(localized: "wet.variant.max")
+            case .thumbnailsOnly:
+                return String(localized: "wet.variant.compact")
+            case .textOnly:
+                return String(localized: "wet.variant.email")
             }
         }
         
@@ -581,12 +602,12 @@ struct ContentView: View {
         .sheet(isPresented: $showReplaceSheet) {
             replaceConfirmationSheet
         }
-        .alert("Delete originals?", isPresented: $showDeleteOriginalsAlert) {
-            Button("Cancel", role: .cancel) {
+        .alert("wet.deleteOriginals.alert.title", isPresented: $showDeleteOriginalsAlert) {
+            Button("wet.action.cancel", role: .cancel) {
                 deleteOriginalCandidates = []
                 deleteOriginalTempWorkspaceURL = nil
             }
-            Button("Delete originals", role: .destructive) {
+            Button("wet.deleteOriginals.alert.confirm", role: .destructive) {
                 let items = deleteOriginalCandidates
                 deleteOriginalCandidates = []
                 let tempWorkspace = deleteOriginalTempWorkspaceURL
@@ -595,10 +616,7 @@ struct ContentView: View {
             }
         } message: {
             let lines = deleteOriginalCandidates.map { $0.path }.joined(separator: "\n")
-            Text(
-                "Raw archive copy verified. These originals can be deleted:\n" +
-                lines
-            )
+            Text(String(format: String(localized: "wet.deleteOriginals.alert.message"), lines))
         }
         .frame(minWidth: 980, minHeight: 720)
     }
@@ -619,14 +637,14 @@ struct ContentView: View {
     }
 
     private var tabSelector: some View {
-        Picker("View", selection: $selectedTab) {
-            Text("Input")
+        Picker("wet.tab.selector", selection: $selectedTab) {
+            Text("wet.tab.input")
                 .tag(WETTab.input)
-            Text("Output")
+            Text("wet.tab.output")
                 .tag(WETTab.output)
         }
         .pickerStyle(.segmented)
-        .accessibilityLabel("WET tab selection")
+        .accessibilityLabel(Text("wet.tab.selector.accessibility"))
     }
 
     @ViewBuilder
@@ -688,11 +706,11 @@ struct ContentView: View {
 
     private var replaceConfirmationSheet: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Replace existing export?")
+            Text("wet.replace.title")
                 .font(.headline)
 
             VStack(alignment: .leading, spacing: 6) {
-                Text("Output folder")
+                Text("wet.replace.outputFolder")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                 Text(replaceOutputPath.isEmpty ? "—" : replaceOutputPath)
@@ -701,7 +719,7 @@ struct ContentView: View {
             }
 
             VStack(alignment: .leading, spacing: 6) {
-                Text("Export base")
+                Text("wet.replace.exportBase")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                 Text(replaceBaseName.isEmpty ? "—" : replaceBaseName)
@@ -710,7 +728,7 @@ struct ContentView: View {
             }
 
             VStack(alignment: .leading, spacing: 6) {
-                Text("Items to replace")
+                Text("wet.replace.itemsToReplace")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                 if replaceExistingNames.isEmpty {
@@ -730,12 +748,12 @@ struct ContentView: View {
 
             HStack {
                 Spacer()
-                Button("Cancel", role: .cancel) {
+                Button("wet.action.cancel", role: .cancel) {
                     dismissReplaceSheet(clearPending: true)
                 }
                 .keyboardShortcut(.defaultAction)
 
-                Button("Keep Both (Deterministic)") {
+                Button("wet.replace.keepBoth") {
                     guard let chatURL, let outBaseURL, let exportDir = replaceExportDir else { return }
                     let variants: [HTMLVariant] = [
                         exportHTMLMax ? .embedAll : nil,
@@ -766,7 +784,7 @@ struct ContentView: View {
                     )
                 }
 
-                Button("Replace", role: .destructive) {
+                Button("wet.replace.replace", role: .destructive) {
                     guard let chatURL, let outBaseURL else { return }
                     dismissReplaceSheet(clearPending: false)
                     overwriteConfirmed = true
@@ -825,10 +843,10 @@ struct ContentView: View {
     }
 
     private var inputPathSection: some View {
-        WASection(title: "Input", systemImage: "tray.and.arrow.down") {
+        WASection(title: "wet.section.input", systemImage: "tray.and.arrow.down") {
             Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 8) {
                 GridRow {
-                    Text("Chat export:")
+                    Text("wet.input.chatExport.label")
                         .frame(width: Layout.labelWidth, alignment: .leading)
 
                     Text(displayChatPath(chatURL) ?? "—")
@@ -837,9 +855,9 @@ struct ContentView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .help(chatURL?.path ?? "")
 
-                    Button("Choose…") { pickChatFile() }
+                    Button("wet.action.choose") { pickChatFile() }
                         .buttonStyle(.bordered)
-                        .accessibilityLabel("Choose chat export")
+                        .accessibilityLabel(Text("wet.input.choose.accessibility"))
                         .disabled(isRunning)
                 }
             }
@@ -847,10 +865,10 @@ struct ContentView: View {
     }
 
     private var outputPathSection: some View {
-        WASection(title: "Output", systemImage: "tray.and.arrow.up") {
+        WASection(title: "wet.section.output", systemImage: "tray.and.arrow.up") {
             Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 8) {
                 GridRow {
-                    Text("Output folder:")
+                    Text("wet.output.folder.label")
                         .frame(width: Layout.labelWidth, alignment: .leading)
 
                     Text(displayOutputPath(outBaseURL) ?? "—")
@@ -859,9 +877,9 @@ struct ContentView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .help(outBaseURL?.path ?? "")
 
-                    Button("Choose…") { pickOutputFolder() }
+                    Button("wet.action.choose") { pickOutputFolder() }
                         .buttonStyle(.bordered)
-                        .accessibilityLabel("Choose output folder")
+                        .accessibilityLabel(Text("wet.output.choose.accessibility"))
                         .disabled(isRunning)
                 }
             }
@@ -869,7 +887,7 @@ struct ContentView: View {
     }
 
     private var participantsSection: some View {
-        WASection(title: "Participants", systemImage: "person.2") {
+        WASection(title: "wet.section.participants", systemImage: "person.2") {
             VStack(alignment: .leading, spacing: 10) {
                 chatPartnerSelectionRow
                 phoneOverridesSection
@@ -878,7 +896,7 @@ struct ContentView: View {
     }
 
     private var overviewCard: some View {
-        WASection(title: "Overview", systemImage: "info.circle") {
+        WASection(title: "wet.section.overview", systemImage: "info.circle") {
             overviewSummary
         }
         .waCard()
@@ -897,14 +915,14 @@ struct ContentView: View {
 
             Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 6) {
                 GridRow {
-                    Text("Detected chat title:")
+                    Text("wet.overview.detectedTitle.label")
                         .foregroundStyle(.secondary)
                         .frame(width: Layout.labelWidth, alignment: .leading)
                     Text(detectedChatTitle ?? "—")
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 GridRow {
-                    Text("Participant label:")
+                    Text("wet.overview.participantLabel.label")
                         .foregroundStyle(.secondary)
                         .frame(width: Layout.labelWidth, alignment: .leading)
                     HStack(spacing: 6) {
@@ -917,14 +935,14 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 GridRow {
-                    Text("Message date range:")
+                    Text("wet.overview.dateRange.label")
                         .foregroundStyle(.secondary)
                         .frame(width: Layout.labelWidth, alignment: .leading)
                     Text(inputSummaryDateRangeText)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 GridRow {
-                    Text("Media counts:")
+                    Text("wet.overview.mediaCounts.label")
                         .foregroundStyle(.secondary)
                         .frame(width: Layout.labelWidth, alignment: .leading)
                     Text(inputSummaryMediaCountsText)
@@ -963,7 +981,7 @@ struct ContentView: View {
     }
 
     private var artifactsSection: some View {
-        WASection(title: "Artifacts", systemImage: "doc.on.doc") {
+        WASection(title: "wet.section.artifacts", systemImage: "doc.on.doc") {
             VStack(alignment: .leading, spacing: 10) {
                 outputsHeader
                 outputsGrid
@@ -978,7 +996,7 @@ struct ContentView: View {
     }
 
     private var sourceHandlingSection: some View {
-        WASection(title: "Source handling", systemImage: "archivebox") {
+        WASection(title: "wet.section.sourceHandling", systemImage: "archivebox") {
             VStack(alignment: .leading, spacing: 8) {
                 rawArchiveToggle
                 deleteOriginalsToggle
@@ -989,10 +1007,10 @@ struct ContentView: View {
 
     private var outputsHeader: some View {
         HStack(spacing: 6) {
-            Text("Artifacts")
+            Text("wet.section.artifacts")
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(.secondary)
-            helpIcon("All artifacts are optional; default: all enabled (including Sidecar).")
+            helpIcon("wet.help.artifacts.header")
         }
     }
 
@@ -1001,11 +1019,11 @@ struct ContentView: View {
             GridRow {
                 Toggle(isOn: $exportHTMLMax) {
                     HStack(spacing: 6) {
-                        Text("Max (single file, all content embedded)")
-                        helpIcon("Largest file; embeds everything (Base64). Ideal for full offline viewing; file will be much larger.")
+                        Text("wet.artifacts.max.label")
+                        helpIcon("wet.help.artifacts.max")
                     }
                 }
-                .accessibilityLabel("HTML Max")
+                .accessibilityLabel(Text("wet.artifacts.max.accessibility"))
                 .disabled(isRunning)
                 .onChange(of: exportHTMLMax) {
                     persistExportSettings()
@@ -1014,11 +1032,11 @@ struct ContentView: View {
 
                 Toggle(isOn: $exportHTMLMid) {
                     HStack(spacing: 6) {
-                        Text("Compact (with previews)")
-                        helpIcon("Smaller file with previews. Thumbnails embedded; large media stored externally.")
+                        Text("wet.artifacts.compact.label")
+                        helpIcon("wet.help.artifacts.compact")
                     }
                 }
-                .accessibilityLabel("HTML Compact")
+                .accessibilityLabel(Text("wet.artifacts.compact.accessibility"))
                 .disabled(isRunning)
                 .onChange(of: exportHTMLMid) {
                     persistExportSettings()
@@ -1028,11 +1046,11 @@ struct ContentView: View {
             GridRow {
                 Toggle(isOn: $exportHTMLMin) {
                     HStack(spacing: 6) {
-                        Text("E-Mail (minimal, text-only)")
-                        helpIcon("Very small; text only. No media or previews.")
+                        Text("wet.artifacts.email.label")
+                        helpIcon("wet.help.artifacts.email")
                     }
                 }
-                .accessibilityLabel("HTML E-Mail")
+                .accessibilityLabel(Text("wet.artifacts.email.accessibility"))
                 .disabled(isRunning)
                 .onChange(of: exportHTMLMin) {
                     persistExportSettings()
@@ -1041,11 +1059,11 @@ struct ContentView: View {
 
                 Toggle(isOn: $exportMarkdown) {
                     HStack(spacing: 6) {
-                        Text("Markdown (.md)")
-                        helpIcon("Creates a Markdown export of the chat.")
+                        Text("wet.artifacts.markdown.label")
+                        helpIcon("wet.help.artifacts.markdown")
                     }
                 }
-                .accessibilityLabel("Markdown export")
+                .accessibilityLabel(Text("wet.artifacts.markdown.accessibility"))
                 .disabled(isRunning)
                 .onChange(of: exportMarkdown) {
                     persistExportSettings()
@@ -1058,8 +1076,8 @@ struct ContentView: View {
     private var sidecarToggle: some View {
         Toggle(isOn: $exportSortedAttachments) {
             HStack(spacing: 6) {
-                Text("Sidecar (archive, best performance)")
-                Text("Recommended")
+                Text("wet.artifacts.sidecar.label")
+                Text("wet.artifacts.sidecar.recommended")
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 6)
@@ -1068,10 +1086,10 @@ struct ContentView: View {
                         Capsule(style: .continuous)
                             .fill(.white.opacity(0.08))
                     )
-                helpIcon("Like Max, but media lives in the Sidecar folder. Ideal for ZIPs (HTML + folder) and faster in the browser.")
+                helpIcon("wet.help.artifacts.sidecar")
             }
         }
-        .accessibilityLabel("Sidecar export")
+        .accessibilityLabel(Text("wet.artifacts.sidecar.accessibility"))
         .disabled(isRunning)
         .onChange(of: exportSortedAttachments) {
             persistExportSettings()
@@ -1084,18 +1102,18 @@ struct ContentView: View {
         return VStack(alignment: .leading, spacing: 4) {
             Toggle(isOn: $deleteOriginalsAfterSidecar) {
                 HStack(spacing: 6) {
-                    Text("Delete originals after Sidecar (optional, after verification)")
-                    helpIcon("Compares raw archive and originals. Delete only after verified match.")
+                    Text("wet.source.deleteOriginals.label")
+                    helpIcon("wet.help.source.deleteOriginals")
                 }
             }
-            .accessibilityLabel("Delete originals")
+            .accessibilityLabel(Text("wet.source.deleteOriginals.accessibility"))
             .disabled(disabled)
             .onChange(of: deleteOriginalsAfterSidecar) {
                 persistExportSettings()
             }
 
             if !copySourcesEnabled {
-                Text("Löschen der Quelldaten ist nur möglich, wenn zuvor die Rohdaten (Sources) kopiert wurden.")
+                Text("wet.source.deleteOriginals.disabledHint")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             }
@@ -1105,11 +1123,11 @@ struct ContentView: View {
     private var rawArchiveToggle: some View {
         Toggle(isOn: $includeRawArchive) {
             HStack(spacing: 6) {
-                Text("Copy raw WhatsApp export archive")
-                helpIcon("Creates a copy of the WhatsApp export inside Sources/ under the run folder.")
+                Text("wet.source.copyRaw.label")
+                helpIcon("wet.help.source.copyRaw")
             }
         }
-        .accessibilityLabel("Copy raw archive")
+        .accessibilityLabel(Text("wet.source.copyRaw.accessibility"))
         .disabled(isRunning || replayModeActive)
         .onChange(of: includeRawArchive) {
             if !includeRawArchive {
@@ -1123,8 +1141,8 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {
                 HStack(spacing: 6) {
-                    Text("Exporter name:")
-                    helpIcon("Name of the person who created the export.")
+                    Text("wet.participants.exporter.label")
+                    helpIcon("wet.help.participants.exporter")
                 }
                 .frame(width: Layout.labelWidth, alignment: .leading)
 
@@ -1133,17 +1151,17 @@ struct ContentView: View {
                     text: exporterOverrideBinding
                 )
                 .textFieldStyle(.roundedBorder)
-                .accessibilityLabel("Exporter name")
+                .accessibilityLabel(Text("wet.participants.exporter.accessibility"))
                 .frame(width: Layout.chatPartnerWidth, alignment: .leading)
                 .disabled(isRunning)
 
                 if let detected = participantResolution.detectedExporter, !detected.isEmpty {
-                    Menu("Use detected") {
+                    Menu("wet.participants.useDetected") {
                         Button(detected) {
                             updateExporterOverride(detected)
                         }
                         Divider()
-                        Button("Clear override") {
+                        Button("wet.participants.clearOverride") {
                             updateExporterOverride(nil)
                         }
                     }
@@ -1156,31 +1174,29 @@ struct ContentView: View {
 
             HStack(spacing: 12) {
                 HStack(spacing: 6) {
-                    Text("Partner name:")
-                    helpIcon("Name of the other person (or group title).")
+                    Text("wet.participants.partner.label")
+                    helpIcon("wet.help.participants.partner")
                 }
                 .frame(width: Layout.labelWidth, alignment: .leading)
 
                 TextField(
-                    participantResolution.detectedPartner?.isEmpty == false
-                        ? "Detected: \(participantResolution.detectedPartner ?? "")"
-                        : "Detected: —",
+                    partnerDetectedPlaceholder,
                     text: partnerOverrideBinding
                 )
                 .textFieldStyle(.roundedBorder)
-                .accessibilityLabel("Partner name")
+                .accessibilityLabel(Text("wet.participants.partner.accessibility"))
                 .frame(width: Layout.chatPartnerWidth, alignment: .leading)
                 .disabled(isRunning)
 
                 if !chatPartnerCandidates.isEmpty {
-                    Menu("Use detected") {
+                    Menu("wet.participants.useDetected") {
                         ForEach(chatPartnerCandidates, id: \.self) { name in
                             Button(name) {
                                 updatePartnerOverride(name)
                             }
                         }
                         Divider()
-                        Button("Clear override") {
+                        Button("wet.participants.clearOverride") {
                             updatePartnerOverride(nil)
                         }
                     }
@@ -1192,14 +1208,14 @@ struct ContentView: View {
             }
 
             HStack(spacing: 12) {
-                Button("Swap exporter ↔ partner") {
+                Button("wet.participants.swap") {
                     swapParticipantOverrides()
                 }
                 .buttonStyle(.bordered)
                 .disabled(isRunning || participantResolution.chatKind == .group)
 
                 if needsParticipantConfirmation {
-                    Text("Best-effort detection uncertain — please confirm or use Swap.")
+                    Text("wet.participants.uncertain")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 }
@@ -1210,7 +1226,7 @@ struct ContentView: View {
                 let count = partners.count
                 let compact = partners.prefix(5).joined(separator: ", ")
                 let suffix = count > 5 ? " …" : ""
-                Text("Participants (\(count)): \(compact)\(suffix)")
+                Text(String(format: String(localized: "wet.participants.groupSummary"), count, "\(compact)\(suffix)"))
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
@@ -1222,7 +1238,7 @@ struct ContentView: View {
     private var chatPartnerSelectionDisplayName: String {
         if chatPartnerSelection == Self.customChatPartnerTag {
             let trimmed = chatPartnerCustomName.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? "Custom…" : trimmed
+            return trimmed.isEmpty ? String(localized: "wet.participants.custom") : trimmed
         }
         let trimmed = chatPartnerSelection.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
@@ -1232,7 +1248,7 @@ struct ContentView: View {
             if let fallback = chatPartnerCandidates.first {
                 return applyPhoneOverrideIfNeeded(fallback)
             }
-            return "Chat partner"
+            return String(localized: "wet.participants.defaultLabel")
         }
         return applyPhoneOverrideIfNeeded(trimmed)
     }
@@ -1245,10 +1261,10 @@ struct ContentView: View {
 
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 6) {
-                    Text("Unknown phone numbers (optional rename)")
+                    Text("wet.participants.phoneOverrides.title")
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(.secondary)
-                    helpIcon("Shown only for participants that appear as phone numbers in the export.")
+                    helpIcon("wet.help.participants.phoneOverrides")
                 }
 
                 ForEach(phoneOnlyParticipants, id: \.self) { num in
@@ -1266,7 +1282,7 @@ struct ContentView: View {
                             .truncationMode(.middle)
                             .frame(width: 210, alignment: .leading)
 
-                        TextField("Name (e.g., Alex Example)", text: overrideBinding)
+                        TextField("wet.participants.phoneOverrides.placeholder", text: overrideBinding)
                             .textFieldStyle(.roundedBorder)
                             .aiGlow(
                                 active: shouldShowPhoneSuggestionGlow(for: num),
@@ -1300,13 +1316,17 @@ struct ContentView: View {
                             .controlSize(.small)
                             .tint(.red)
                     }
-                    Label(isRunning ? "Exporting…" : "Export", systemImage: "square.and.arrow.up")
+                    Label {
+                        Text(isRunning ? "wet.run.exporting" : "wet.run.export")
+                    } icon: {
+                        Image(systemName: "square.and.arrow.up")
+                    }
                 }
             }
             .buttonStyle(.borderedProminent)
             .disabled(!canStartExport)
 
-            let cancelButton = Button("Cancel") {
+            let cancelButton = Button("wet.action.cancel") {
                 guard isRunning, !cancelRequested else { return }
                 cancelRequested = true
                 exportTask?.cancel()
@@ -1321,7 +1341,7 @@ struct ContentView: View {
             }
 
             if runStatus == .completed, let exportDir = lastExportDir {
-                Button("Reveal in Finder") {
+                Button("wet.run.revealFinder") {
                     revealInFinder(exportDir)
                 }
                 .buttonStyle(.bordered)
@@ -1331,7 +1351,7 @@ struct ContentView: View {
     }
 
     private var runSection: some View {
-        WASection(title: "Run", systemImage: "play.circle") {
+        WASection(title: "wet.section.run", systemImage: "play.circle") {
             VStack(alignment: .leading, spacing: 10) {
                 runHeaderBar
                 runTargetFolderView
@@ -1355,7 +1375,7 @@ struct ContentView: View {
 
     private var runTargetFolderView: some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text("Target folder")
+            Text("wet.run.targetFolder.label")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 1) {
@@ -1376,7 +1396,7 @@ struct ContentView: View {
         let steps = displayedRunSteps
         return VStack(alignment: .leading, spacing: 6) {
             if steps.isEmpty {
-                Text("Select at least one output to preview steps.")
+                Text("wet.run.selectOutputHint")
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
             } else {
@@ -1391,7 +1411,7 @@ struct ContentView: View {
         switch runStatus {
         case .completed:
             if let duration = lastRunDuration {
-                Text("Total duration: \(Self.formatDuration(duration))")
+                Text(String(format: String(localized: "wet.run.totalDuration"), Self.formatDuration(duration)))
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
             }
@@ -1401,13 +1421,13 @@ struct ContentView: View {
                 Text(summary)
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
-                Button("Open Diagnostics Log") {
+                Button("wet.run.openDiagnostics") {
                     openWindow(id: DiagnosticsLogView.windowID)
                 }
                 .buttonStyle(.link)
             }
         case .cancelled:
-            Text("Cancelled (published outputs preserved).")
+            Text("wet.run.cancelled")
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
         default:
@@ -1429,7 +1449,12 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                 }
                 .font(.system(size: 12))
-                .accessibilityLabel("\(step.step.label) \(step.state.rawValue) \(runStepDurationText(for: step))")
+                .accessibilityLabel(
+                    Text(String(format: String(localized: "wet.run.step.accessibility"),
+                                step.step.label,
+                                step.state.label,
+                                runStepDurationText(for: step)))
+                )
             }
         }
     }
@@ -1490,9 +1515,9 @@ struct ContentView: View {
                 .frame(width: 32, height: 32)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text("WhatsApp Export Tools")
+                Text("wet.app.title")
                     .font(.system(size: 15, weight: .semibold))
-                Text("Export WhatsApp chats to HTML and Markdown")
+                Text("wet.app.subtitle")
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
             }
@@ -1567,28 +1592,56 @@ struct ContentView: View {
     private var inputSummaryMediaCountsText: String {
         let counts = detectedMediaCounts
         if counts.total == 0 { return "—" }
-        return "Images \(counts.images) · Videos \(counts.videos) · Audio \(counts.audios) · Documents \(counts.documents)"
+        return String(
+            format: String(localized: "wet.overview.mediaCounts.format"),
+            counts.images,
+            counts.videos,
+            counts.audios,
+            counts.documents
+        )
     }
 
     private var inputSummaryConfidenceText: String? {
         let exporter = participantResolution.exporterConfidence
         let partner = participantResolution.partnerConfidence
         if participantResolution.detectionConfidence == .low || participantResolution.detectionConfidence == .unknown {
-            return "Needs confirmation"
+            return String(localized: "wet.participants.confidence.needsConfirmation")
         }
-        if participantResolution.exporterAssumed { return "Needs confirmation" }
-        if exporter == .none || partner == .none { return "Needs confirmation" }
-        if exporter == .strong && partner == .strong { return "Confident" }
-        return "Likely"
+        if participantResolution.exporterAssumed {
+            return String(localized: "wet.participants.confidence.needsConfirmation")
+        }
+        if exporter == .none || partner == .none {
+            return String(localized: "wet.participants.confidence.needsConfirmation")
+        }
+        if exporter == .strong && partner == .strong {
+            return String(localized: "wet.participants.confidence.confident")
+        }
+        return String(localized: "wet.participants.confidence.likely")
     }
 
     private var exporterDetectedPlaceholder: String {
-        let detected = participantResolution.detectedExporter?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if detected.isEmpty { return "Detected: —" }
-        if participantResolution.exporterAssumed && participantResolution.exporterOverride == nil {
-            return "Detected: \(detected) (assumed)"
+        detectedPlaceholderText(
+            detected: participantResolution.detectedExporter,
+            assumed: participantResolution.exporterAssumed && participantResolution.exporterOverride == nil
+        )
+    }
+
+    private var partnerDetectedPlaceholder: String {
+        detectedPlaceholderText(
+            detected: participantResolution.detectedPartner,
+            assumed: false
+        )
+    }
+
+    private func detectedPlaceholderText(detected: String?, assumed: Bool) -> String {
+        let trimmed = detected?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if trimmed.isEmpty {
+            return String(localized: "wet.detected.none")
         }
-        return "Detected: \(detected)"
+        if assumed {
+            return String(format: String(localized: "wet.detected.assumed"), trimmed)
+        }
+        return String(format: String(localized: "wet.detected.value"), trimmed)
     }
 
     nonisolated static func resolveExporterFallback(
@@ -1821,7 +1874,7 @@ struct ContentView: View {
         WETPartnerNaming.safeFolderName(s, maxLen: maxLen)
     }
 
-    private func helpIcon(_ text: String) -> some View {
+    private func helpIcon(_ text: LocalizedStringKey) -> some View {
         HelpButton(text: text)
     }
 
@@ -1895,9 +1948,9 @@ struct ContentView: View {
 
     private func pickChatFile() {
         let panel = NSOpenPanel()
-        panel.title = "Choose WhatsApp chat export"
-        panel.message = "Select a WhatsApp export folder, ZIP, or _chat.txt."
-        panel.prompt = "Choose"
+        panel.title = String(localized: "wet.input.panel.title")
+        panel.message = String(localized: "wet.input.panel.message")
+        panel.prompt = String(localized: "wet.action.choose")
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = true
         panel.canChooseFiles = true
@@ -1914,9 +1967,9 @@ struct ContentView: View {
 
     private func pickOutputFolder() {
         let panel = NSOpenPanel()
-        panel.title = "Choose output folder"
-        panel.message = "Select the output folder for the export artifacts."
-        panel.prompt = "Choose"
+        panel.title = String(localized: "wet.output.panel.title")
+        panel.message = String(localized: "wet.output.panel.message")
+        panel.prompt = String(localized: "wet.action.choose")
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
@@ -2033,9 +2086,9 @@ struct ContentView: View {
             detectedMediaCounts = detectionSnapshot.mediaCounts
             switch snapshot.provenance.inputKind {
             case .folder:
-                inputKindBadge = "Folder"
+                inputKindBadge = String(localized: "wet.input.badge.folder")
             case .zip:
-                inputKindBadge = "ZIP"
+                inputKindBadge = String(localized: "wet.input.badge.zip")
             }
 
             var parts = detectionSnapshot.participants
@@ -2494,28 +2547,28 @@ struct ContentView: View {
     private var runStatusText: String {
         switch runStatus {
         case .ready:
-            return "Ready"
+            return String(localized: "wet.run.status.ready")
         case .validating:
-            return "Validating…"
+            return String(localized: "wet.run.status.validating")
         case .exporting(let step):
-            return "Exporting: \(step.label)"
+            return String(format: String(localized: "wet.run.status.exporting"), step.label)
         case .completed:
-            return "Completed"
+            return String(localized: "wet.run.status.completed")
         case .failed:
-            return "Failed"
+            return String(localized: "wet.run.status.failed")
         case .cancelled:
-            return "Cancelled"
+            return String(localized: "wet.run.status.cancelled")
         }
     }
 
     private var failureSummaryText: String {
         if let artifact = lastRunFailureArtifact, let summary = lastRunFailureSummary {
-            return "Failed (\(artifact)): \(summary)"
+            return String(format: String(localized: "wet.run.failure.withArtifact"), artifact, summary)
         }
         if let summary = lastRunFailureSummary {
-            return "Failed: \(summary)"
+            return String(format: String(localized: "wet.run.failure.withoutArtifact"), summary)
         }
-        return "Failed. See log for details."
+        return String(localized: "wet.run.failure.generic")
     }
 
     private func progressIconName(for state: RunStepState) -> String {
@@ -2946,6 +2999,15 @@ struct ContentView: View {
     }
 
     nonisolated static func replaceDialogLabels(existingNames: [String], baseName: String) -> [String] {
+        let sidecarLabel = String(localized: "wet.replace.label.sidecar")
+        let rawArchiveLabel = String(localized: "wet.replace.label.rawArchive")
+        let manifestLabel = String(localized: "wet.replace.label.manifest")
+        let checksumLabel = String(localized: "wet.replace.label.checksum")
+        let maxLabel = String(localized: "wet.replace.label.max")
+        let compactLabel = String(localized: "wet.replace.label.compact")
+        let emailLabel = String(localized: "wet.replace.label.email")
+        let markdownLabel = String(localized: "wet.replace.label.markdown")
+
         var labels: Set<String> = []
 
         func isSidecarHTML(_ name: String) -> Bool {
@@ -2995,41 +3057,50 @@ struct ContentView: View {
 
         for name in existingNames {
             if isSidecarHTML(name) || isSidecarDir(name) {
-                labels.insert("Sidecar")
+                labels.insert(sidecarLabel)
             }
             if isRawArchive(name) {
-                labels.insert("Raw archive")
+                labels.insert(rawArchiveLabel)
             }
             if isManifest(name) {
-                labels.insert("Manifest")
+                labels.insert(manifestLabel)
             }
             if isChecksum(name) {
-                labels.insert("Checksum")
+                labels.insert(checksumLabel)
             }
             if isVariantHTML(
                 name,
                 suffixes: [WETOutputNaming.htmlVariantSuffix(for: "embedAll"), "-max"]
             ) {
-                labels.insert("Max")
+                labels.insert(maxLabel)
             }
             if isVariantHTML(
                 name,
                 suffixes: [WETOutputNaming.htmlVariantSuffix(for: "thumbnailsOnly"), "-mid"]
             ) {
-                labels.insert("Compact")
+                labels.insert(compactLabel)
             }
             if isVariantHTML(
                 name,
                 suffixes: [WETOutputNaming.htmlVariantSuffix(for: "textOnly"), "-min"]
             ) {
-                labels.insert("E-Mail")
+                labels.insert(emailLabel)
             }
             if isMarkdown(name) {
-                labels.insert("Markdown")
+                labels.insert(markdownLabel)
             }
         }
 
-        let ordered = ["Sidecar", "Raw archive", "Manifest", "Checksum", "Max", "Compact", "E-Mail", "Markdown"]
+        let ordered = [
+            sidecarLabel,
+            rawArchiveLabel,
+            manifestLabel,
+            checksumLabel,
+            maxLabel,
+            compactLabel,
+            emailLabel,
+            markdownLabel
+        ]
         return ordered.filter { labels.contains($0) }
     }
 
@@ -4984,7 +5055,7 @@ struct ContentView: View {
 // MARK: - Helpers (file-level)
 
 private struct WASection<Content: View>: View {
-    let title: String
+    let title: LocalizedStringKey
     let systemImage: String
     @ViewBuilder let content: () -> Content
 
@@ -4999,7 +5070,7 @@ private struct WASection<Content: View>: View {
 }
 
 private struct HelpButton: View {
-    let text: String
+    let text: LocalizedStringKey
     @State private var isPresented = false
 
     var body: some View {
@@ -5023,7 +5094,7 @@ private struct HelpButton: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(12)
         }
-        .accessibilityLabel("Help")
+        .accessibilityLabel(Text("wet.help.accessibility"))
     }
 }
 

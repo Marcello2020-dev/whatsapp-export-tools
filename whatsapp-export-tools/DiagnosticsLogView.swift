@@ -4,24 +4,23 @@ import UniformTypeIdentifiers
 
 struct DiagnosticsLogView: View {
     static let windowID = "diagnostics-log"
-    static let windowTitle = "Diagnostics Log"
 
     @EnvironmentObject private var diagnosticsLog: DiagnosticsLogStore
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
-                Button("Copy Log") {
+                Button("wet.diagnostics.copy") {
                     copyLogToPasteboard()
                 }
                 .buttonStyle(.bordered)
 
-                Button("Save Log…") {
+                Button("wet.diagnostics.save") {
                     saveLog()
                 }
                 .buttonStyle(.bordered)
 
-                Button("Clear Log") {
+                Button("wet.diagnostics.clear") {
                     diagnosticsLog.clear()
                 }
                 .buttonStyle(.bordered)
@@ -44,8 +43,8 @@ struct DiagnosticsLogView: View {
 
     private func saveLog() {
         let panel = NSSavePanel()
-        panel.title = "Save Log"
-        panel.prompt = "Save"
+        panel.title = String(localized: "wet.diagnostics.save.title")
+        panel.prompt = String(localized: "wet.diagnostics.save.prompt")
         panel.nameFieldStringValue = "wet-log.txt"
         panel.allowedContentTypes = [.plainText]
         if panel.runModal() == .OK, let url = panel.url {
