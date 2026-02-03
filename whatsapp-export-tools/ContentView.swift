@@ -5103,7 +5103,7 @@ private struct WASection<Content: View>: View {
 
 private struct HelpButton: View {
     let key: String
-    @AppStorage("app.language") private var appLanguageRaw: String = AppLanguage.en.rawValue
+    @AppStorage("app.language") private var appLanguageRaw: String = AppLanguage.de.rawValue
     @State private var isPresented = false
 
     private var localizedBundle: Bundle {

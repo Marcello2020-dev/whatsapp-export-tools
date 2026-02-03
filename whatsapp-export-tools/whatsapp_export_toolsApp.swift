@@ -21,7 +21,7 @@ enum AppLanguage: String, CaseIterable, Identifiable {
 @main
 struct whatsapp_export_toolsApp: App {
     @StateObject private var diagnosticsLog = DiagnosticsLogStore()
-    @AppStorage("app.language") private var appLanguageRaw: String = AppLanguage.en.rawValue
+    @AppStorage("app.language") private var appLanguageRaw: String = AppLanguage.de.rawValue
 
     private var appLanguage: AppLanguage {
         AppLanguage(rawValue: appLanguageRaw) ?? .en
@@ -145,7 +145,7 @@ private struct DiagnosticsLogCommands: Commands {
 }
 
 private struct LanguageCommands: Commands {
-    @AppStorage("app.language") private var appLanguageRaw: String = AppLanguage.en.rawValue
+    @AppStorage("app.language") private var appLanguageRaw: String = AppLanguage.de.rawValue
 
     var body: some Commands {
         CommandMenu("wet.menu.language") {
