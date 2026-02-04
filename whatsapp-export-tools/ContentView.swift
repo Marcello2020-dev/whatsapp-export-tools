@@ -844,15 +844,6 @@ struct ContentView: View {
                     .opacity(0.55)
                     .allowsHitTesting(false)
 
-                    // Large app icon watermark
-                    Image(nsImage: ContentView.appIconNSImage)
-                        .resizable()
-                        .interpolation(.high)
-                        .scaledToFit()
-                        .frame(width: min(geo.size.width, geo.size.height) * 0.82)
-                        .opacity(0.13)
-                        .blendMode(.softLight)
-                        .allowsHitTesting(false)
                 }
                 .frame(width: geo.size.width, height: geo.size.height)
             }
