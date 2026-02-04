@@ -8662,11 +8662,34 @@ nonisolated private static func stageThumbnailForExport(
             try appendFiles(from: candidate, into: &files)
         }
 
+        func canonicalPath(_ url: URL) -> String {
+            let standardized = url.standardizedFileURL
+            if let rv = try? standardized.resourceValues(forKeys: [.canonicalPathKey]),
+               let canonical = rv.canonicalPath {
+                return canonical
+            }
+            return standardized.path
+        }
+
         func normalizedRelativePath(_ url: URL) -> String? {
-            let rootPath = root.standardizedFileURL.path
-            let fullPath = url.standardizedFileURL.path
-            guard fullPath.hasPrefix(rootPath) else { return nil }
-            var rel = String(fullPath.dropFirst(rootPath.count))
+            func normalize(_ path: String) -> String {
+                path.precomposedStringWithCanonicalMapping
+            }
+
+            let rootPath = normalize(root.standardizedFileURL.path)
+            let fullPath = normalize(url.standardizedFileURL.path)
+            if fullPath.hasPrefix(rootPath) {
+                var rel = String(fullPath.dropFirst(rootPath.count))
+                if rel.hasPrefix("/") { rel.removeFirst() }
+                if rel.isEmpty { return nil }
+                let nfc = rel.precomposedStringWithCanonicalMapping
+                return nfc.replacingOccurrences(of: "\\", with: "/")
+            }
+
+            let rootCanonical = normalize(canonicalPath(root))
+            let fullCanonical = normalize(canonicalPath(url))
+            guard fullCanonical.hasPrefix(rootCanonical) else { return nil }
+            var rel = String(fullCanonical.dropFirst(rootCanonical.count))
             if rel.hasPrefix("/") { rel.removeFirst() }
             if rel.isEmpty { return nil }
             let nfc = rel.precomposedStringWithCanonicalMapping
