@@ -1,7 +1,7 @@
-# WhatsApp Export Tools
+# Chat Export Studio
 
-![WhatsApp Export Tools – UI (Light)](docs/screenshot-ui-lightmode.png)
-![WhatsApp Export Tools – UI (Dark)](docs/screenshoot-ui-darkmode.png)
+![Chat Export Studio – UI (Light)](docs/screenshot-ui-lightmode.png)
+![Chat Export Studio – UI (Dark)](docs/screenshoot-ui-darkmode.png)
 
 macOS SwiftUI app for turning exported WhatsApp chat logs (`_chat.txt`) into **readable HTML archives** (WhatsApp-like bubble view) and **Markdown** that open in standard browsers.
 
