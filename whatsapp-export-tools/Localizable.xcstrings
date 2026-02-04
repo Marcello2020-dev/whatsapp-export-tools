@@ -847,13 +847,13 @@
         "de" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Vergleicht Rohkopie und Originale. Löschen nur nach verifiziertem Abgleich."
+            "value" : "Nur möglich, wenn „Rohes WhatsApp-Exportarchiv kopieren“ aktiviert ist. Löschen erst nach erfolgreicher Kopie und Prüfung."
           }
         },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Compares raw archive and originals. Delete only after verified match."
+            "value" : "Only available when “Copy raw WhatsApp export archive” is enabled. Deletion happens only after a successful copy and verification."
           }
         }
       }
@@ -2225,13 +2225,13 @@
         "de" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Löschen ist nur möglich, wenn das Rohdatenarchiv kopiert wurde."
+            "value" : "Nur möglich, wenn „Rohes WhatsApp-Exportarchiv kopieren“ aktiviert ist."
           }
         },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Enable \"Copy raw WhatsApp export archive\" to allow deletion (keeps an archive)."
+            "value" : "Only available when “Copy raw WhatsApp export archive” is enabled."
           }
         }
       }
@@ -2241,13 +2241,13 @@
         "de" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Originale nach Sidecar löschen (optional, nach Prüfung)"
+            "value" : "Originale nach Kopie löschen (optional, nach Prüfung)"
           }
         },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Delete originals after Sidecar (optional, after verification)"
+            "value" : "Delete originals after copy (optional, after verification)"
           }
         }
       }
