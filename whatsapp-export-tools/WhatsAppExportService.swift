@@ -4247,16 +4247,66 @@ public enum WhatsAppExportService {
         let utCentral: Date?
         let ntfsLocal: Date?
         let ntfsCentral: Date?
-        let dosDateLocal: Date?
-        let dosDateCentral: Date?
+        let dosDateLocal: UInt16?
+        let dosTimeLocal: UInt16?
+        let dosDateCentral: UInt16
+        let dosTimeCentral: UInt16
     }
 
-    private enum ZipTimestampSource: String {
-        case utLocal = "ut-local"
-        case utCentral = "ut-central"
-        case ntfsLocal = "ntfs-local"
-        case ntfsCentral = "ntfs-central"
+    enum ZipTimestampSource: String {
+        case ut5455 = "ut5455"
         case dos = "dos"
+    }
+
+    struct ZipEntryTimestampResolver {
+        struct Diagnostics {
+            let epochSeconds: Int
+            let isoString: String
+            let timeZoneID: String
+            let dstOffsetSeconds: Int
+        }
+
+        struct Result {
+            let mtime: Date
+            let source: ZipTimestampSource
+            let diagnostics: Diagnostics?
+        }
+
+        static func resolve(
+            utMTime: Date?,
+            dosDate: UInt16?,
+            dosTime: UInt16?,
+            timeZone: TimeZone,
+            diagnosticsEnabled: Bool
+        ) -> Result? {
+            let mtime: Date
+            let source: ZipTimestampSource
+
+            if let ut = utMTime {
+                mtime = ut
+                source = .ut5455
+            } else if let dosDate, let dosTime,
+                      let dos = TimePolicy.dateFromMSDOSTimestamp(date: dosDate, time: dosTime, timeZone: timeZone) {
+                mtime = dos
+                source = .dos
+            } else {
+                return nil
+            }
+
+            let diagnostics: Diagnostics? = diagnosticsEnabled ? {
+                let epochSeconds = Int(mtime.timeIntervalSince1970.rounded())
+                let iso = TimePolicy.iso8601WithOffsetString(mtime)
+                let dstOffset = Int(timeZone.daylightSavingTimeOffset(for: mtime))
+                return Diagnostics(
+                    epochSeconds: epochSeconds,
+                    isoString: iso,
+                    timeZoneID: timeZone.identifier,
+                    dstOffsetSeconds: dstOffset
+                )
+            }() : nil
+
+            return Result(mtime: mtime, source: source, diagnostics: diagnostics)
+        }
     }
 
     private enum ZipTimestampError: Error {
@@ -4392,28 +4442,11 @@ public enum WhatsAppExportService {
             return out.joined(separator: "/")
         }
 
-        func selectCandidate(_ entry: ZipTimestampEntry) -> (Date, ZipTimestampSource)? {
-            if let d = entry.utLocal { return (d, .utLocal) }
-            if let d = entry.utCentral { return (d, .utCentral) }
-            if let d = entry.ntfsLocal { return (d, .ntfsLocal) }
-            if let d = entry.ntfsCentral { return (d, .ntfsCentral) }
-            if let d = entry.dosDateLocal ?? entry.dosDateCentral { return (d, .dos) }
-            return nil
-        }
-
-        func offsetMismatch(candidate: Date, extracted: Date) -> (delta: Int, offset: Int)? {
-            let delta = Int((candidate.timeIntervalSince1970 - extracted.timeIntervalSince1970).rounded())
-            let offset = TimeZone.current.secondsFromGMT(for: extracted)
-            let diffOffset = abs(abs(delta) - abs(offset))
-            if offset != 0, diffOffset <= 2 {
-                return (delta, offset)
-            }
-            let diff3600 = abs(abs(delta) - 3600)
-            if diff3600 <= 2 {
-                return (delta, offset)
-            }
-            return nil
-        }
+        let tz = TimePolicy.canonicalTimeZone
+        var totalCount = 0
+        var utCount = 0
+        var dosCount = 0
+        var drift3600Count = 0
 
         for entry in entries {
             var rel = entry.path.replacingOccurrences(of: "\\", with: "/")
@@ -4434,38 +4467,22 @@ public enum WhatsAppExportService {
             guard targetPath.hasPrefix(rootPath), fm.fileExists(atPath: targetPath) else { continue }
 
             let extractedMTime = (try? fm.attributesOfItem(atPath: targetPath))?[.modificationDate] as? Date
-            let candidate = selectCandidate(entry)
+            let utMTime = entry.utLocal ?? entry.utCentral
+            let dosDate = entry.dosDateLocal ?? entry.dosDateCentral
+            let dosTime = entry.dosTimeLocal ?? entry.dosTimeCentral
 
-            var appliedDate: Date
-            var appliedSource: ZipTimestampSource
-            var appliedAction: String
-
-            if let extracted = extractedMTime, let (candidateDate, source) = candidate {
-                let delta = abs(candidateDate.timeIntervalSince1970 - extracted.timeIntervalSince1970)
-                if delta <= 2.0 {
-                    appliedDate = candidateDate
-                    appliedSource = source
-                    appliedAction = "override"
-                } else {
-                    appliedDate = extracted
-                    appliedSource = source
-                    appliedAction = "keep-extracted"
-                    if debugEnabled, let mismatch = offsetMismatch(candidate: candidateDate, extracted: extracted) {
-                        let relSanitized = sanitizeDebugPath(rel)
-                        WETLog.dbg("ZIP mtime keep path=\(relSanitized) source=\(source.rawValue) delta=\(mismatch.delta)s offset=\(mismatch.offset)s")
-                    }
-                }
-            } else if let extracted = extractedMTime {
-                appliedDate = extracted
-                appliedSource = candidate?.1 ?? .dos
-                appliedAction = "keep-extracted"
-            } else if let (candidateDate, source) = candidate {
-                appliedDate = candidateDate
-                appliedSource = source
-                appliedAction = "zip-metadata"
-            } else {
+            guard let resolved = ZipEntryTimestampResolver.resolve(
+                utMTime: utMTime,
+                dosDate: dosDate,
+                dosTime: dosTime,
+                timeZone: tz,
+                diagnosticsEnabled: debugEnabled
+            ) else {
                 continue
             }
+
+            let appliedDate = resolved.mtime
+            let appliedSource = resolved.source
 
             do {
                 try fm.setAttributes([.creationDate: appliedDate, .modificationDate: appliedDate], ofItemAtPath: targetPath)
@@ -4485,23 +4502,28 @@ public enum WhatsAppExportService {
             }
 
             if debugEnabled {
-                let isPDF = rel.lowercased().hasSuffix(".pdf")
-                if isPDF {
-                    let epoch = Int(appliedDate.timeIntervalSince1970.rounded())
-                    WETLog.dbg("ZIP mtime set path=\(sanitizeDebugPath(rel)) source=\(appliedSource.rawValue) action=\(appliedAction) epoch=\(epoch)")
+                totalCount += 1
+                switch appliedSource {
+                case .ut5455: utCount += 1
+                case .dos: dosCount += 1
                 }
-                if let actual = (try? fm.attributesOfItem(atPath: targetPath))?[.modificationDate] as? Date {
-                    let delta = abs(actual.timeIntervalSince1970 - appliedDate.timeIntervalSince1970)
-                    if delta > 2.0 {
-                        let intendedEpoch = Int(appliedDate.timeIntervalSince1970.rounded())
-                        let actualEpoch = Int(actual.timeIntervalSince1970.rounded())
-                        WETLog.dbg("ZIP mtime verify path=\(sanitizeDebugPath(rel)) source=\(appliedSource.rawValue) intended=\(intendedEpoch) actual=\(actualEpoch)")
-                    }
-                } else {
-                    let intendedEpoch = Int(appliedDate.timeIntervalSince1970.rounded())
-                    WETLog.dbg("ZIP mtime verify path=\(sanitizeDebugPath(rel)) source=\(appliedSource.rawValue) intended=\(intendedEpoch) actual=-1")
+                if let extracted = extractedMTime {
+                    let delta = Int((appliedDate.timeIntervalSince1970 - extracted.timeIntervalSince1970).rounded())
+                    if abs(abs(delta) - 3600) <= 2 { drift3600Count += 1 }
+                }
+
+                let relSanitized = sanitizeDebugPath(rel)
+                if let diag = resolved.diagnostics {
+                    WETLog.dbg(
+                        "ZIP mtime entry path=\(relSanitized) source=\(appliedSource.rawValue) " +
+                        "epoch=\(diag.epochSeconds) iso=\(diag.isoString) tz=\(diag.timeZoneID) dst=\(diag.dstOffsetSeconds)s"
+                    )
                 }
             }
+        }
+
+        if debugEnabled {
+            WETLog.dbg("ZIP mtime summary total=\(totalCount) ut=\(utCount) dos=\(dosCount) drift3600=\(drift3600Count)")
         }
     }
 
@@ -4800,23 +4822,15 @@ public enum WhatsAppExportService {
                 }
             }
             var localExtra = ExtraTimestampResult()
-            var localDosDate: Date? = nil
+            var localDosDate: UInt16? = nil
+            var localDosTime: UInt16? = nil
             if let localHeader = readLocalHeader(offset: localHeaderOffset) {
                 if let extra = localHeader.extra {
                     localExtra = parseExtraTimestamps(extra)
                 }
-                localDosDate = TimePolicy.dateFromMSDOSTimestamp(
-                    date: localHeader.modDate,
-                    time: localHeader.modTime,
-                    timeZone: canonicalTimeZone
-                )
+                localDosDate = localHeader.modDate
+                localDosTime = localHeader.modTime
             }
-
-            let dosCentral = TimePolicy.dateFromMSDOSTimestamp(
-                date: modDate,
-                time: modTime,
-                timeZone: canonicalTimeZone
-            )
 
             entries.append(
                 ZipTimestampEntry(
@@ -4826,7 +4840,9 @@ public enum WhatsAppExportService {
                     ntfsLocal: localExtra.ntfs,
                     ntfsCentral: centralExtra.ntfs,
                     dosDateLocal: localDosDate,
-                    dosDateCentral: dosCentral
+                    dosTimeLocal: localDosTime,
+                    dosDateCentral: modDate,
+                    dosTimeCentral: modTime
                 )
             )
 
@@ -4854,7 +4870,8 @@ public enum WhatsAppExportService {
             let msg = String(data: data, encoding: .utf8) ?? "exit \(proc.terminationStatus)"
             throw WAInputError.zipExtractionFailed(url: zipURL, reason: msg.trimmingCharacters(in: .whitespacesAndNewlines))
         }
-        if ProcessInfo.processInfo.environment["WET_ZIP_NORMALIZE_TIMESTAMPS"] == "1" {
+        let normalize = ProcessInfo.processInfo.environment["WET_ZIP_NORMALIZE_TIMESTAMPS"] != "0"
+        if normalize {
             do {
                 try normalizeZipEntryTimestamps(zipURL: zipURL, destDir: destDir)
             } catch {

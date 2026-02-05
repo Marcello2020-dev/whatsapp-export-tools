@@ -319,6 +319,22 @@
         }
       }
     },
+    "wet.checks.zipTimestamp" : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "WET ZIP-Zeitstempelprüfung läuft…"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Running WET ZIP timestamp check…"
+          }
+        }
+      }
+    },
     "wet.checks.exporterPlaceholder" : {
       "localizations" : {
         "de" : {
