@@ -4550,18 +4550,37 @@ public enum WhatsAppExportService {
     struct ZipTimestampFixtureSummary {
         let total: Int
         let missing: Int
-        let mismatched: Int
+        let extra: Int
+        let sizeOrHashMismatch: Int
+        let mtimeMismatch: Int
         let drift3600: Int
     }
 
-    nonisolated static func runZipTimestampFixtureCheck(zipURL: URL, referenceDir: URL) throws -> ZipTimestampFixtureSummary {
+    nonisolated static func runZipTimestampFixtureCheck(zipURL: URL, referenceDir: URL?) throws -> ZipTimestampFixtureSummary {
         let fm = FileManager.default
         let tempRoot = fm.temporaryDirectory.appendingPathComponent(".wa_zip_ts_check_\(UUID().uuidString)", isDirectory: true)
         try recreateDirectory(tempRoot)
         defer { try? fm.removeItem(at: tempRoot) }
 
-        try extractZip(at: zipURL, to: tempRoot)
-        try normalizeZipEntryTimestamps(zipURL: zipURL, destDir: tempRoot)
+        let refDir = tempRoot.appendingPathComponent("ref", isDirectory: true)
+        let wetDir = tempRoot.appendingPathComponent("wet", isDirectory: true)
+        try fm.createDirectory(at: refDir, withIntermediateDirectories: true)
+        try fm.createDirectory(at: wetDir, withIntermediateDirectories: true)
+
+        if let referenceDir {
+            try copyDirectoryPreservingStructure(
+                from: referenceDir,
+                to: refDir,
+                skippingPathPrefixes: []
+            )
+        } else {
+            let didDitto = try extractZipWithDitto(zipURL: zipURL, to: refDir)
+            guard didDitto else {
+                throw WAInputError.zipExtractionFailed(url: zipURL, reason: "ditto reference extraction failed")
+            }
+        }
+
+        try extractZip(at: zipURL, to: wetDir)
 
         func unwrapSingleRoot(_ url: URL) -> URL {
             guard let items = try? fm.contentsOfDirectory(at: url, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else {
@@ -4573,8 +4592,8 @@ public enum WhatsAppExportService {
             return url
         }
 
-        let extractedRoot = unwrapSingleRoot(tempRoot).standardizedFileURL
-        let referenceRoot = referenceDir.standardizedFileURL
+        let extractedRoot = unwrapSingleRoot(wetDir).standardizedFileURL
+        let referenceRoot = unwrapSingleRoot(refDir).standardizedFileURL
 
         func normalizedRelPath(root: URL, url: URL) -> String? {
             let rootPath = root.path.hasSuffix("/") ? root.path : root.path + "/"
@@ -4586,49 +4605,134 @@ public enum WhatsAppExportService {
             return rel.replacingOccurrences(of: "\\", with: "/")
         }
 
-        func collectMtimes(root: URL) -> [String: Date] {
-            var out: [String: Date] = [:]
+        struct ZipFixtureFileInfo: Equatable {
+            let size: UInt64
+            let sha256: String
+            let mtimeSeconds: Int
+        }
+
+        func shouldIgnore(_ rel: String) -> Bool {
+            if rel.hasSuffix(".DS_Store") { return true }
+            if rel.contains("/__MACOSX/") { return true }
+            for comp in rel.split(separator: "/") {
+                if comp.hasPrefix("._") { return true }
+            }
+            return false
+        }
+
+        func sanitizeRelForLog(_ rel: String) -> String {
+            let comps = rel.split(separator: "/").map(String.init)
+            func scrub(_ s: String) -> String {
+                var out = ""
+                var lastUnderscore = false
+                for scalar in s.unicodeScalars {
+                    if CharacterSet.letters.contains(scalar) {
+                        if !lastUnderscore {
+                            out.append("_")
+                            lastUnderscore = true
+                        }
+                    } else {
+                        out.append(Character(scalar))
+                        lastUnderscore = false
+                    }
+                }
+                let trimmed = out.trimmingCharacters(in: CharacterSet(charactersIn: "_"))
+                return trimmed.isEmpty ? "_" : trimmed
+            }
+            return comps.map(scrub).joined(separator: "/")
+        }
+
+        func sha256Hex(for url: URL) throws -> String {
+            let handle = try FileHandle(forReadingFrom: url)
+            defer { try? handle.close() }
+            var hasher = SHA256()
+            while true {
+                let chunk = try handle.read(upToCount: 1024 * 1024) ?? Data()
+                if chunk.isEmpty { break }
+                hasher.update(data: chunk)
+            }
+            let digest = hasher.finalize()
+            return digest.map { String(format: "%02x", $0) }.joined()
+        }
+
+        func collectInfo(root: URL) -> [String: ZipFixtureFileInfo] {
+            var out: [String: ZipFixtureFileInfo] = [:]
             guard let e = fm.enumerator(
                 at: root,
-                includingPropertiesForKeys: [.isDirectoryKey, .contentModificationDateKey],
+                includingPropertiesForKeys: [.isDirectoryKey, .contentModificationDateKey, .fileSizeKey],
                 options: [.skipsHiddenFiles]
             ) else { return out }
 
             for case let url as URL in e {
-                if url.lastPathComponent == ".DS_Store" { continue }
-                if url.path.contains("/__MACOSX/") { continue }
-                let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .contentModificationDateKey])
+                let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .contentModificationDateKey, .fileSizeKey])
                 if values?.isDirectory == true { continue }
                 guard let rel = normalizedRelPath(root: root, url: url) else { continue }
-                out[rel] = values?.contentModificationDate ?? Date(timeIntervalSince1970: 0)
+                if shouldIgnore(rel) { continue }
+                let mtime = values?.contentModificationDate ?? Date(timeIntervalSince1970: 0)
+                let mtimeSeconds = Int(mtime.timeIntervalSince1970.rounded())
+                let size = UInt64(values?.fileSize ?? 0)
+                let sha = (try? sha256Hex(for: url)) ?? ""
+                out[rel] = ZipFixtureFileInfo(size: size, sha256: sha, mtimeSeconds: mtimeSeconds)
             }
             return out
         }
 
-        let referenceMtimes = collectMtimes(root: referenceRoot)
-        let extractedMtimes = collectMtimes(root: extractedRoot)
+        let referenceInfo = collectInfo(root: referenceRoot)
+        let extractedInfo = collectInfo(root: extractedRoot)
 
-        var total = 0
-        var missing = 0
-        var mismatched = 0
+        let referenceKeys = Set(referenceInfo.keys)
+        let extractedKeys = Set(extractedInfo.keys)
+        let shared = referenceKeys.intersection(extractedKeys)
+        let onlyRef = referenceKeys.subtracting(extractedKeys)
+        let onlyWet = extractedKeys.subtracting(referenceKeys)
+
+        var sizeOrHashMismatch = 0
+        var mtimeMismatch = 0
         var drift3600 = 0
 
-        for (rel, refDate) in referenceMtimes {
-            total += 1
-            guard let got = extractedMtimes[rel] else {
-                missing += 1
-                continue
+        var mismatchLogs = 0
+        let maxMismatchLogs = 50
+
+        for rel in shared {
+            guard let ref = referenceInfo[rel], let got = extractedInfo[rel] else { continue }
+            if ref.size != got.size || ref.sha256 != got.sha256 {
+                sizeOrHashMismatch += 1
+                if mismatchLogs < maxMismatchLogs {
+                    print("WET_ZIP_TS_FIXTURE_CHECK: diff-size-sha rel=\(sanitizeRelForLog(rel)) refSize=\(ref.size) gotSize=\(got.size)")
+                    mismatchLogs += 1
+                }
             }
-            let delta = Int((got.timeIntervalSince1970 - refDate.timeIntervalSince1970).rounded())
-            if delta != 0 {
-                mismatched += 1
-                if abs(abs(delta) - 3600) <= 2 {
-                    drift3600 += 1
+            if ref.mtimeSeconds != got.mtimeSeconds {
+                mtimeMismatch += 1
+                let delta = got.mtimeSeconds - ref.mtimeSeconds
+                if abs(abs(delta) - 3600) <= 2 { drift3600 += 1 }
+                if mismatchLogs < maxMismatchLogs {
+                    print("WET_ZIP_TS_FIXTURE_CHECK: diff-mtime rel=\(sanitizeRelForLog(rel)) delta=\(delta)")
+                    mismatchLogs += 1
                 }
             }
         }
 
-        return ZipTimestampFixtureSummary(total: total, missing: missing, mismatched: mismatched, drift3600: drift3600)
+        for rel in onlyRef.prefix(maxMismatchLogs - mismatchLogs) {
+            print("WET_ZIP_TS_FIXTURE_CHECK: missing rel=\(sanitizeRelForLog(rel))")
+            mismatchLogs += 1
+            if mismatchLogs >= maxMismatchLogs { break }
+        }
+
+        for rel in onlyWet.prefix(maxMismatchLogs - mismatchLogs) {
+            print("WET_ZIP_TS_FIXTURE_CHECK: extra rel=\(sanitizeRelForLog(rel))")
+            mismatchLogs += 1
+            if mismatchLogs >= maxMismatchLogs { break }
+        }
+
+        return ZipTimestampFixtureSummary(
+            total: referenceKeys.count,
+            missing: onlyRef.count,
+            extra: onlyWet.count,
+            sizeOrHashMismatch: sizeOrHashMismatch,
+            mtimeMismatch: mtimeMismatch,
+            drift3600: drift3600
+        )
     }
 
     nonisolated private static func readZipEntryTimestamps(zipURL: URL) throws -> [ZipTimestampEntry] {
@@ -4956,9 +5060,85 @@ public enum WhatsAppExportService {
         return entries
     }
 
-    nonisolated private static func extractZip(at zipURL: URL, to destDir: URL) throws {
-        if WETLog.isDebugEnabled() {
-            WETLog.dbg("ZIP extractor: /usr/bin/ditto -x -k")
+    nonisolated private static func waitForProcess(_ proc: Process, toolLabel: String) throws {
+        var didCancelLog = false
+        while proc.isRunning {
+            if Task.isCancelled {
+                if !didCancelLog, WETLog.isDebugEnabled() {
+                    WETLog.dbg("EXTRACT CANCELLED: tool=\(toolLabel)")
+                    didCancelLog = true
+                }
+                proc.terminate()
+                let deadline = Date().addingTimeInterval(2.0)
+                while proc.isRunning && Date() < deadline {
+                    Thread.sleep(forTimeInterval: 0.05)
+                }
+                if proc.isRunning {
+                    proc.interrupt()
+                }
+                throw CancellationError()
+            }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+    }
+
+    nonisolated private static func validateZipEntryPaths(zipURL: URL, destDir: URL) throws {
+        let entries = try readZipEntryTimestamps(zipURL: zipURL)
+        guard !entries.isEmpty else { return }
+
+        let root = destDir.standardizedFileURL
+        let rootPath = root.path.hasSuffix("/") ? root.path : root.path + "/"
+
+        func isUnsafe(_ path: String) -> Bool {
+            var p = path.replacingOccurrences(of: "\\", with: "/")
+            if p.hasPrefix("./") { p.removeFirst(2) }
+            if p.hasPrefix("/") || p.hasPrefix("~") { return true }
+            if p.contains(":") { return true }
+            let comps = p.split(separator: "/")
+            if comps.contains("..") { return true }
+            return false
+        }
+
+        for entry in entries {
+            var rel = entry.path.replacingOccurrences(of: "\\", with: "/")
+            if rel.hasPrefix("./") { rel.removeFirst(2) }
+            if rel.hasPrefix("/") { rel.removeFirst() }
+            if rel.hasSuffix("/") { rel.removeLast() }
+            if rel.isEmpty { continue }
+            if isUnsafe(rel) {
+                throw WAInputError.zipExtractionFailed(url: zipURL, reason: "ZIP entry path rejected")
+            }
+            let target = URL(fileURLWithPath: rel, relativeTo: root).standardizedFileURL
+            if !target.path.hasPrefix(rootPath) {
+                throw WAInputError.zipExtractionFailed(url: zipURL, reason: "ZIP entry path outside destination")
+            }
+        }
+    }
+
+    nonisolated private static func validateExtractionNonEmpty(destDir: URL, zipURL: URL) throws {
+        let hasEntries = (try? FileManager.default.contentsOfDirectory(atPath: destDir.path).isEmpty == false) ?? false
+        if !hasEntries {
+            throw WAInputError.zipExtractionFailed(url: zipURL, reason: "ZIP extraction produced empty output")
+        }
+    }
+
+    nonisolated private static func extractedFileCount(at destDir: URL) -> Int {
+        let fm = FileManager.default
+        guard let en = fm.enumerator(at: destDir, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else {
+            return 0
+        }
+        var count = 0
+        for case let u as URL in en {
+            if (try? u.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true { continue }
+            count += 1
+        }
+        return count
+    }
+
+    nonisolated private static func extractZipWithDitto(zipURL: URL, to destDir: URL) throws -> Bool {
+        let debugEnabled = WETLog.isDebugEnabled()
+        if debugEnabled {
+            WETLog.dbg("EXTRACT START: tool=ditto")
         }
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
@@ -4967,22 +5147,129 @@ public enum WhatsAppExportService {
         let err = Pipe()
         proc.standardOutput = out
         proc.standardError = err
+        let t0 = ProcessInfo.processInfo.systemUptime
         try proc.run()
-        proc.waitUntilExit()
+        try waitForProcess(proc, toolLabel: "ditto")
+        let duration = ProcessInfo.processInfo.systemUptime - t0
         if proc.terminationStatus != 0 {
-            let data = err.fileHandleForReading.readDataToEndOfFile()
-            let msg = String(data: data, encoding: .utf8) ?? "exit \(proc.terminationStatus)"
-            throw WAInputError.zipExtractionFailed(url: zipURL, reason: msg.trimmingCharacters(in: .whitespacesAndNewlines))
-        }
-        let normalize = ProcessInfo.processInfo.environment["WET_ZIP_NORMALIZE_TIMESTAMPS"] != "0"
-        if normalize {
-            do {
-                try normalizeZipEntryTimestamps(zipURL: zipURL, destDir: destDir)
-            } catch {
-                throw WAInputError.zipExtractionFailed(url: zipURL, reason: "ZIP timestamp normalization failed")
+            if debugEnabled {
+                WETLog.dbg("EXTRACT FALLBACK: tool=ditto reason=exit\(proc.terminationStatus)")
             }
-        } else if WETLog.isDebugEnabled() {
-            WETLog.dbg("ZIP timestamps: preserve extracted mtimes (normalization disabled)")
+            return false
+        }
+        let hasEntries = (try? FileManager.default.contentsOfDirectory(atPath: destDir.path).isEmpty == false) ?? false
+        if debugEnabled {
+            let count = extractedFileCount(at: destDir)
+            if hasEntries {
+                WETLog.dbg("EXTRACT OK: tool=ditto files=\(count) duration=\(String(format: "%.2f", duration))s")
+            } else {
+                WETLog.dbg("EXTRACT FALLBACK: tool=ditto reason=empty")
+            }
+        }
+        return hasEntries
+    }
+
+    nonisolated private static func extractZipWithBSDTar(zipURL: URL, to destDir: URL) throws -> Bool {
+        let debugEnabled = WETLog.isDebugEnabled()
+        if debugEnabled {
+            WETLog.dbg("EXTRACT START: tool=bsdtar")
+        }
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/bsdtar")
+        proc.arguments = ["-xf", zipURL.path, "-C", destDir.path]
+        let err = Pipe()
+        proc.standardError = err
+        let t0 = ProcessInfo.processInfo.systemUptime
+        try proc.run()
+        try waitForProcess(proc, toolLabel: "bsdtar")
+        let duration = ProcessInfo.processInfo.systemUptime - t0
+        if proc.terminationStatus != 0 {
+            if debugEnabled {
+                WETLog.dbg("EXTRACT FALLBACK: tool=bsdtar reason=exit\(proc.terminationStatus)")
+            }
+            return false
+        }
+        let hasEntries = (try? FileManager.default.contentsOfDirectory(atPath: destDir.path).isEmpty == false) ?? false
+        if debugEnabled {
+            let count = extractedFileCount(at: destDir)
+            if hasEntries {
+                WETLog.dbg("EXTRACT OK: tool=bsdtar files=\(count) duration=\(String(format: "%.2f", duration))s")
+            } else {
+                WETLog.dbg("EXTRACT FALLBACK: tool=bsdtar reason=empty")
+            }
+        }
+        return hasEntries
+    }
+
+    nonisolated private static func extractZipWithUnzip(zipURL: URL, to destDir: URL) throws {
+        let debugEnabled = WETLog.isDebugEnabled()
+        if debugEnabled {
+            WETLog.dbg("EXTRACT START: tool=unzip")
+        }
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
+        proc.arguments = ["-qq", "-o", zipURL.path, "-d", destDir.path]
+        let err = Pipe()
+        proc.standardError = err
+        let t0 = ProcessInfo.processInfo.systemUptime
+        try proc.run()
+        try waitForProcess(proc, toolLabel: "unzip")
+        let duration = ProcessInfo.processInfo.systemUptime - t0
+        if proc.terminationStatus != 0 {
+            throw WAInputError.zipExtractionFailed(url: zipURL, reason: "unzip exit \(proc.terminationStatus)")
+        }
+        if debugEnabled {
+            let count = extractedFileCount(at: destDir)
+            WETLog.dbg("EXTRACT OK: tool=unzip files=\(count) duration=\(String(format: "%.2f", duration))s")
+        }
+    }
+
+    nonisolated private static func extractZip(at zipURL: URL, to destDir: URL) throws {
+        let fm = FileManager.default
+        do {
+            try validateZipEntryPaths(zipURL: zipURL, destDir: destDir)
+
+            let didDitto = try extractZipWithDitto(zipURL: zipURL, to: destDir)
+            var usedInProcessFallback = false
+            var didBSDTar = false
+
+            if !didDitto {
+                try? fm.removeItem(at: destDir)
+                try recreateDirectory(destDir)
+                didBSDTar = try extractZipWithBSDTar(zipURL: zipURL, to: destDir)
+                if !didBSDTar {
+                    try? fm.removeItem(at: destDir)
+                    try recreateDirectory(destDir)
+                    usedInProcessFallback = true
+                    try extractZipWithUnzip(zipURL: zipURL, to: destDir)
+                }
+            }
+
+            try validateExtractionNonEmpty(destDir: destDir, zipURL: zipURL)
+
+            let normalize = ProcessInfo.processInfo.environment["WET_ZIP_NORMALIZE_TIMESTAMPS"] != "0"
+            if usedInProcessFallback, normalize {
+                do {
+                    try normalizeZipEntryTimestamps(zipURL: zipURL, destDir: destDir)
+                } catch {
+                    throw WAInputError.zipExtractionFailed(url: zipURL, reason: "ZIP timestamp normalization failed")
+                }
+            } else if WETLog.isDebugEnabled() {
+                let note: String
+                if didDitto {
+                    note = "using ditto mtimes"
+                } else if didBSDTar {
+                    note = "using bsdtar mtimes"
+                } else {
+                    note = "normalization disabled"
+                }
+                WETLog.dbg("ZIP timestamps: \(note)")
+            }
+        } catch {
+            if fm.fileExists(atPath: destDir.path) {
+                try? fm.removeItem(at: destDir)
+            }
+            throw error
         }
     }
 

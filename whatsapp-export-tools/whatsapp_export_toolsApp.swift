@@ -289,19 +289,18 @@ private struct WETZipTimestampFixtureCheck {
 
     private static func run() {
         let env = ProcessInfo.processInfo.environment
-        guard let zipPath = env["WET_ZIP_TS_FIXTURE_ZIP"], !zipPath.isEmpty,
-              let refPath = env["WET_ZIP_TS_FIXTURE_REF"], !refPath.isEmpty else {
-            print("WET_ZIP_TS_FIXTURE_CHECK: SKIP (missing env WET_ZIP_TS_FIXTURE_ZIP or WET_ZIP_TS_FIXTURE_REF)")
+        guard let zipPath = env["WET_ZIP_TS_FIXTURE_ZIP"], !zipPath.isEmpty else {
+            print("WET_ZIP_TS_FIXTURE_CHECK: SKIP (missing env WET_ZIP_TS_FIXTURE_ZIP)")
             terminate()
             return
         }
 
         let zipURL = URL(fileURLWithPath: zipPath)
-        let refURL = URL(fileURLWithPath: refPath)
+        let refURL = (env["WET_ZIP_TS_FIXTURE_REF"].flatMap { $0.isEmpty ? nil : $0 }).map { URL(fileURLWithPath: $0) }
 
         do {
             let summary = try WhatsAppExportService.runZipTimestampFixtureCheck(zipURL: zipURL, referenceDir: refURL)
-            print("WET_ZIP_TS_FIXTURE_CHECK: total=\(summary.total) missing=\(summary.missing) mismatched=\(summary.mismatched) drift3600=\(summary.drift3600)")
+            print("WET_ZIP_TS_FIXTURE_CHECK: total=\(summary.total) missing=\(summary.missing) extra=\(summary.extra) sizeOrHash=\(summary.sizeOrHashMismatch) mtime=\(summary.mtimeMismatch) drift3600=\(summary.drift3600)")
         } catch {
             print("WET_ZIP_TS_FIXTURE_CHECK: FAIL (\(error))")
         }
