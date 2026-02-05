@@ -4272,7 +4272,7 @@ public enum WhatsAppExportService {
             let diagnostics: Diagnostics?
         }
 
-        static func resolve(
+        nonisolated static func resolve(
             utMTime: Date?,
             dosDate: UInt16?,
             dosTime: UInt16?,
@@ -4448,6 +4448,18 @@ public enum WhatsAppExportService {
         var dosCount = 0
         var drift3600Count = 0
 
+        func dosComponentsString(date: UInt16?, time: UInt16?) -> String {
+            guard let date, let time else { return "-" }
+            let seconds = Int(time & 0x1F) * 2
+            let minutes = Int((time >> 5) & 0x3F)
+            let hours = Int((time >> 11) & 0x1F)
+            let day = Int(date & 0x1F)
+            let month = Int((date >> 5) & 0x0F)
+            let year = Int((date >> 9) & 0x7F) + 1980
+            guard day > 0, month > 0 else { return "-" }
+            return String(format: "%04d-%02d-%02d %02d:%02d:%02d", year, month, day, hours, minutes, seconds)
+        }
+
         for entry in entries {
             var rel = entry.path.replacingOccurrences(of: "\\", with: "/")
             if rel.hasPrefix("./") { rel.removeFirst(2) }
@@ -4514,9 +4526,17 @@ public enum WhatsAppExportService {
 
                 let relSanitized = sanitizeDebugPath(rel)
                 if let diag = resolved.diagnostics {
+                    let conversion = (appliedSource == .ut5455) ? "ut_epoch" : "dos_local"
+                    let utLocalEpoch = entry.utLocal.map { Int($0.timeIntervalSince1970.rounded()) }
+                    let utCentralEpoch = entry.utCentral.map { Int($0.timeIntervalSince1970.rounded()) }
+                    let dosLocalStr = dosComponentsString(date: entry.dosDateLocal, time: entry.dosTimeLocal)
+                    let dosCentralStr = dosComponentsString(date: entry.dosDateCentral, time: entry.dosTimeCentral)
+                    let gmtOffset = tz.secondsFromGMT(for: appliedDate)
                     WETLog.dbg(
-                        "ZIP mtime entry path=\(relSanitized) source=\(appliedSource.rawValue) " +
-                        "epoch=\(diag.epochSeconds) iso=\(diag.isoString) tz=\(diag.timeZoneID) dst=\(diag.dstOffsetSeconds)s"
+                        "ZIP mtime entry path=\(relSanitized) source=\(appliedSource.rawValue) conv=\(conversion) " +
+                        "utLocal=\(utLocalEpoch?.description ?? "-") utCentral=\(utCentralEpoch?.description ?? "-") " +
+                        "dosLocal=\"\(dosLocalStr)\" dosCentral=\"\(dosCentralStr)\" " +
+                        "epoch=\(diag.epochSeconds) iso=\(diag.isoString) tz=\(diag.timeZoneID) gmt=\(gmtOffset)s dst=\(diag.dstOffsetSeconds)s"
                     )
                 }
             }
@@ -4525,6 +4545,90 @@ public enum WhatsAppExportService {
         if debugEnabled {
             WETLog.dbg("ZIP mtime summary total=\(totalCount) ut=\(utCount) dos=\(dosCount) drift3600=\(drift3600Count)")
         }
+    }
+
+    struct ZipTimestampFixtureSummary {
+        let total: Int
+        let missing: Int
+        let mismatched: Int
+        let drift3600: Int
+    }
+
+    nonisolated static func runZipTimestampFixtureCheck(zipURL: URL, referenceDir: URL) throws -> ZipTimestampFixtureSummary {
+        let fm = FileManager.default
+        let tempRoot = fm.temporaryDirectory.appendingPathComponent(".wa_zip_ts_check_\(UUID().uuidString)", isDirectory: true)
+        try recreateDirectory(tempRoot)
+        defer { try? fm.removeItem(at: tempRoot) }
+
+        try extractZip(at: zipURL, to: tempRoot)
+        try normalizeZipEntryTimestamps(zipURL: zipURL, destDir: tempRoot)
+
+        func unwrapSingleRoot(_ url: URL) -> URL {
+            guard let items = try? fm.contentsOfDirectory(at: url, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else {
+                return url
+            }
+            if items.count == 1, (try? items[0].resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
+                return items[0]
+            }
+            return url
+        }
+
+        let extractedRoot = unwrapSingleRoot(tempRoot).standardizedFileURL
+        let referenceRoot = referenceDir.standardizedFileURL
+
+        func normalizedRelPath(root: URL, url: URL) -> String? {
+            let rootPath = root.path.hasSuffix("/") ? root.path : root.path + "/"
+            let fullPath = url.standardizedFileURL.path
+            guard fullPath.hasPrefix(rootPath) else { return nil }
+            var rel = String(fullPath.dropFirst(rootPath.count))
+            if rel.hasPrefix("/") { rel.removeFirst() }
+            if rel.isEmpty { return nil }
+            return rel.replacingOccurrences(of: "\\", with: "/")
+        }
+
+        func collectMtimes(root: URL) -> [String: Date] {
+            var out: [String: Date] = [:]
+            guard let e = fm.enumerator(
+                at: root,
+                includingPropertiesForKeys: [.isDirectoryKey, .contentModificationDateKey],
+                options: [.skipsHiddenFiles]
+            ) else { return out }
+
+            for case let url as URL in e {
+                if url.lastPathComponent == ".DS_Store" { continue }
+                if url.path.contains("/__MACOSX/") { continue }
+                let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .contentModificationDateKey])
+                if values?.isDirectory == true { continue }
+                guard let rel = normalizedRelPath(root: root, url: url) else { continue }
+                out[rel] = values?.contentModificationDate ?? Date(timeIntervalSince1970: 0)
+            }
+            return out
+        }
+
+        let referenceMtimes = collectMtimes(root: referenceRoot)
+        let extractedMtimes = collectMtimes(root: extractedRoot)
+
+        var total = 0
+        var missing = 0
+        var mismatched = 0
+        var drift3600 = 0
+
+        for (rel, refDate) in referenceMtimes {
+            total += 1
+            guard let got = extractedMtimes[rel] else {
+                missing += 1
+                continue
+            }
+            let delta = Int((got.timeIntervalSince1970 - refDate.timeIntervalSince1970).rounded())
+            if delta != 0 {
+                mismatched += 1
+                if abs(abs(delta) - 3600) <= 2 {
+                    drift3600 += 1
+                }
+            }
+        }
+
+        return ZipTimestampFixtureSummary(total: total, missing: missing, mismatched: mismatched, drift3600: drift3600)
     }
 
     nonisolated private static func readZipEntryTimestamps(zipURL: URL) throws -> [ZipTimestampEntry] {

@@ -38,6 +38,7 @@ struct whatsapp_export_toolsApp: App {
             WETExternalAssetsCheck.runIfNeeded()
             WETDeterminismCheck.runIfNeeded()
             WETZipTimestampResolverCheck.runIfNeeded()
+            WETZipTimestampFixtureCheck.runIfNeeded()
             ContentView.WETParallelExportCheck.runIfNeeded()
             WETReplayGuardrailsCheck.runIfNeeded()
             WETOutputStructureDedupCheck.runIfNeeded()
@@ -84,7 +85,7 @@ struct whatsapp_export_toolsApp: App {
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                         .padding()
-                } else if WETZipTimestampResolverCheck.isEnabled {
+                } else if WETZipTimestampResolverCheck.isEnabled || WETZipTimestampFixtureCheck.isEnabled {
                     Text("wet.checks.zipTimestamp")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
@@ -121,6 +122,7 @@ struct whatsapp_export_toolsApp: App {
                 WETExternalAssetsCheck.runIfNeeded()
                 WETDeterminismCheck.runIfNeeded()
                 WETZipTimestampResolverCheck.runIfNeeded()
+                WETZipTimestampFixtureCheck.runIfNeeded()
                 ContentView.WETParallelExportCheck.runIfNeeded()
                 WETReplayGuardrailsCheck.runIfNeeded()
                 WETOutputStructureDedupCheck.runIfNeeded()
@@ -271,6 +273,48 @@ private struct WETZipTimestampResolverCheck {
         }
 
         NSApp.terminate(nil)
+    }
+}
+
+@MainActor
+private struct WETZipTimestampFixtureCheck {
+    static let isEnabled: Bool = ProcessInfo.processInfo.environment["WET_ZIP_TS_FIXTURE_CHECK"] == "1"
+    private static var didRun = false
+
+    static func runIfNeeded() {
+        guard isEnabled, !didRun else { return }
+        didRun = true
+        run()
+    }
+
+    private static func run() {
+        let env = ProcessInfo.processInfo.environment
+        guard let zipPath = env["WET_ZIP_TS_FIXTURE_ZIP"], !zipPath.isEmpty,
+              let refPath = env["WET_ZIP_TS_FIXTURE_REF"], !refPath.isEmpty else {
+            print("WET_ZIP_TS_FIXTURE_CHECK: SKIP (missing env WET_ZIP_TS_FIXTURE_ZIP or WET_ZIP_TS_FIXTURE_REF)")
+            terminate()
+            return
+        }
+
+        let zipURL = URL(fileURLWithPath: zipPath)
+        let refURL = URL(fileURLWithPath: refPath)
+
+        do {
+            let summary = try WhatsAppExportService.runZipTimestampFixtureCheck(zipURL: zipURL, referenceDir: refURL)
+            print("WET_ZIP_TS_FIXTURE_CHECK: total=\(summary.total) missing=\(summary.missing) mismatched=\(summary.mismatched) drift3600=\(summary.drift3600)")
+        } catch {
+            print("WET_ZIP_TS_FIXTURE_CHECK: FAIL (\(error))")
+        }
+
+        terminate()
+    }
+
+    private static func terminate() {
+        if NSApp != nil {
+            NSApp.terminate(nil)
+        } else {
+            exit(0)
+        }
     }
 }
 
