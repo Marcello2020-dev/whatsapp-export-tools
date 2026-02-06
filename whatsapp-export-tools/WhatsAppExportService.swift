@@ -572,11 +572,20 @@ struct SourceOpsVerificationResult: Sendable {
 
 enum SourceOpsError: Error, LocalizedError, Sendable {
     case missingSourceDir(url: URL)
+    case sourceEnumerationFailed(url: URL)
+    case sourceCopyEmpty(url: URL)
+    case sidecarAttachmentCopyFailed(src: URL, dst: URL, underlying: String)
 
     var errorDescription: String? {
         switch self {
         case .missingSourceDir(let url):
             return "Quellordner fehlt (Raw-Archiv): \(url.lastPathComponent)"
+        case .sourceEnumerationFailed(let url):
+            return "Quellordner konnte nicht gelesen werden (Raw-Archiv): \(url.lastPathComponent)"
+        case .sourceCopyEmpty(let url):
+            return "Raw-Archiv leer: \(url.lastPathComponent)"
+        case .sidecarAttachmentCopyFailed(let src, let dst, let underlying):
+            return "Sidecar-Medium konnte nicht kopiert werden (\(src.lastPathComponent) -> \(dst.lastPathComponent)): \(underlying)"
         }
     }
 }
@@ -674,6 +683,9 @@ enum SourceOps {
         let finalExportDir = finalRawArchiveDir.appendingPathComponent(sourceDir.lastPathComponent, isDirectory: true)
         let finalZip = stagedZip.map { finalRawArchiveDir.appendingPathComponent($0.lastPathComponent) }
         let counts = countEntries(in: finalExportDir)
+        if counts.files == 0 {
+            throw SourceOpsError.sourceCopyEmpty(url: finalExportDir)
+        }
         return RawArchiveCopyResult(
             rawArchiveDir: finalRawArchiveDir,
             copiedExportDir: finalExportDir,
@@ -6676,7 +6688,11 @@ public enum WhatsAppExportService {
                             syncFileSystemTimestamps(from: job.src, to: job.dst)
                             return (idx, job.bucket)
                         } catch {
-                            return (idx, nil)
+                            throw SourceOpsError.sidecarAttachmentCopyFailed(
+                                src: job.src,
+                                dst: job.dst,
+                                underlying: error.localizedDescription
+                            )
                         }
                     }
                 }
@@ -10463,7 +10479,7 @@ nonisolated private static func stageThumbnailForExport(
             includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey],
             options: [.skipsHiddenFiles, .skipsPackageDescendants]
         ) else {
-            return
+            throw SourceOpsError.sourceEnumerationFailed(url: sourceDir)
         }
 
         let srcBasePath = sourceDir.standardizedFileURL.path
@@ -10629,6 +10645,10 @@ nonisolated private static func stageThumbnailForExport(
     private nonisolated static func pickSiblingZipURL(sourceDir: URL) -> URL? {
         let fm = FileManager.default
         let parent = sourceDir.deletingLastPathComponent()
+        let direct = parent.appendingPathComponent("\(sourceDir.lastPathComponent).zip")
+        if fm.fileExists(atPath: direct.path) {
+            return direct
+        }
         let folderKey = canonicalSiblingZipKey(sourceDir.lastPathComponent)
         guard !folderKey.isEmpty else { return nil }
 
