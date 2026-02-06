@@ -5139,7 +5139,6 @@ public enum WhatsAppExportService {
         while offset + 46 <= cdData.count {
             if readU32(cdData, offset) != 0x02014b50 { break }
 
-            let flags = readU16(cdData, offset + 8)
             let modTime = readU16(cdData, offset + 12)
             let modDate = readU16(cdData, offset + 14)
             let compSize32 = readU32(cdData, offset + 20)
@@ -5155,9 +5154,10 @@ public enum WhatsAppExportService {
             guard nameEnd <= cdData.count else { break }
 
             let nameData = cdData.subdata(in: nameStart..<nameEnd)
-            let isUTF8 = (flags & 0x0800) != 0
             let name: String = {
-                if isUTF8, let decoded = String(data: nameData, encoding: .utf8) {
+                // Some ZIP producers keep UTF-8 filenames but do not set the UTF-8 flag.
+                // Prefer strict UTF-8 decoding whenever possible to avoid mojibake mismatches.
+                if let decoded = String(data: nameData, encoding: .utf8) {
                     return decoded
                 }
                 let dosEncoding = String.Encoding(
@@ -5422,18 +5422,33 @@ public enum WhatsAppExportService {
             try validateExtractionNonEmpty(destDir: destDir, zipURL: zipURL)
 
             let normalize = ProcessInfo.processInfo.environment["WET_ZIP_NORMALIZE_TIMESTAMPS"] != "0"
-            if usedInProcessFallback, normalize {
+            if normalize {
                 do {
                     try normalizeZipEntryTimestamps(zipURL: zipURL, destDir: destDir)
                 } catch {
                     throw WAInputError.zipExtractionFailed(url: zipURL, reason: "ZIP timestamp normalization failed")
                 }
+                if WETLog.isDebugEnabled() {
+                    let note: String
+                    if didDitto {
+                        note = "normalized from ZIP metadata (extractor=ditto)"
+                    } else if didBSDTar {
+                        note = "normalized from ZIP metadata (extractor=bsdtar)"
+                    } else if usedInProcessFallback {
+                        note = "normalized from ZIP metadata (extractor=unzip)"
+                    } else {
+                        note = "normalized from ZIP metadata"
+                    }
+                    WETLog.dbg("ZIP timestamps: \(note)")
+                }
             } else if WETLog.isDebugEnabled() {
                 let note: String
                 if didDitto {
-                    note = "using ditto mtimes"
+                    note = "normalization disabled (using ditto mtimes)"
                 } else if didBSDTar {
-                    note = "using bsdtar mtimes"
+                    note = "normalization disabled (using bsdtar mtimes)"
+                } else if usedInProcessFallback {
+                    note = "normalization disabled (using unzip mtimes)"
                 } else {
                     note = "normalization disabled"
                 }
