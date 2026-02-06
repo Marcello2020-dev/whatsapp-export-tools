@@ -1,6 +1,7 @@
 import SwiftUI
 import Combine
 
+/// Stores the streaming debug log for the UI and exposes it reactively to the console view.
 @MainActor
 final class DiagnosticsLogStore: ObservableObject {
     @Published private(set) var text: String = ""
@@ -16,6 +17,7 @@ final class DiagnosticsLogStore: ObservableObject {
         return pad + text + pad
     }
 
+    /// Adds a chunk of log output (split by newline) while keeping both `text` and `lines` in sync.
     func append(_ s: String) {
         let pieces = s.split(whereSeparator: \.isNewline).map(String.init)
         if pieces.isEmpty { return }
@@ -29,6 +31,7 @@ final class DiagnosticsLogStore: ObservableObject {
         }
     }
 
+    /// Resets the captured log so the console view shows a blank slate without reallocating capacity.
     func clear() {
         lines.removeAll(keepingCapacity: true)
         text = ""
