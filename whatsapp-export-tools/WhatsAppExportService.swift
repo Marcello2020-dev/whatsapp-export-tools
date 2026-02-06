@@ -4426,6 +4426,21 @@ public enum WhatsAppExportService {
         let sha256: String
     }
 
+    private struct ParallelSHAJob {
+        let path: String
+        let url: URL
+    }
+
+    private struct ParallelSHAResult {
+        let path: String
+        let sha256: String
+    }
+
+    private struct ParallelSHAError: Error {
+        let url: URL
+        let underlying: Error
+    }
+
     nonisolated private static func sha256Hex(forFile url: URL) throws -> String {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
@@ -4438,7 +4453,74 @@ public enum WhatsAppExportService {
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
+    nonisolated private static func hashFilesParallel(
+        jobs: [ParallelSHAJob],
+        maxConcurrent: Int
+    ) throws -> [ParallelSHAResult] {
+        guard !jobs.isEmpty else { return [] }
+
+        let workerCount = max(1, min(maxConcurrent, jobs.count))
+        let queue = DispatchQueue(label: "wet.sha256.parallel", qos: .utility, attributes: .concurrent)
+        let group = DispatchGroup()
+        let semaphore = DispatchSemaphore(value: workerCount)
+        let stateLock = NSLock()
+
+        var firstError: ParallelSHAError? = nil
+        var hashes = Array<String?>(repeating: nil, count: jobs.count)
+
+        for (idx, job) in jobs.enumerated() {
+            group.enter()
+            semaphore.wait()
+            queue.async {
+                defer {
+                    semaphore.signal()
+                    group.leave()
+                }
+
+                stateLock.lock()
+                let shouldSkip = firstError != nil
+                stateLock.unlock()
+                if shouldSkip { return }
+
+                do {
+                    let sha = try sha256Hex(forFile: job.url)
+                    stateLock.lock()
+                    hashes[idx] = sha
+                    stateLock.unlock()
+                } catch {
+                    stateLock.lock()
+                    if firstError == nil {
+                        firstError = ParallelSHAError(url: job.url, underlying: error)
+                    }
+                    stateLock.unlock()
+                }
+            }
+        }
+
+        group.wait()
+
+        if let firstError {
+            throw firstError
+        }
+
+        var results: [ParallelSHAResult] = []
+        results.reserveCapacity(jobs.count)
+        for (idx, job) in jobs.enumerated() {
+            guard let sha = hashes[idx] else {
+                throw ParallelSHAError(url: job.url, underlying: CocoaError(.fileReadUnknown))
+            }
+            results.append(ParallelSHAResult(path: job.path, sha256: sha))
+        }
+        return results
+    }
+
     nonisolated private static func buildSourceManifestSummary(root: URL) throws -> SourceManifestSummary {
+        struct SourceManifestJob {
+            let path: String
+            let size: UInt64
+            let url: URL
+        }
+
         let fm = FileManager.default
         guard let en = fm.enumerator(
             at: root,
@@ -4449,15 +4531,43 @@ public enum WhatsAppExportService {
             return SourceManifestSummary(fileCount: 0, sha256: emptyDigest)
         }
 
-        var entries: [SourceManifestEntry] = []
+        var jobs: [SourceManifestJob] = []
         for case let url as URL in en {
             let rv = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
             guard rv?.isRegularFile == true else { continue }
             guard let rel = normalizedRelativePath(from: root, to: url) else { continue }
             if isMacOSNoiseRelativePath(rel) { continue }
             let size = UInt64(rv?.fileSize ?? 0)
-            let sha = try sha256Hex(forFile: url)
-            entries.append(SourceManifestEntry(path: rel, size: size, sha256: sha))
+            jobs.append(SourceManifestJob(path: rel, size: size, url: url.standardizedFileURL))
+        }
+
+        jobs.sort { lhs, rhs in
+            if lhs.path == rhs.path {
+                return lhs.url.path < rhs.url.path
+            }
+            return lhs.path.utf8.lexicographicallyPrecedes(rhs.path.utf8)
+        }
+
+        var uniqueJobs: [SourceManifestJob] = []
+        uniqueJobs.reserveCapacity(jobs.count)
+        var seenPaths = Set<String>()
+        for job in jobs where seenPaths.insert(job.path).inserted {
+            uniqueJobs.append(job)
+        }
+
+        let hashCap = max(1, min(concurrencyCaps().io, 8))
+        let hashedJobs: [ParallelSHAResult]
+        do {
+            hashedJobs = try hashFilesParallel(
+                jobs: uniqueJobs.map { ParallelSHAJob(path: $0.path, url: $0.url) },
+                maxConcurrent: hashCap
+            )
+        } catch let err as ParallelSHAError {
+            throw err.underlying
+        }
+
+        var entries = zip(uniqueJobs, hashedJobs).map { job, hash in
+            SourceManifestEntry(path: job.path, size: job.size, sha256: hash.sha256)
         }
 
         entries.sort { $0.path.utf8.lexicographicallyPrecedes($1.path.utf8) }
@@ -9471,33 +9581,44 @@ nonisolated private static func stageThumbnailForExport(
             return nfc.replacingOccurrences(of: "\\", with: "/")
         }
 
-        func sha256Hex(for url: URL) throws -> String {
-            let handle = try FileHandle(forReadingFrom: url)
-            defer { try? handle.close() }
-            var hasher = SHA256()
-            while true {
-                let chunk = try handle.read(upToCount: 1024 * 1024) ?? Data()
-                if chunk.isEmpty { break }
-                hasher.update(data: chunk)
-            }
-            let digest = hasher.finalize()
-            return digest.map { String(format: "%02x", $0) }.joined()
-        }
-
-        var entriesByPath: [String: ChecksumEntry] = [:]
-        entriesByPath.reserveCapacity(files.count)
-
+        var hashJobs: [ParallelSHAJob] = []
+        hashJobs.reserveCapacity(files.count)
         for fileURL in files {
             guard let rel = normalizedRelativePath(fileURL) else {
                 throw ManifestChecksumError.invalidRelativePath(url: fileURL)
             }
-            if entriesByPath[rel] != nil { continue }
-            let sha = try sha256Hex(for: fileURL)
-            entriesByPath[rel] = ChecksumEntry(path: rel, sha256: sha)
+            hashJobs.append(
+                ParallelSHAJob(
+                    path: rel,
+                    url: fileURL.standardizedFileURL
+                )
+            )
         }
 
-        let sortedEntries = entriesByPath.values.sorted {
-            $0.path.utf8.lexicographicallyPrecedes($1.path.utf8)
+        hashJobs.sort { lhs, rhs in
+            if lhs.path == rhs.path {
+                return lhs.url.path < rhs.url.path
+            }
+            return lhs.path.utf8.lexicographicallyPrecedes(rhs.path.utf8)
+        }
+
+        var uniqueHashJobs: [ParallelSHAJob] = []
+        uniqueHashJobs.reserveCapacity(hashJobs.count)
+        var seenPaths = Set<String>()
+        for job in hashJobs where seenPaths.insert(job.path).inserted {
+            uniqueHashJobs.append(job)
+        }
+
+        let hashCap = max(1, min(concurrencyCaps().io, 8))
+        let hashedEntries: [ParallelSHAResult]
+        do {
+            hashedEntries = try hashFilesParallel(jobs: uniqueHashJobs, maxConcurrent: hashCap)
+        } catch let err as ParallelSHAError {
+            throw ManifestChecksumError.unreadableArtifact(url: err.url)
+        }
+
+        let sortedEntries = hashedEntries.map {
+            ChecksumEntry(path: $0.path, sha256: $0.sha256)
         }
 
         let shaLines = sortedEntries.map { "\($0.sha256)  \($0.path)" }
