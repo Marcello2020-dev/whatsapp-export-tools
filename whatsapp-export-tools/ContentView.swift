@@ -858,6 +858,8 @@ struct ContentView: View {
     @State private var outBaseURL: URL?
     @State private var chatURLAccess: SecurityScopedURL? = nil
     @State private var outBaseURLAccess: SecurityScopedURL? = nil
+    @State private var sourceFolderAccess: SecurityScopedURL? = nil
+    @State private var siblingZipAccess: SecurityScopedURL? = nil
     @State private var didRestoreSettings: Bool = false
     @State private var isRestoringSettings: Bool = false
     @State private var selectedTab: WETTab = .input
@@ -2358,6 +2360,10 @@ struct ContentView: View {
     private func setChatURL(_ url: URL?) {
         let previousPath = chatURL?.standardizedFileURL.path
         chatURLAccess?.stopAccessing()
+        sourceFolderAccess?.stopAccessing()
+        sourceFolderAccess = nil
+        siblingZipAccess?.stopAccessing()
+        siblingZipAccess = nil
         guard let url else {
             chatURL = nil
             chatURLAccess = nil
@@ -2419,6 +2425,165 @@ struct ContentView: View {
         Task { @MainActor in
             self.resetRunStateIfIdle()
         }
+    }
+
+    private func sameFileLocation(_ lhs: URL, _ rhs: URL) -> Bool {
+        let a = lhs.standardizedFileURL.resolvingSymlinksInPath()
+        let b = rhs.standardizedFileURL.resolvingSymlinksInPath()
+        return a.path == b.path
+    }
+
+    private func canReadSourceDirectoryForRawArchive(_ sourceDir: URL) -> Bool {
+        let fm = FileManager.default
+        let root = sourceDir.standardizedFileURL
+        guard fm.fileExists(atPath: root.path) else { return false }
+
+        let transcriptCandidates = [
+            root.appendingPathComponent("Chat.txt"),
+            root.appendingPathComponent("_chat.txt")
+        ]
+        for transcriptURL in transcriptCandidates where fm.fileExists(atPath: transcriptURL.path) {
+            if fm.isReadableFile(atPath: transcriptURL.path) {
+                return true
+            }
+        }
+
+        guard let entries = try? fm.contentsOfDirectory(
+            at: root,
+            includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else {
+            return false
+        }
+
+        for entry in entries {
+            guard let rv = try? entry.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey]) else {
+                continue
+            }
+            if rv.isDirectory == true { return true }
+            if rv.isRegularFile == true, fm.isReadableFile(atPath: entry.path) { return true }
+        }
+
+        return false
+    }
+
+    @MainActor
+    private func ensureSourceFolderAccessIfNeeded(
+        provenance: WETSourceProvenance,
+        wantsRawArchiveCopy: Bool,
+        allowReuse: Bool
+    ) -> Bool {
+        guard wantsRawArchiveCopy else { return true }
+        guard case .folder = provenance.inputKind else { return true }
+        let sourceDir = provenance.detectedFolderURL.standardizedFileURL
+        guard FileManager.default.fileExists(atPath: sourceDir.path) else { return true }
+
+        if allowReuse,
+           let existing = sourceFolderAccess,
+           sameFileLocation(existing.resourceURL, sourceDir),
+           canReadSourceDirectoryForRawArchive(sourceDir) {
+            return true
+        }
+
+        sourceFolderAccess?.stopAccessing()
+        sourceFolderAccess = nil
+
+        let panel = NSOpenPanel()
+        panel.title = String(localized: "wet.input.panel.title", locale: locale)
+        panel.message = "Bitte den Quellordner fuer Sources manuell autorisieren: \(sourceDir.lastPathComponent)"
+        panel.prompt = String(localized: "wet.action.choose", locale: locale)
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowedContentTypes = [.folder]
+        panel.directoryURL = sourceDir.deletingLastPathComponent()
+        panel.nameFieldStringValue = sourceDir.lastPathComponent
+
+        guard panel.runModal() == .OK, let selectedURL = panel.url?.standardizedFileURL else {
+            let msg = "Ordner-Zugriff nicht autorisiert. Raw archive benoetigt Zugriff auf \(sourceDir.lastPathComponent)."
+            appendLog("ERROR: \(msg)")
+            markRunFailure(summary: msg, artifact: "Validation")
+            return false
+        }
+
+        guard sameFileLocation(selectedURL, sourceDir) else {
+            let msg = "Falscher Ordner gewaehlt. Bitte genau \(sourceDir.lastPathComponent) autorisieren."
+            appendLog("ERROR: \(msg)")
+            markRunFailure(summary: msg, artifact: "Validation")
+            return false
+        }
+
+        guard let scoped = SecurityScopedURL(url: selectedURL) else {
+            let msg = "Sicherheitsfreigabe fuer \(sourceDir.lastPathComponent) konnte nicht aktiviert werden."
+            appendLog("ERROR: \(msg)")
+            markRunFailure(summary: msg, artifact: "Validation")
+            return false
+        }
+
+        guard canReadSourceDirectoryForRawArchive(sourceDir) else {
+            scoped.stopAccessing()
+            let msg = "Ordner-Zugriff reicht nicht aus. Bitte \(sourceDir.lastPathComponent) direkt freigeben."
+            appendLog("ERROR: \(msg)")
+            markRunFailure(summary: msg, artifact: "Validation")
+            return false
+        }
+
+        sourceFolderAccess = scoped
+        appendLog("Source-Ordner autorisiert: \(sourceDir.lastPathComponent)")
+        return true
+    }
+
+    @MainActor
+    private func resolveAuthorizedSiblingZipIfNeeded(
+        provenance: WETSourceProvenance,
+        wantsRawArchiveCopy: Bool,
+        allowReuse: Bool
+    ) -> URL? {
+        guard wantsRawArchiveCopy else { return provenance.originalZipURL }
+        guard case .folder = provenance.inputKind else { return provenance.originalZipURL }
+        guard let zipURL = provenance.originalZipURL?.standardizedFileURL else { return nil }
+        guard FileManager.default.fileExists(atPath: zipURL.path) else { return nil }
+
+        if allowReuse {
+            if let existing = siblingZipAccess,
+               sameFileLocation(existing.resourceURL, zipURL) {
+                return zipURL
+            }
+            return nil
+        }
+
+        siblingZipAccess?.stopAccessing()
+        siblingZipAccess = nil
+
+        let panel = NSOpenPanel()
+        panel.title = String(localized: "wet.input.panel.title", locale: locale)
+        panel.message = "Bitte die zugehoerige ZIP fuer Sources manuell autorisieren (optional): \(zipURL.lastPathComponent)"
+        panel.prompt = String(localized: "wet.action.choose", locale: locale)
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowedContentTypes = [.zip]
+        panel.directoryURL = zipURL.deletingLastPathComponent()
+        panel.nameFieldStringValue = zipURL.lastPathComponent
+
+        guard panel.runModal() == .OK, let selectedURL = panel.url?.standardizedFileURL else {
+            appendLog("WARN: ZIP nicht autorisiert (\(zipURL.lastPathComponent)); wird in Sources ignoriert.")
+            return nil
+        }
+
+        guard sameFileLocation(selectedURL, zipURL) else {
+            appendLog("WARN: Falsche ZIP ausgewaehlt; \(zipURL.lastPathComponent) wird in Sources ignoriert.")
+            return nil
+        }
+
+        guard let scoped = SecurityScopedURL(url: selectedURL) else {
+            appendLog("WARN: ZIP-Freigabe fehlgeschlagen (\(zipURL.lastPathComponent)); wird in Sources ignoriert.")
+            return nil
+        }
+
+        siblingZipAccess = scoped
+        appendLog("ZIP authorisiert: \(zipURL.lastPathComponent)")
+        return zipURL
     }
 
     // MARK: - Participants
@@ -3893,7 +4058,7 @@ struct ContentView: View {
         }
 
         let resolvedChatURL = snapshot.chatURL
-        let provenance = snapshot.provenance
+        var provenance = snapshot.provenance
         let replayMode = snapshot.inputMode
 
         let exporter = effectiveExporterForOutput()
@@ -3921,6 +4086,31 @@ struct ContentView: View {
         }
         let wantsDeleteOriginals = deleteOriginalsAfterSidecar && !replayMode.isReplay
         let wantsRawArchiveCopy = !replayMode.isReplay && wantsRawArchiveExplicit
+        let allowAuthorizationReuse = overwriteConfirmed
+
+        if !ensureSourceFolderAccessIfNeeded(
+            provenance: provenance,
+            wantsRawArchiveCopy: wantsRawArchiveCopy,
+            allowReuse: allowAuthorizationReuse
+        ) {
+            isRunning = false
+            return
+        }
+
+        if wantsRawArchiveCopy, case .folder = provenance.inputKind {
+            let authorizedZip = resolveAuthorizedSiblingZipIfNeeded(
+                provenance: provenance,
+                wantsRawArchiveCopy: wantsRawArchiveCopy,
+                allowReuse: allowAuthorizationReuse
+            )
+            provenance = WETSourceProvenance(
+                inputKind: provenance.inputKind,
+                detectedFolderURL: provenance.detectedFolderURL,
+                originalZipURL: authorizedZip,
+                detectedPartnerRaw: provenance.detectedPartnerRaw,
+                overridePartnerRaw: provenance.overridePartnerRaw
+            )
+        }
 
         let htmlLabel: String = {
             var parts: [String] = []

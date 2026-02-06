@@ -575,6 +575,7 @@ enum SourceOpsError: Error, LocalizedError, Sendable {
     case sourceEnumerationFailed(url: URL)
     case sourceCopyEmpty(url: URL)
     case sidecarAttachmentCopyFailed(src: URL, dst: URL, underlying: String)
+    case siblingZipCopyFailed(url: URL, underlying: String)
 
     var errorDescription: String? {
         switch self {
@@ -586,6 +587,8 @@ enum SourceOpsError: Error, LocalizedError, Sendable {
             return "Raw-Archiv leer: \(url.lastPathComponent)"
         case .sidecarAttachmentCopyFailed(let src, let dst, let underlying):
             return "Sidecar-Medium konnte nicht kopiert werden (\(src.lastPathComponent) -> \(dst.lastPathComponent)): \(underlying)"
+        case .siblingZipCopyFailed(let url, let underlying):
+            return "Sibling ZIP konnte nicht ins Raw-Archiv kopiert werden (\(url.lastPathComponent)): \(underlying)"
         }
     }
 }
@@ -657,8 +660,15 @@ enum SourceOps {
         var stagedZip: URL? = nil
         if let originalZip = provenance.originalZipURL, fm.fileExists(atPath: originalZip.path) {
             let zipDest = stagedRawRoot.appendingPathComponent(originalZip.lastPathComponent)
-            try fm.copyItem(at: originalZip, to: zipDest)
-            stagedZip = zipDest
+            do {
+                try fm.copyItem(at: originalZip, to: zipDest)
+                stagedZip = zipDest
+            } catch {
+                throw SourceOpsError.siblingZipCopyFailed(
+                    url: originalZip,
+                    underlying: error.localizedDescription
+                )
+            }
         }
 
         let finalRawArchiveDir = rawArchiveDirectory(baseName: baseName, in: exportDir.standardizedFileURL)
@@ -4472,7 +4482,11 @@ public enum WhatsAppExportService {
         guard !jobs.isEmpty else { return [] }
 
         let workerCount = max(1, min(maxConcurrent, jobs.count))
-        let queue = DispatchQueue(label: "wet.sha256.parallel", qos: .utility, attributes: .concurrent)
+        let queue = DispatchQueue(
+            label: "wet.sha256.parallel",
+            qos: .userInteractive,
+            attributes: .concurrent
+        )
         let group = DispatchGroup()
         let semaphore = DispatchSemaphore(value: workerCount)
         let stateLock = NSLock()
@@ -10484,17 +10498,42 @@ nonisolated private static func stageThumbnailForExport(
 
         let srcBasePath = sourceDir.standardizedFileURL.path
         let dstBasePath = destDir.standardizedFileURL.path
+        let skipPrefixes = skippingPathPrefixes.map {
+            $0.hasSuffix("/") ? String($0.dropLast()) : $0
+        }
+
+        func isPath(_ path: String, underOrEqual root: String) -> Bool {
+            let normalizedRoot = root.hasSuffix("/") ? String(root.dropLast()) : root
+            if normalizedRoot.isEmpty { return false }
+            if path == normalizedRoot { return true }
+            return path.hasPrefix(normalizedRoot + "/")
+        }
+
+        func classifyEntry(_ url: URL) throws -> (isDirectory: Bool, isRegularFile: Bool) {
+            if let rv = try? url.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey]) {
+                if rv.isDirectory == true { return (true, false) }
+                if rv.isRegularFile == true { return (false, true) }
+            }
+
+            var isDir = ObjCBool(false)
+            if fm.fileExists(atPath: url.path, isDirectory: &isDir) {
+                if isDir.boolValue { return (true, false) }
+                if fm.isReadableFile(atPath: url.path) { return (false, true) }
+            }
+
+            throw SourceOpsError.sourceEnumerationFailed(url: url)
+        }
 
         func shouldSkip(_ url: URL) -> Bool {
             let p = url.standardizedFileURL.path
 
             // Skip if the enumerated path is under any excluded prefix (prevents copying the output into itself).
-            for pref in skippingPathPrefixes {
-                if !pref.isEmpty, p.hasPrefix(pref) { return true }
+            for pref in skipPrefixes {
+                if isPath(p, underOrEqual: pref) { return true }
             }
 
             // Also skip if this is inside the destination itself (extra safety).
-            if p.hasPrefix(dstBasePath) { return true }
+            if isPath(p, underOrEqual: dstBasePath) { return true }
 
             return false
         }
@@ -10503,7 +10542,7 @@ nonisolated private static func stageThumbnailForExport(
             try Task.checkCancellation()
             if shouldSkip(u) {
                 // If this is a directory, skip its descendants to prevent deep recursion.
-                if (try? u.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
+                if (try? classifyEntry(u).isDirectory) == true {
                     en.skipDescendants()
                 }
                 continue
@@ -10518,13 +10557,11 @@ nonisolated private static func stageThumbnailForExport(
             if relPath.isEmpty { continue }
 
             let dst = destDir.appendingPathComponent(relPath)
-
-            let rv = try? u.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey])
-
-            if rv?.isDirectory == true {
+            let kind = try classifyEntry(u)
+            if kind.isDirectory {
                 try fm.createDirectory(at: dst, withIntermediateDirectories: true)
                 dirPairs.append((src: u, dst: dst))
-            } else if rv?.isRegularFile == true {
+            } else if kind.isRegularFile {
                 if fm.fileExists(atPath: dst.path) {
                     throw OutputCollisionError(url: dst)
                 }
