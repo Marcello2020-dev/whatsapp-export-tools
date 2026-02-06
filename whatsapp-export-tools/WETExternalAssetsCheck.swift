@@ -2,6 +2,7 @@ import Foundation
 import AppKit
 
 @MainActor
+/// Validates that external asset publishing preserves asset folders and HTML references in the export directory.
 struct WETExternalAssetsCheck {
     static let isEnabled: Bool = ProcessInfo.processInfo.environment["WET_EXTERNAL_ASSETS_CHECK"] == "1"
     private static var didRun = false
@@ -12,6 +13,7 @@ struct WETExternalAssetsCheck {
         run()
     }
 
+    /// Runs the fixture workflow: stage directories, publish assets, and assert the final export contains everything expected.
     private static func run() {
         let root = fixtureRoot()
         let staging = root.appendingPathComponent(".wa_export_tmp_test", isDirectory: true)
@@ -30,6 +32,7 @@ struct WETExternalAssetsCheck {
         NSApp.terminate(nil)
     }
 
+    /// Locates the external-assets fixture tree, with an optional environment override.
     private static func fixtureRoot() -> URL {
         if let override = ProcessInfo.processInfo.environment["WET_EXTERNAL_ASSETS_ROOT"], !override.isEmpty {
             return URL(fileURLWithPath: override, isDirectory: true)
@@ -39,6 +42,7 @@ struct WETExternalAssetsCheck {
             .appendingPathComponent("_local/fixtures/wet/synthetic/external-assets-test/out", isDirectory: true)
     }
 
+    /// Cleans and re-creates the fixture export + staging directories.
     private static func prepare(root: URL, staging: URL) throws {
         let fm = FileManager.default
         if fm.fileExists(atPath: root.path) {
@@ -48,6 +52,7 @@ struct WETExternalAssetsCheck {
         try fm.createDirectory(at: staging, withIntermediateDirectories: true)
     }
 
+    /// Places fake thumbnails/previews and a sample HTML referencing them into the staging area.
     private static func seedExternalAssets(staging: URL) throws -> URL {
         let thumbsDir = staging.appendingPathComponent("_thumbs", isDirectory: true)
         let previewsDir = staging.appendingPathComponent("_previews", isDirectory: true)
@@ -70,6 +75,7 @@ struct WETExternalAssetsCheck {
         return htmlStaged
     }
 
+    /// Relies on `WhatsAppExportService` to publish any `_thumbs/_previews` folders from staging into the export.
     private static func publishExternalAssets(staging: URL, exportDir: URL) throws {
         _ = try WhatsAppExportService.publishExternalAssetsIfPresent(
             stagingRoot: staging,
@@ -80,6 +86,7 @@ struct WETExternalAssetsCheck {
         )
     }
 
+    /// Moves the generated HTML into the export directory after assets are published.
     private static func publishHTML(staged: URL, exportDir: URL) throws {
         let final = exportDir.appendingPathComponent(staged.lastPathComponent)
         if FileManager.default.fileExists(atPath: final.path) {
@@ -88,6 +95,7 @@ struct WETExternalAssetsCheck {
         try FileManager.default.moveItem(at: staged, to: final)
     }
 
+    /// Asserts the exported directories/HTML contain the referenced `_thumbs/_previews` data after publishing.
     private static func verify(root: URL) throws {
         let fm = FileManager.default
         let thumbsDir = root.appendingPathComponent("_thumbs", isDirectory: true)

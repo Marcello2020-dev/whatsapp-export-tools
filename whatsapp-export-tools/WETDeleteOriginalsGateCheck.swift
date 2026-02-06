@@ -2,6 +2,7 @@ import Foundation
 import AppKit
 
 @MainActor
+/// Gate check that asserts delete-originals only runs when the copied sources match the originals byte-for-byte.
 struct WETDeleteOriginalsGateCheck {
     static let isEnabled: Bool = ProcessInfo.processInfo.environment["WET_DELETE_ORIGINALS_GATE_CHECK"] == "1"
     private static var didRun = false
@@ -12,6 +13,7 @@ struct WETDeleteOriginalsGateCheck {
         run()
     }
 
+    /// Executes the fixture-driven validation steps and exits the app after printing PASS/FAIL.
     private static func run() {
         var failures: [String] = []
 
@@ -43,6 +45,7 @@ struct WETDeleteOriginalsGateCheck {
         NSApp.terminate(nil)
     }
 
+    /// Locates the fixture folder, allowing overriding via env var for local debugging.
     private static func fixtureRoot() -> URL {
         if let override = ProcessInfo.processInfo.environment["WET_DELETE_ORIGINALS_GATE_ROOT"], !override.isEmpty {
             return URL(fileURLWithPath: override, isDirectory: true)
@@ -52,6 +55,7 @@ struct WETDeleteOriginalsGateCheck {
             .appendingPathComponent("_local/fixtures/wet/delete-originals-gate/out", isDirectory: true)
     }
 
+    /// Exercises the raw archive verification logic by staging fixture copies with drift, tamper, and missing zip cases.
     private static func runRawArchiveVerificationGateTest(root: URL, failures: inout [String]) throws {
         let fm = FileManager.default
         if fm.fileExists(atPath: root.path) {
@@ -77,6 +81,7 @@ struct WETDeleteOriginalsGateCheck {
         let copiedDir = rawRoot.appendingPathComponent(originalDir.lastPathComponent, isDirectory: true)
         let copiedChat = copiedDir.appendingPathComponent("_chat.txt")
 
+        // Helper to wipe/recreate the copied folder so each verification step starts from a clean copy.
         func stageFreshCopy() throws {
             if fm.fileExists(atPath: copiedDir.path) {
                 try fm.removeItem(at: copiedDir)
@@ -102,6 +107,7 @@ struct WETDeleteOriginalsGateCheck {
             overridePartnerRaw: nil
         )
 
+        // Runs the raw archive verification gate and returns the collected result for the current fixture state.
         func verify(_ p: WETSourceProvenance = provenance) -> SourceOpsVerificationResult {
             SourceOps.verifyRawArchive(
                 baseName: "GateRun",

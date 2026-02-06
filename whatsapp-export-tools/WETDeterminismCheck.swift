@@ -3,6 +3,7 @@ import AppKit
 import CryptoKit
 
 @MainActor
+/// Smoke test that compares fixture folder vs. ZIP outputs to ensure hashes, counts, and timestamps stay deterministic.
 struct WETDeterminismCheck {
     static let isEnabled: Bool = ProcessInfo.processInfo.environment["WET_DETERMINISM_CHECK"] == "1"
     private static var didRun = false
@@ -24,6 +25,7 @@ struct WETDeterminismCheck {
         let sha256: String
     }
 
+    /// Coordinates the determinism checks, logging metric summaries and PASS/FAIL before terminating.
     private static func run() {
         let folderRoot = rootURL(
             envKey: "WET_DETERMINISM_FOLDER_ROOT",
@@ -146,6 +148,7 @@ struct WETDeterminismCheck {
         }
     }
 
+    /// Resolves fixture roots, allowing overriding via environment variables for local debugging.
     private static func rootURL(envKey: String, fallback: String) -> URL {
         if let override = ProcessInfo.processInfo.environment[envKey], !override.isEmpty {
             return URL(fileURLWithPath: override, isDirectory: true)
@@ -154,12 +157,14 @@ struct WETDeterminismCheck {
         return URL(fileURLWithPath: cwd, isDirectory: true).appendingPathComponent(fallback, isDirectory: true)
     }
 
+    /// Heuristic to pick the lone Markdown file from a snapshot, used to compare text outputs.
     private static func mainMarkdownPath(in map: [String: FileInfo]) -> String? {
         let mdFiles = map.keys.filter { $0.lowercased().hasSuffix(".md") }
         if mdFiles.count == 1 { return mdFiles[0] }
         return mdFiles.sorted().first
     }
 
+    /// Walks a fixture tree and records size/SHA/mtime for every file (excluding macOS noise).
     private static func snapshot(root: URL) throws -> [String: FileInfo] {
         let fm = FileManager.default
         var out: [String: FileInfo] = [:]
@@ -185,6 +190,7 @@ struct WETDeterminismCheck {
         return out
     }
 
+    /// Builds a histogram of modification-time deltas between folder and ZIP snapshots.
     private static func mtimeHistogramFor(
         shared: Set<String>,
         folderSnapshot: [String: FileInfo],

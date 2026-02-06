@@ -2,6 +2,7 @@ import Foundation
 import AppKit
 
 @MainActor
+/// Test harness that ensures placeholder exports (e.g., when WhatsApp says “Du”) don't leak into final names.
 struct WETExporterPlaceholderCheck {
     static let isEnabled: Bool = ProcessInfo.processInfo.environment["WET_EXPORTER_PLACEHOLDER_CHECK"] == "1"
     private static var didRun = false
@@ -12,6 +13,7 @@ struct WETExporterPlaceholderCheck {
         run()
     }
 
+    /// Exercises participant detection/resolution with a suite of fixtures and validates expectations.
     private static func run() {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
         let fixturesRoot = root.deletingLastPathComponent().appendingPathComponent("Fixtures")
@@ -22,6 +24,7 @@ struct WETExporterPlaceholderCheck {
         let groupEventChatURL = fixturesRoot.appendingPathComponent("wet-group-event-bracket/_chat.txt")
 
         var failures: [String] = []
+        // Tracks expectation failures so we can report each failed invariant before exiting.
         func expect(_ condition: Bool, _ label: String) {
             if !condition { failures.append(label) }
         }
