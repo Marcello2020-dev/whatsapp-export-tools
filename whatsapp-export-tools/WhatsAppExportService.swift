@@ -1037,10 +1037,37 @@ public enum WhatsAppExportService {
         return bareDomainAllowedTLDs.contains(tld)
     }
 
+    private enum OmittedMediaKind: Sendable {
+        case image
+        case video
+        case audio
+        case document
+    }
+
     // Attachments
     // Attachment markers like "<Anhang: filename>".
     nonisolated private static let attachRe = try! NSRegularExpression(
         pattern: #"<\s*Anhang:\s*([^>]+?)\s*>"#,
+        options: [.caseInsensitive]
+    )
+    nonisolated private static let omittedImageRe = try! NSRegularExpression(
+        pattern: #"^\s*(?:bild\s+weggelassen|image\s+omitted)\s*$"#,
+        options: [.caseInsensitive]
+    )
+    nonisolated private static let omittedVideoRe = try! NSRegularExpression(
+        pattern: #"^\s*(?:video\s+weggelassen|video\s+omitted)\s*$"#,
+        options: [.caseInsensitive]
+    )
+    nonisolated private static let omittedAudioRe = try! NSRegularExpression(
+        pattern: #"^\s*(?:audio\s+weggelassen|audio\s+omitted)\s*$"#,
+        options: [.caseInsensitive]
+    )
+    nonisolated private static let omittedDocumentSimpleRe = try! NSRegularExpression(
+        pattern: #"^\s*(?:dokument\s+weggelassen|document\s+omitted)\s*$"#,
+        options: [.caseInsensitive]
+    )
+    nonisolated private static let omittedDocumentRe = try! NSRegularExpression(
+        pattern: #"^\s*(?:.+?[•·]\s*)?(?:\d+\s*(?:seite|seiten|page|pages)\s*)?(?:dokument\s+weggelassen|document\s+omitted)\s*$"#,
         options: [.caseInsensitive]
     )
 
@@ -1087,14 +1114,25 @@ public enum WhatsAppExportService {
         TimePolicy.iso8601WithOffsetString(date)
     }
 
-    // Cache for previews
+    // Cache for previews (including misses) to avoid repeated network timeouts for the same URL.
+    private enum PreviewCacheEntry: Sendable {
+        case hit(WAPreview)
+        case miss
+    }
+
     private actor PreviewCache {
-        private var dict: [String: WAPreview] = [:]
-        func get(_ url: String) -> WAPreview? { dict[url] }
-        func set(_ url: String, _ val: WAPreview) { dict[url] = val }
+        private var dict: [String: PreviewCacheEntry] = [:]
+        func get(_ url: String) -> PreviewCacheEntry? { dict[url] }
+        func setHit(_ url: String, _ val: WAPreview) { dict[url] = .hit(val) }
+        func setMiss(_ url: String) { dict[url] = .miss }
+        func reset() { dict.removeAll(keepingCapacity: true) }
     }
 
     nonisolated private static let previewCache = PreviewCache()
+
+    nonisolated private static func resetPreviewCache() async {
+        await previewCache.reset()
+    }
 
     // Cache for staged attachments (source path -> (relHref, stagedURL)) to avoid duplicate copies.
     nonisolated private static let stagedAttachmentLock = NSLock()
@@ -2377,8 +2415,17 @@ public enum WhatsAppExportService {
         var documents = 0
 
         for m in messages {
+            let textWoAttach = stripAttachmentMarkers(m.text)
+            for kind in omittedMediaKinds(textWoAttach) {
+                switch kind {
+                case .image: images += 1
+                case .video: videos += 1
+                case .audio: audios += 1
+                case .document: documents += 1
+                }
+            }
+
             let attachments = findAttachments(m.text)
-            if attachments.isEmpty { continue }
             for fn in attachments {
                 let ext = URL(fileURLWithPath: fn).pathExtension
                 switch bucketForExtension(ext) {
@@ -2386,6 +2433,27 @@ public enum WhatsAppExportService {
                 case .videos: videos += 1
                 case .audios: audios += 1
                 case .documents: documents += 1
+                }
+            }
+        }
+
+        return WAMediaCounts(images: images, videos: videos, audios: audios, documents: documents)
+    }
+
+    nonisolated private static func omittedMediaCounts(messages: [WAMessage]) -> WAMediaCounts {
+        var images = 0
+        var videos = 0
+        var audios = 0
+        var documents = 0
+
+        for m in messages {
+            let textWoAttach = stripAttachmentMarkers(m.text)
+            for kind in omittedMediaKinds(textWoAttach) {
+                switch kind {
+                case .image: images += 1
+                case .video: videos += 1
+                case .audio: audios += 1
+                case .document: documents += 1
                 }
             }
         }
@@ -2693,6 +2761,7 @@ public enum WhatsAppExportService {
         resetStagedAttachmentCache()
         resetAttachmentIndexCache()
         resetThumbnailCaches()
+        await resetPreviewCache()
         resetPerfMetrics()
 
         let chatPath = chatURL.standardizedFileURL
@@ -3259,6 +3328,7 @@ public enum WhatsAppExportService {
         resetStagedAttachmentCache()
         resetAttachmentIndexCache()
         resetThumbnailCaches()
+        await resetPreviewCache()
         resetPerfMetrics()
 
         let chatPath = chatURL.standardizedFileURL
@@ -6120,6 +6190,55 @@ public enum WhatsAppExportService {
         return matches.map { ns.substring(with: $0.range(at: 1)).trimmingCharacters(in: .whitespacesAndNewlines) }
     }
 
+    nonisolated private static func regexMatches(_ re: NSRegularExpression, text: String) -> Bool {
+        let ns = text as NSString
+        return re.firstMatch(in: text, options: [], range: NSRange(location: 0, length: ns.length)) != nil
+    }
+
+    nonisolated private static func omittedMediaKinds(_ text: String) -> [OmittedMediaKind] {
+        let normalized = _normSpace(stripBOMAndBidi(text))
+        guard !normalized.isEmpty else { return [] }
+
+        var kinds: [OmittedMediaKind] = []
+        if regexMatches(omittedImageRe, text: normalized) {
+            kinds.append(.image)
+        }
+        if regexMatches(omittedVideoRe, text: normalized) {
+            kinds.append(.video)
+        }
+        if regexMatches(omittedAudioRe, text: normalized) {
+            kinds.append(.audio)
+        }
+        if regexMatches(omittedDocumentRe, text: normalized) {
+            kinds.append(.document)
+        }
+
+        return kinds
+    }
+
+    nonisolated private static func omittedMediaPlaceholderText(_ text: String) -> String? {
+        let normalized = _normSpace(stripBOMAndBidi(text))
+        guard !normalized.isEmpty else { return nil }
+
+        if regexMatches(omittedImageRe, text: normalized) {
+            return "🖼️ Bild weggelassen (nicht im Export enthalten)"
+        }
+        if regexMatches(omittedVideoRe, text: normalized) {
+            return "🎬 Video weggelassen (nicht im Export enthalten)"
+        }
+        if regexMatches(omittedAudioRe, text: normalized) {
+            return "🎧 Audio weggelassen (nicht im Export enthalten)"
+        }
+        if regexMatches(omittedDocumentRe, text: normalized) {
+            if regexMatches(omittedDocumentSimpleRe, text: normalized) {
+                return "📄 Dokument weggelassen (nicht im Export enthalten)"
+            }
+            return "\(normalized) (nicht im Export enthalten)"
+        }
+
+        return nil
+    }
+
     private struct AttachmentIndexSnapshot: Sendable {
         let relPathByName: [String: String]
     }
@@ -7490,7 +7609,14 @@ nonisolated private static func stageThumbnailForExport(
 
     nonisolated private static func buildPreview(_ url: String) async -> WAPreview? {
         let urlKey = normalizePreviewURLKey(url)
-        if let cached = await previewCache.get(urlKey) { return cached }
+        if let cached = await previewCache.get(urlKey) {
+            switch cached {
+            case .hit(let preview):
+                return preview
+            case .miss:
+                return nil
+            }
+        }
         let policy = previewPolicy()
         if previewDebugEnabled() {
             previewDebugLog("preview start url=\(urlKey) policy=\(policy.rawValue)")
@@ -7510,7 +7636,7 @@ nonisolated private static func stageThumbnailForExport(
                 description: "Mit Google Maps lokale Anbieter suchen, Karten anzeigen und Routenpläne abrufen.",
                 imageDataURL: nil
             )
-            await previewCache.set(urlKey, prev)
+            await previewCache.setHit(urlKey, prev)
             if previewDebugEnabled() {
                 previewDebugLog("preview source=google_maps image=false")
             }
@@ -7522,7 +7648,7 @@ nonisolated private static func stageThumbnailForExport(
             let thumb = "https://img.youtube.com/vi/\(vid)/hqdefault.jpg"
             let imgData = await downloadImageAsDataURL(thumb, policy: policy)
             let prev = WAPreview(url: url, title: "YouTube", description: "", imageDataURL: imgData)
-            await previewCache.set(urlKey, prev)
+            await previewCache.setHit(urlKey, prev)
             if previewDebugEnabled() {
                 previewDebugLog("preview source=youtube image=\(imgData != nil)")
             }
@@ -7533,7 +7659,7 @@ nonisolated private static func stageThumbnailForExport(
         #if canImport(LinkPresentation)
         if policy == .full {
             if let lp = await buildPreviewViaLinkPresentation(url) {
-                await previewCache.set(urlKey, lp)
+                await previewCache.setHit(urlKey, lp)
                 if previewDebugEnabled() {
                     previewDebugLog("preview source=link_presentation image=\(lp.imageDataURL != nil)")
                 }
@@ -7557,12 +7683,13 @@ nonisolated private static func stageThumbnailForExport(
             }
 
             let prev = WAPreview(url: url, title: title, description: desc, imageDataURL: imgDataURL)
-            await previewCache.set(urlKey, prev)
+            await previewCache.setHit(urlKey, prev)
             if previewDebugEnabled() {
                 previewDebugLog("preview source=meta image=\(imgDataURL != nil)")
             }
             return prev
         } catch {
+            await previewCache.setMiss(urlKey)
             if previewDebugEnabled() {
                 previewDebugLog("preview source=meta failed error=\(error.localizedDescription)")
             }
@@ -8355,6 +8482,7 @@ nonisolated private static func stageThumbnailForExport(
             let bubCls: String = isSystemMsg ? "system" : (isMe ? "me" : "other")
 
             let trimmedText = textWoAttach.trimmingCharacters(in: .whitespacesAndNewlines)
+            let omittedMediaPlaceholder = omittedMediaPlaceholderText(textWoAttach)
             let urls = enablePreviews ? extractURLs(trimmedText) : []
             let urlOnly = enablePreviews ? isURLOnlyText(trimmedText) : false
 
@@ -8364,7 +8492,7 @@ nonisolated private static func stageThumbnailForExport(
                 let wantsEmailPlaceholders = (!embedAttachments && !embedAttachmentThumbnailsOnly && !externalAttachments)
 
                 if wantsEmailPlaceholders {
-                    var combined = trimmedText
+                    var combined = omittedMediaPlaceholder ?? trimmedText
                     if !attachmentsAll.isEmpty {
                         let placeholders = emailAttachmentPlaceholderText(forAttachments: attachmentsAll)
                         if !placeholders.isEmpty {
@@ -8377,6 +8505,10 @@ nonisolated private static func stageThumbnailForExport(
                     }
                     if combined.isEmpty { return "" }
                     return htmlEscapeAndLinkifyKeepNewlines(combined, linkify: !enablePreviews)
+                }
+
+                if let omittedMediaPlaceholder {
+                    return htmlEscapeKeepNewlines(omittedMediaPlaceholder)
                 }
 
                 // WICHTIG: Text-only Export soll Attachments sichtbar lassen
@@ -8399,36 +8531,29 @@ nonisolated private static func stageThumbnailForExport(
 
                 for u in previewTargets {
                     try Task.checkCancellation()
-                    let prev: WAPreview?
-                    if let cached = previewByURLSnapshot[u] {
-                        prev = cached
-                    } else {
-                        prev = await buildPreview(u)
-                    }
-                    if let prev {
-                        var imgBlock = ""
-                        if let img = prev.imageDataURL {
-                            if externalPreviews, let previewsDir = externalPreviewsDir {
-                                if let href = stagePreviewImageDataURL(img, previewsDir: previewsDir, relativeTo: attachmentRelBaseDir) {
-                                    imgBlock = "<div class='pimg'><img alt='' src='\(htmlEscape(href))'></div>"
-                                } else {
-                                    imgBlock = "<div class='pimg'><img alt='' src='\(img)'></div>"
-                                }
+                    guard let prev = previewByURLSnapshot[u] else { continue }
+                    var imgBlock = ""
+                    if let img = prev.imageDataURL {
+                        if externalPreviews, let previewsDir = externalPreviewsDir {
+                            if let href = stagePreviewImageDataURL(img, previewsDir: previewsDir, relativeTo: attachmentRelBaseDir) {
+                                imgBlock = "<div class='pimg'><img alt='' src='\(htmlEscape(href))'></div>"
                             } else {
                                 imgBlock = "<div class='pimg'><img alt='' src='\(img)'></div>"
                             }
+                        } else {
+                            imgBlock = "<div class='pimg'><img alt='' src='\(img)'></div>"
                         }
-                        let ptitle = htmlEscape(prev.title.isEmpty ? u : prev.title)
-                        let pdesc = htmlEscape(prev.description)
-                        let block =
-                            "<div class='preview'>"
-                            + "<a href='\(htmlEscape(u))' target='_blank' rel='noopener'>"
-                            + imgBlock
-                            + "<div class='pbody'><p class='ptitle'>\(ptitle)</p>"
-                            + (pdesc.isEmpty ? "" : "<p class='pdesc'>\(pdesc)</p>")
-                            + "</div></a></div>"
-                        blocks.append(block)
                     }
+                    let ptitle = htmlEscape(prev.title.isEmpty ? u : prev.title)
+                    let pdesc = htmlEscape(prev.description)
+                    let block =
+                        "<div class='preview'>"
+                        + "<a href='\(htmlEscape(u))' target='_blank' rel='noopener'>"
+                        + imgBlock
+                        + "<div class='pbody'><p class='ptitle'>\(ptitle)</p>"
+                        + (pdesc.isEmpty ? "" : "<p class='pdesc'>\(pdesc)</p>")
+                        + "</div></a></div>"
+                    blocks.append(block)
                 }
 
                 previewHTML = blocks.joined()
@@ -8964,6 +9089,7 @@ nonisolated private static func stageThumbnailForExport(
             let isMe = (!isSystemMsg) && authorInfo.isMe
 
             let trimmedText = textWoAttach.trimmingCharacters(in: .whitespacesAndNewlines)
+            let omittedMediaPlaceholder = omittedMediaPlaceholderText(textWoAttach)
             if isSystemMsg {
                 let sysText = stripBOMAndBidi(trimmedText)
                 out.append("— \(sysText) —")
@@ -8985,7 +9111,9 @@ nonisolated private static func stageThumbnailForExport(
 
             // Text / Placeholder
             if !urlOnly {
-                if trimmedText.isEmpty, !embedAttachments, !embedAttachmentThumbnailsOnly, !attachmentsAll.isEmpty {
+                if let omittedMediaPlaceholder {
+                    out.append(omittedMediaPlaceholder)
+                } else if trimmedText.isEmpty, !embedAttachments, !embedAttachmentThumbnailsOnly, !attachmentsAll.isEmpty {
                     out.append(attachmentPlaceholderText(forAttachments: attachmentsAll))
                 } else if !trimmedText.isEmpty {
                     out.append(trimmedText)
@@ -9357,7 +9485,14 @@ nonisolated private static func stageThumbnailForExport(
         let dateRange = manifestMessageDateRange(messages: messages)
         let createdAt = manifestCreatedAt(chatURL: chatURL)
         let mediaCounts = manifestMediaCounts(messages: messages)
+        let omittedCounts = omittedMediaCounts(messages: messages)
+        let omittedTotal = omittedCounts.images + omittedCounts.videos + omittedCounts.audios + omittedCounts.documents
         let perf = perfSnapshot()
+        if omittedTotal > 0 {
+            log(
+                "MISSING-MEDIA: image=\(omittedCounts.images) video=\(omittedCounts.videos) audio=\(omittedCounts.audios) document=\(omittedCounts.documents)"
+            )
+        }
 
         let fileHashValues: [WETJSONValue] = sortedEntries.map {
             .object([
@@ -9411,6 +9546,13 @@ nonisolated private static func stageThumbnailForExport(
                 ("videos", .number(mediaCounts.videos)),
                 ("audios", .number(mediaCounts.audios)),
                 ("documents", .number(mediaCounts.documents))
+            ])),
+            ("omittedMediaCounts", .object([
+                ("images", .number(omittedCounts.images)),
+                ("videos", .number(omittedCounts.videos)),
+                ("audios", .number(omittedCounts.audios)),
+                ("documents", .number(omittedCounts.documents)),
+                ("total", .number(omittedTotal))
             ])),
             ("thumbnailStats", .object([
                 ("requested", .number(perf.thumbStoreRequested)),
@@ -10303,10 +10445,43 @@ nonisolated private static func stageThumbnailForExport(
         return (before, after)
     }
 
+    private nonisolated static func stripChatStemPrefix(_ raw: String) -> String {
+        let s = normalizedKey(raw)
+        let prefixes = [
+            "whatsapp chat - ",
+            "whatsapp chat – ",
+            "whatsapp chat — ",
+            "whatsapp chat with ",
+            "whatsapp chat mit "
+        ]
+        for prefix in prefixes where s.hasPrefix(prefix) {
+            return String(s.dropFirst(prefix.count))
+        }
+        return s
+    }
+
+    nonisolated private static let duplicateSuffixRe = try! NSRegularExpression(
+        pattern: #"\s\(\d+\)$"#,
+        options: []
+    )
+
+    private nonisolated static func stripDuplicateSuffix(_ raw: String) -> String {
+        let s = _normSpace(raw)
+        let ns = s as NSString
+        let range = NSRange(location: 0, length: ns.length)
+        return duplicateSuffixRe.stringByReplacingMatches(in: s, options: [], range: range, withTemplate: "")
+    }
+
+    private nonisolated static func canonicalSiblingZipKey(_ raw: String) -> String {
+        let withoutDup = stripDuplicateSuffix(raw)
+        return stripChatStemPrefix(withoutDup)
+    }
+
     private nonisolated static func pickSiblingZipURL(sourceDir: URL) -> URL? {
         let fm = FileManager.default
         let parent = sourceDir.deletingLastPathComponent()
-        let folderName = sourceDir.lastPathComponent.lowercased()
+        let folderKey = canonicalSiblingZipKey(sourceDir.lastPathComponent)
+        guard !folderKey.isEmpty else { return nil }
 
         let candidates: [URL]
         do {
@@ -10323,11 +10498,20 @@ nonisolated private static func stageThumbnailForExport(
         }
 
         if candidates.isEmpty { return nil }
+        let matches = candidates.filter {
+            canonicalSiblingZipKey($0.deletingPathExtension().lastPathComponent) == folderKey
+        }
+        guard !matches.isEmpty else { return nil }
+        if matches.count == 1 { return matches[0] }
 
-        return candidates.first(where: { $0.deletingPathExtension().lastPathComponent.lowercased() == folderName })
-            ?? candidates.first(where: { $0.lastPathComponent.lowercased().contains(folderName) })
-            ?? candidates.first(where: { $0.lastPathComponent.lowercased().contains("whatsapp") })
-            ?? candidates.first
+        return matches.sorted {
+            let lhsDate = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            let rhsDate = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            if lhsDate == rhsDate {
+                return $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending
+            }
+            return lhsDate > rhsDate
+        }.first
     }
 
     fileprivate nonisolated static func filesEqual(_ a: URL, _ b: URL) -> Bool {
