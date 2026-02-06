@@ -2,6 +2,7 @@ import Foundation
 import AppKit
 
 @MainActor
+/// Confirms the replace-selection flow deletes the requested artifacts while preserving untouched files.
 struct WETReplaceSelectionCheck {
     static let isEnabled: Bool = ProcessInfo.processInfo.environment["WET_REPLACE_CHECK"] == "1"
     private static var didRun = false
@@ -12,15 +13,18 @@ struct WETReplaceSelectionCheck {
         run()
     }
 
+    /// Lightweight metadata carrier used to compare files before/after the replace pass.
     private struct FileInfo: Equatable {
         let mtime: Date
         let size: UInt64
     }
 
+    /// Formats timestamps in a deterministic ISO string for manifest logging.
     private static func manifestTimestamp(_ date: Date) -> String {
         TimePolicy.iso8601WithOffsetString(date)
     }
 
+    /// Seeds the fixture, performs replace/delete, and prints PASS/FAIL along with manifest diffs.
     private static func run() {
         let root = fixtureRoot()
         let baseName = fixtureBaseName()
@@ -62,6 +66,7 @@ struct WETReplaceSelectionCheck {
         NSApp.terminate(nil)
     }
 
+    /// Resolves where the replace-selection fixtures live; accepts an env override for custom paths.
     private static func fixtureRoot() -> URL {
         if let override = ProcessInfo.processInfo.environment["WET_REPLACE_FIXTURE_ROOT"], !override.isEmpty {
             return URL(fileURLWithPath: override, isDirectory: true)
@@ -71,6 +76,7 @@ struct WETReplaceSelectionCheck {
             .appendingPathComponent("_local/fixtures/wet/synthetic/replace-selection-test/out", isDirectory: true)
     }
 
+    /// Determines the base export name used in the replace-selection fixture.
     private static func fixtureBaseName() -> String {
         if let override = ProcessInfo.processInfo.environment["WET_REPLACE_FIXTURE_BASE"], !override.isEmpty {
             return override
@@ -78,6 +84,7 @@ struct WETReplaceSelectionCheck {
         return "Chat_replace_selection_test"
     }
 
+    /// Creates the pre-run export layout with dummy HTML, markdown, and sidecar assets.
     private static func seedFixture(root: URL, baseName: String) throws {
         let fm = FileManager.default
         if fm.fileExists(atPath: root.path) {
@@ -114,6 +121,7 @@ struct WETReplaceSelectionCheck {
         try "dummy asset".write(to: sidecarFile, atomically: true, encoding: .utf8)
     }
 
+    /// Runs the replace-selection logic by deleting selected variants and writing new placeholder files.
     private static func runReplace(root: URL, baseName: String) throws {
         let fm = FileManager.default
         let variantSuffixes = ["-MaxHTML", "-MidHTML"]
@@ -149,6 +157,7 @@ struct WETReplaceSelectionCheck {
         )
     }
 
+    /// Takes a simple manifest snapshot of files + metadata before/after the replace run.
     private static func snapshot(root: URL, baseName: String) -> [String: FileInfo] {
         let files: [URL] = [
             root.appendingPathComponent("\(baseName)-MaxHTML.html"),
@@ -168,6 +177,7 @@ struct WETReplaceSelectionCheck {
         return snapshot
     }
 
+    /// Reads modification time + file size for comparison.
     private static func fileInfo(at url: URL) -> FileInfo? {
         let fm = FileManager.default
         guard let attrs = try? fm.attributesOfItem(atPath: url.path),
@@ -178,6 +188,7 @@ struct WETReplaceSelectionCheck {
         return FileInfo(mtime: mtime, size: size)
     }
 
+    /// Verifies replaced files changed and untouched files remain identical.
     private static func verify(before: [String: FileInfo], after: [String: FileInfo], baseName: String) -> [String] {
         var failures: [String] = []
 
@@ -222,6 +233,7 @@ struct WETReplaceSelectionCheck {
         return failures
     }
 
+    /// Prints a manifest of file paths/sizes/mtimes; useful for debugging replace selections.
     private static func dumpManifest(label: String, root: URL) {
         let fm = FileManager.default
         guard let enumerator = fm.enumerator(

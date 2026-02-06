@@ -2,6 +2,7 @@ import Foundation
 import AppKit
 
 @MainActor
+/// Smoke-check that output directories created from the same partner name remain isolated and artifact-free.
 struct WETOutputStructureDedupCheck {
     static let isEnabled: Bool = ProcessInfo.processInfo.environment["WET_OUTPUT_STRUCTURE_DEDUP_CHECK"] == "1"
     private static var didRun = false
@@ -12,6 +13,7 @@ struct WETOutputStructureDedupCheck {
         run()
     }
 
+    /// Runs the deduplication assertions and prints PASS/FAIL once done.
     private static func run() {
         var failures: [String] = []
 
@@ -54,6 +56,7 @@ struct WETOutputStructureDedupCheck {
         NSApp.terminate(nil)
     }
 
+    /// Resolves the fixture folder, allowing overrides for local runs.
     private static func fixtureRoot() -> URL {
         if let override = ProcessInfo.processInfo.environment["WET_OUTPUT_STRUCTURE_DEDUP_ROOT"], !override.isEmpty {
             return URL(fileURLWithPath: override, isDirectory: true)
@@ -63,6 +66,7 @@ struct WETOutputStructureDedupCheck {
             .appendingPathComponent("_local/fixtures/wet/output-structure-dedup/out", isDirectory: true)
     }
 
+    /// Creates two runs under the same partner folder and checks their outputs for cross-contamination.
     private static func runStructureTest(root: URL, failures: inout [String]) throws {
         let fm = FileManager.default
         if fm.fileExists(atPath: root.path) {

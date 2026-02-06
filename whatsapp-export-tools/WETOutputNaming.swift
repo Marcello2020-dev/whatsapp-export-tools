@@ -13,6 +13,7 @@ enum WETOutputNaming {
 
     /// Constant names for generated sibling folders.
     nonisolated static let sourcesFolderName = "Sources"
+    /// Legacy raw folder used by older exports for historical compatibility.
     nonisolated static let legacyRawFolderName = "__raw"
 
     /// Returns the output suffix used for a vanity raw variant string (e.g., embedAll, thumbnailsOnly).

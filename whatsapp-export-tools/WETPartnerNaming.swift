@@ -1,6 +1,8 @@
 import Foundation
 
+/// Utility helpers for normalizing partner folder names coming from WhatsApp exports.
 enum WETPartnerNaming {
+    /// Carries both the original and normalized folder name so callers can detect changes.
     struct NormalizationResult: Equatable {
         let original: String
         let normalized: String
@@ -10,11 +12,13 @@ enum WETPartnerNaming {
         }
     }
 
-    static func normalizedPartnerFolderName(_ raw: String, maxLen: Int = 120) -> String {
+        /// Returns a normalized folder name truncated/sanitized to `maxLen`.
+        static func normalizedPartnerFolderName(_ raw: String, maxLen: Int = 120) -> String {
         normalizePartnerFolderName(raw, maxLen: maxLen).normalized
     }
 
-    static func normalizePartnerFolderName(_ raw: String, maxLen: Int = 120) -> NormalizationResult {
+        /// Deduplicates symmetric names (e.g., "Anna Anna") and trims unsafe characters.
+        static func normalizePartnerFolderName(_ raw: String, maxLen: Int = 120) -> NormalizationResult {
         let collapsed = normalizedWhitespace(raw)
         let trimmed = collapsed.trimmingCharacters(in: .whitespacesAndNewlines)
         let tokens = trimmed.split(separator: " ")
@@ -37,7 +41,8 @@ enum WETPartnerNaming {
         return NormalizationResult(original: trimmed, normalized: normalized)
     }
 
-    static func safeFolderName(_ s: String, maxLen: Int = 120) -> String {
+        /// Ensures the folder name contains no forbidden characters and respects the `maxLen` limit.
+        static func safeFolderName(_ s: String, maxLen: Int = 120) -> String {
         var x = s.precomposedStringWithCanonicalMapping
             .replacingOccurrences(of: "/", with: " ")
             .replacingOccurrences(of: ":", with: " ")
@@ -54,7 +59,8 @@ enum WETPartnerNaming {
         return x
     }
 
-    private static func normalizedWhitespace(_ raw: String) -> String {
+        /// Collapses control characters and repeated whitespace to single spaces.
+        private static func normalizedWhitespace(_ raw: String) -> String {
         let filteredScalars = raw.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }
         let cleaned = String(String.UnicodeScalarView(filteredScalars))
         let normalized = cleaned.precomposedStringWithCanonicalMapping
