@@ -2,6 +2,7 @@ import Foundation
 import AppKit
 
 @MainActor
+/// Ensures replay mode only triggers when Sources are explicitly provided and rejects legacy output folders.
 struct WETReplayGuardrailsCheck {
     static let isEnabled: Bool = ProcessInfo.processInfo.environment["WET_REPLAY_GUARDRAILS_CHECK"] == "1"
     private static var didRun = false
@@ -17,6 +18,7 @@ struct WETReplayGuardrailsCheck {
         var errorDescription: String? { message }
     }
 
+    /// Builds fixture outputs, exercises `resolveInputSnapshot`, and verifies guardrail expectations before printing PASS/FAIL.
     private static func run() {
         let root = fixtureRoot()
         let outputWithSources = root.appendingPathComponent("output_with_sources", isDirectory: true)
@@ -86,6 +88,7 @@ struct WETReplayGuardrailsCheck {
         }
     }
 
+    /// Resolves the fixture directory for this guardrail, allowing environment overrides in CI/local runs.
     private static func fixtureRoot() -> URL {
         if let override = ProcessInfo.processInfo.environment["WET_REPLAY_GUARDRAILS_FIXTURE_ROOT"], !override.isEmpty {
             return URL(fileURLWithPath: override, isDirectory: true)
@@ -95,6 +98,7 @@ struct WETReplayGuardrailsCheck {
             .appendingPathComponent("_local/fixtures/wet/replay-guardrails", isDirectory: true)
     }
 
+    /// Creates an export structure that contains a `Sources` folder next to HTML/manifest artifacts.
     private static func seedOutputWithSources(at root: URL) throws {
         let fm = FileManager.default
         try fm.createDirectory(at: root, withIntermediateDirectories: true)
@@ -112,6 +116,7 @@ struct WETReplayGuardrailsCheck {
         try "{}".write(to: manifest, atomically: true, encoding: .utf8)
     }
 
+    /// Creates an old-style export without `Sources` to verify it is rejected by the guardrail.
     private static func seedLegacyOutput(at root: URL) throws {
         let fm = FileManager.default
         try fm.createDirectory(at: root, withIntermediateDirectories: true)

@@ -8,6 +8,7 @@
 import SwiftUI
 import AppKit
 
+/// Represents the two supported UI locales so the user can switch language without restarting.
 enum AppLanguage: String, CaseIterable, Identifiable {
     case en
     case de
@@ -19,6 +20,7 @@ enum AppLanguage: String, CaseIterable, Identifiable {
     }
 }
 
+/// Main app entry that wires diagnostics, language selection, and conditional debug checks into the lifecycle.
 @main
 struct whatsapp_export_toolsApp: App {
     @StateObject private var diagnosticsLog = DiagnosticsLogStore()
@@ -28,6 +30,7 @@ struct whatsapp_export_toolsApp: App {
         AppLanguage(rawValue: appLanguageRaw) ?? .en
     }
 
+    /// Launch-time task that runs all enabled guardrail/spec checks before the UI appears.
     init() {
         Task { @MainActor in
             WETBareDomainPreviewCheck.runIfNeeded()
@@ -47,8 +50,10 @@ struct whatsapp_export_toolsApp: App {
         }
     }
 
+    /// Primary window group for the export UI plus diagnostics overlay windows.
     var body: some Scene {
         WindowGroup("wet.app.windowTitle") {
+            // Shows either the active gate-check banner or the export UI.
             Group {
                 if WETBareDomainPreviewCheck.isEnabled {
                     Text("wet.checks.preview")
@@ -130,12 +135,14 @@ struct whatsapp_export_toolsApp: App {
                 AIGlowSnapshotRunner.runIfNeeded()
             }
         }
+        // Default size gives enough horizontal real estate for the export controls.
         .defaultSize(width: 980, height: 780)
         .commands {
             DiagnosticsLogCommands()
             LanguageCommands()
         }
 
+        // A separate window exposing the diagnostics console.
         WindowGroup("wet.diagnostics.title", id: DiagnosticsLogView.windowID) {
             DiagnosticsLogView()
                 .environmentObject(diagnosticsLog)
