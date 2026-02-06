@@ -19,6 +19,11 @@ struct WETDeterminismCheck {
         let mtime: Date
     }
 
+    private struct PayloadManifestSummary {
+        let fileCount: Int
+        let sha256: String
+    }
+
     private static func run() {
         let folderRoot = rootURL(
             envKey: "WET_DETERMINISM_FOLDER_ROOT",
@@ -67,6 +72,13 @@ struct WETDeterminismCheck {
             let shared = Set(folderSnapshot.keys).intersection(zipSnapshot.keys)
             let shaDiff = shared.filter { folderSnapshot[$0]?.sha256 != zipSnapshot[$0]?.sha256 }
             let shaDiffSorted = shaDiff.sorted()
+
+            let folderPayload = payloadManifestSummary(from: folderSnapshot)
+            let zipPayload = payloadManifestSummary(from: zipSnapshot)
+            let payloadMatch = folderPayload.sha256 == zipPayload.sha256
+            print("PAYLOAD-MANIFEST: files=\(folderPayload.fileCount) sha256=\(folderPayload.sha256)")
+            print("PAYLOAD-MANIFEST: files=\(zipPayload.fileCount) sha256=\(zipPayload.sha256)")
+            print("WET_DETERMINISM_CHECK: payload-match=\(payloadMatch)")
 
             let mdRel = mainMarkdownPath(in: folderSnapshot) ?? mainMarkdownPath(in: zipSnapshot)
             let mdDiff: Bool = {
@@ -117,7 +129,7 @@ struct WETDeterminismCheck {
                 print("WET_DETERMINISM_CHECK: mtime-drift ±3600s detected count=\(driftCount) ratio=\(String(format: "%.2f", driftRatio))")
             }
 
-            let hasDiffs = !onlyFolder.isEmpty || !onlyZip.isEmpty || !shaDiff.isEmpty || mdDiff || driftDetected || zipMtimeDriftDetected
+            let hasDiffs = !onlyFolder.isEmpty || !onlyZip.isEmpty || !shaDiff.isEmpty || mdDiff || !payloadMatch || driftDetected || zipMtimeDriftDetected
             if hasDiffs {
                 print("WET_DETERMINISM_CHECK: FAIL")
             } else {
@@ -152,13 +164,13 @@ struct WETDeterminismCheck {
         let fm = FileManager.default
         var out: [String: FileInfo] = [:]
 
-        guard let e = fm.enumerator(at: root, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else {
+        guard let e = fm.enumerator(at: root, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsPackageDescendants]) else {
             return out
         }
 
         for case let url as URL in e {
-            let rel = url.path.replacingOccurrences(of: root.path + "/", with: "")
-            if rel.hasSuffix(".DS_Store") { continue }
+            guard let rel = normalizedRelPath(root: root, url: url) else { continue }
+            if isMacOSNoisePath(rel) { continue }
 
             let values = try url.resourceValues(forKeys: [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey])
             if values.isDirectory == true { continue }
@@ -198,5 +210,38 @@ struct WETDeterminismCheck {
     private static func sha256Hex(_ data: Data) -> String {
         let digest = SHA256.hash(data: data)
         return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func normalizedRelPath(root: URL, url: URL) -> String? {
+        let rootPath = root.standardizedFileURL.path.hasSuffix("/") ? root.standardizedFileURL.path : root.standardizedFileURL.path + "/"
+        let fullPath = url.standardizedFileURL.path
+        guard fullPath.hasPrefix(rootPath) else { return nil }
+        var rel = String(fullPath.dropFirst(rootPath.count))
+        if rel.hasPrefix("/") { rel.removeFirst() }
+        guard !rel.isEmpty else { return nil }
+        return rel.precomposedStringWithCanonicalMapping.replacingOccurrences(of: "\\", with: "/")
+    }
+
+    private static func isMacOSNoisePath(_ rel: String) -> Bool {
+        for comp in rel.split(separator: "/") {
+            let c = String(comp)
+            let lower = c.lowercased()
+            if lower == ".ds_store" { return true }
+            if lower == "__macosx" { return true }
+            if lower == ".spotlight-v100" { return true }
+            if lower == ".fseventsd" { return true }
+            if c.hasPrefix("._") { return true }
+        }
+        return false
+    }
+
+    private static func payloadManifestSummary(from snapshot: [String: FileInfo]) -> PayloadManifestSummary {
+        let lines = snapshot
+            .map { key, info in (key, info) }
+            .sorted { $0.0.utf8.lexicographicallyPrecedes($1.0.utf8) }
+            .map { rel, info in "\(rel)\t\(info.size)\t\(info.sha256)" }
+        let body = lines.joined(separator: "\n") + "\n"
+        let hash = sha256Hex(Data(body.utf8))
+        return PayloadManifestSummary(fileCount: lines.count, sha256: hash)
     }
 }

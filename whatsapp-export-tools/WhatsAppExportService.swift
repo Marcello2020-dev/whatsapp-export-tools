@@ -1794,6 +1794,7 @@ public enum WhatsAppExportService {
             let replayContext = try resolveReplayContext(for: input, isDirectory: true)
             let effectiveRoot = replayContext?.effectiveRoot ?? input
             let (chatURL, exportDir) = try resolveTranscript(in: effectiveRoot)
+            logSourceManifestIfNeeded(root: exportDir)
             let provenance = WETSourceProvenance(
                 inputKind: .folder,
                 detectedFolderURL: exportDir,
@@ -1828,6 +1829,7 @@ public enum WhatsAppExportService {
                     overridePartnerRaw: overridePartnerRaw
                 )
                 let (chatURL, exportDir) = try resolveTranscript(in: effectiveRoot)
+                logSourceManifestIfNeeded(root: exportDir)
                 let provenance = WETSourceProvenance(
                     inputKind: .zip,
                     detectedFolderURL: exportDir,
@@ -1856,6 +1858,7 @@ public enum WhatsAppExportService {
         if lowerName == "chat.txt" || lowerName == "_chat.txt" {
             let replayContext = try resolveReplayContext(for: input, isDirectory: false)
             let exportDir = input.deletingLastPathComponent()
+            logSourceManifestIfNeeded(root: exportDir)
             let provenance = WETSourceProvenance(
                 inputKind: .folder,
                 detectedFolderURL: exportDir,
@@ -4241,6 +4244,172 @@ public enum WhatsAppExportService {
         try fm.createDirectory(at: url, withIntermediateDirectories: true)
     }
 
+    nonisolated private static func normalizedRelativePath(from root: URL, to url: URL) -> String? {
+        let base = root.standardizedFileURL.path
+        let full = url.standardizedFileURL.path
+        let prefix = base.hasSuffix("/") ? base : base + "/"
+        guard full.hasPrefix(prefix) else { return nil }
+        var rel = String(full.dropFirst(prefix.count))
+        if rel.hasPrefix("/") { rel.removeFirst() }
+        guard !rel.isEmpty else { return nil }
+        return rel.precomposedStringWithCanonicalMapping.replacingOccurrences(of: "\\", with: "/")
+    }
+
+    nonisolated private static func isMacOSNoiseComponent(_ component: String) -> Bool {
+        let lower = component.lowercased()
+        if lower == ".ds_store" { return true }
+        if lower == "__macosx" { return true }
+        if lower == ".spotlight-v100" { return true }
+        if lower == ".fseventsd" { return true }
+        if component.hasPrefix("._") { return true }
+        return false
+    }
+
+    nonisolated private static func isMacOSNoiseRelativePath(_ relPath: String) -> Bool {
+        let rel = relPath.replacingOccurrences(of: "\\", with: "/")
+        for comp in rel.split(separator: "/") {
+            if isMacOSNoiseComponent(String(comp)) { return true }
+        }
+        return false
+    }
+
+    @discardableResult
+    nonisolated private static func purgeMacOSNoise(in root: URL) throws -> Int {
+        let fm = FileManager.default
+        guard let en = fm.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsPackageDescendants]
+        ) else {
+            return 0
+        }
+
+        var victims: [URL] = []
+        for case let url as URL in en {
+            guard let rel = normalizedRelativePath(from: root, to: url) else { continue }
+            guard isMacOSNoiseRelativePath(rel) else { continue }
+            victims.append(url)
+            if (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
+                en.skipDescendants()
+            }
+        }
+
+        victims.sort { lhs, rhs in
+            let ld = lhs.pathComponents.count
+            let rd = rhs.pathComponents.count
+            if ld == rd { return lhs.path > rhs.path }
+            return ld > rd
+        }
+
+        var removed = 0
+        for url in victims {
+            if fm.fileExists(atPath: url.path) {
+                do {
+                    try fm.removeItem(at: url)
+                    removed += 1
+                } catch {
+                    if WETLog.isDebugEnabled() {
+                        WETLog.dbg("ZIP cleanup: failed to remove \(url.lastPathComponent)")
+                    }
+                }
+            }
+        }
+        return removed
+    }
+
+    private struct SourceManifestEntry {
+        let path: String
+        let size: UInt64
+        let sha256: String
+    }
+
+    private struct SourceManifestSummary {
+        let fileCount: Int
+        let sha256: String
+    }
+
+    nonisolated private static func sha256Hex(forFile url: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while true {
+            let chunk = try handle.read(upToCount: 1_048_576) ?? Data()
+            if chunk.isEmpty { break }
+            hasher.update(data: chunk)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    nonisolated private static func buildSourceManifestSummary(root: URL) throws -> SourceManifestSummary {
+        let fm = FileManager.default
+        guard let en = fm.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
+            options: [.skipsPackageDescendants]
+        ) else {
+            let emptyDigest = SHA256.hash(data: Data("\n".utf8)).map { String(format: "%02x", $0) }.joined()
+            return SourceManifestSummary(fileCount: 0, sha256: emptyDigest)
+        }
+
+        var entries: [SourceManifestEntry] = []
+        for case let url as URL in en {
+            let rv = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+            guard rv?.isRegularFile == true else { continue }
+            guard let rel = normalizedRelativePath(from: root, to: url) else { continue }
+            if isMacOSNoiseRelativePath(rel) { continue }
+            let size = UInt64(rv?.fileSize ?? 0)
+            let sha = try sha256Hex(forFile: url)
+            entries.append(SourceManifestEntry(path: rel, size: size, sha256: sha))
+        }
+
+        entries.sort { $0.path.utf8.lexicographicallyPrecedes($1.path.utf8) }
+        let body = entries.map { "\($0.path)\t\($0.size)\t\($0.sha256)" }.joined(separator: "\n") + "\n"
+        let manifestHash = SHA256.hash(data: Data(body.utf8)).map { String(format: "%02x", $0) }.joined()
+        return SourceManifestSummary(fileCount: entries.count, sha256: manifestHash)
+    }
+
+    nonisolated private static func logSourceManifestIfNeeded(root: URL) {
+        guard WETLog.isDebugEnabled() else { return }
+        do {
+            let summary = try buildSourceManifestSummary(root: root)
+            WETLog.dbg("SRC-MANIFEST: files=\(summary.fileCount) sha256=\(summary.sha256)")
+        } catch {
+            WETLog.dbg("SRC-MANIFEST: failed to build (\(error.localizedDescription))")
+        }
+    }
+
+    nonisolated private static func renderManifestVariant(for outputURL: URL) -> String {
+        let lower = outputURL.lastPathComponent.lowercased()
+        if lower.hasSuffix(".md") { return "markdown" }
+        if lower.hasSuffix("-\(WETOutputNaming.sidecarToken.lowercased()).html") || lower.hasSuffix("-sdc.html") {
+            return "sidecar"
+        }
+        if lower.hasSuffix("-\(WETOutputNaming.maxHTMLToken.lowercased()).html") || lower.hasSuffix("-max.html") {
+            return "max"
+        }
+        if lower.hasSuffix("-\(WETOutputNaming.midHTMLToken.lowercased()).html") || lower.hasSuffix("-mid.html") {
+            return "mid"
+        }
+        if lower.hasSuffix("-\(WETOutputNaming.mailHTMLToken.lowercased()).html") || lower.hasSuffix("-min.html") {
+            return "mail"
+        }
+        if lower.hasSuffix(".html") { return "html" }
+        if lower.hasSuffix(".json") { return "json" }
+        return outputURL.pathExtension.isEmpty ? "file" : outputURL.pathExtension.lowercased()
+    }
+
+    nonisolated private static func logRenderManifestIfNeeded(outputURL: URL) {
+        guard WETLog.isDebugEnabled() else { return }
+        guard FileManager.default.fileExists(atPath: outputURL.path) else { return }
+        do {
+            let sha = try sha256Hex(forFile: outputURL)
+            let variant = renderManifestVariant(for: outputURL)
+            WETLog.dbg("RENDER-MANIFEST: variant=\(variant) files=1 sha256=\(sha)")
+        } catch {
+            WETLog.dbg("RENDER-MANIFEST: variant=\(renderManifestVariant(for: outputURL)) failed")
+        }
+    }
+
     private struct ZipTimestampEntry {
         let path: String
         let utLocal: Date?
@@ -5245,6 +5414,11 @@ public enum WhatsAppExportService {
                 }
             }
 
+            let removedNoise = try purgeMacOSNoise(in: destDir)
+            if WETLog.isDebugEnabled(), removedNoise > 0 {
+                WETLog.dbg("ZIP cleanup: removed macOS noise entries=\(removedNoise)")
+            }
+
             try validateExtractionNonEmpty(destDir: destDir, zipURL: zipURL)
 
             let normalize = ProcessInfo.processInfo.environment["WET_ZIP_NORMALIZE_TIMESTAMPS"] != "0"
@@ -5296,6 +5470,7 @@ public enum WhatsAppExportService {
         var matches: [URL] = []
         var exportDirs: [URL] = []
         for url in entries {
+            if isMacOSNoiseComponent(url.lastPathComponent) { continue }
             let rv = try? url.resourceValues(forKeys: [.isDirectoryKey])
             guard rv?.isDirectory == true else { continue }
             for name in candidates {
@@ -5943,6 +6118,10 @@ public enum WhatsAppExportService {
         return rel.isEmpty ? nil : rel
     }
 
+    nonisolated private static func normalizedAttachmentLookupKey(_ fileName: String) -> String {
+        fileName.precomposedStringWithCanonicalMapping
+    }
+
     // ---------------------------
     // Sorted attachments folder (standalone export)
     // ---------------------------
@@ -6049,9 +6228,16 @@ public enum WhatsAppExportService {
                 let rv = try? u.resourceValues(forKeys: [.isRegularFileKey])
                 if rv?.isRegularFile != true { continue }
                 fileCount += 1
-                let name = u.lastPathComponent
-                if index[name] == nil, let rel = relativePath(from: base, to: u) {
-                    index[name] = rel
+                guard let relRaw = relativePath(from: base, to: u) else { continue }
+                let rel = relRaw.precomposedStringWithCanonicalMapping.replacingOccurrences(of: "\\", with: "/")
+                if isMacOSNoiseRelativePath(rel) { continue }
+                let key = normalizedAttachmentLookupKey(u.lastPathComponent)
+                if let existing = index[key] {
+                    if rel.utf8.lexicographicallyPrecedes(existing.utf8) {
+                        index[key] = rel
+                    }
+                } else {
+                    index[key] = rel
                 }
             }
         }
@@ -6108,7 +6294,8 @@ public enum WhatsAppExportService {
 
         // 3) Last resort: resolve via cached index (avoids per-attachment recursion).
         let index = attachmentIndexSnapshot(for: base)
-        if let rel = index.relPathByName[fileName] {
+        let key = normalizedAttachmentLookupKey(fileName)
+        if let rel = index.relPathByName[key] {
             let candidate = base.appendingPathComponent(rel)
             if fm.fileExists(atPath: candidate.path) {
                 return candidate
@@ -8662,6 +8849,7 @@ nonisolated private static func stageThumbnailForExport(
             try? FileManager.default.removeItem(at: outHTML)
         }
         try FileManager.default.moveItem(at: tempHTML, to: outHTML)
+        logRenderManifestIfNeeded(outputURL: outHTML)
         let writeDuration = ProcessInfo.processInfo.systemUptime - writeStart
         if let perfLabel {
             recordHTMLWrite(label: perfLabel, duration: writeDuration, bytes: bytesWritten)
@@ -8849,6 +9037,7 @@ nonisolated private static func stageThumbnailForExport(
         }
 
         try out.joined(separator: "\n").write(to: outMD, atomically: true, encoding: .utf8)
+        logRenderManifestIfNeeded(outputURL: outMD)
     }
     /// Best-effort: make dest carry the same filesystem timestamps as source.
     /// We intentionally do not throw if the filesystem refuses to set attributes.
@@ -8984,9 +9173,15 @@ nonisolated private static func stageThumbnailForExport(
         let manifestName = "\(baseName).manifest.json"
         let shaName = "\(baseName).sha256"
 
+        let diagnosticsEnabled = debugEnabled || WETLog.isDebugEnabled()
+
         func log(_ msg: String) {
-            guard debugEnabled else { return }
-            debugLog?(msg)
+            guard diagnosticsEnabled else { return }
+            if let debugLog {
+                debugLog(msg)
+            } else {
+                WETLog.dbg(msg)
+            }
         }
 
         let requiredFiles: [URL] = artifactRelativePaths.map { root.appendingPathComponent($0) }
@@ -9036,6 +9231,7 @@ nonisolated private static func stageThumbnailForExport(
             if name.hasPrefix("._") { return true }
             if name.hasPrefix(".") { return true }
             if name.hasPrefix(".wa_export_tmp_") { return true }
+            if url.pathComponents.contains(where: { isMacOSNoiseComponent($0) }) { return true }
             return false
         }
 
@@ -9137,6 +9333,7 @@ nonisolated private static func stageThumbnailForExport(
         let shaContent = shaLines.joined(separator: "\n") + "\n"
         let shaData = shaContent.data(using: .utf8) ?? Data()
         let bundleHash = SHA256.hash(data: shaData).map { String(format: "%02x", $0) }.joined()
+        log("PAYLOAD-MANIFEST: files=\(sortedEntries.count) sha256=\(bundleHash)")
 
         let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown"
         let buildNumber = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "unknown"
