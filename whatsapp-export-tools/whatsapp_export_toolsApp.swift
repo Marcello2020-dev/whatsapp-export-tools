@@ -139,6 +139,7 @@ struct whatsapp_export_toolsApp: App {
         .defaultSize(width: 980, height: 780)
         .commands {
             DiagnosticsLogCommands()
+            HelpCommands()
             LanguageCommands()
         }
 
@@ -146,6 +147,11 @@ struct whatsapp_export_toolsApp: App {
         WindowGroup("wet.diagnostics.title", id: DiagnosticsLogView.windowID) {
             DiagnosticsLogView()
                 .environmentObject(diagnosticsLog)
+                .environment(\.locale, appLanguage.locale)
+        }
+
+        WindowGroup("Chat Export Studio Help", id: WETHelpView.windowID) {
+            WETHelpView()
                 .environment(\.locale, appLanguage.locale)
         }
     }
@@ -332,6 +338,27 @@ private struct DiagnosticsLogCommands: Commands {
             Button("wet.diagnostics.menuItem") {
                 openWindow(id: DiagnosticsLogView.windowID)
             }
+        }
+    }
+}
+
+private struct HelpCommands: Commands {
+    @Environment(\.openWindow) private var openWindow
+    @AppStorage("app.language") private var appLanguageRaw: String = AppLanguage.de.rawValue
+
+    private var menuLabel: String {
+        if appLanguageRaw == AppLanguage.de.rawValue {
+            return "Chat Export Studio Hilfe"
+        }
+        return "Chat Export Studio Help"
+    }
+
+    var body: some Commands {
+        CommandGroup(replacing: .help) {
+            Button(menuLabel) {
+                openWindow(id: WETHelpView.windowID)
+            }
+            .keyboardShortcut("/", modifiers: [.command, .shift])
         }
     }
 }

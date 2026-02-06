@@ -1268,8 +1268,15 @@ struct ContentView: View {
 
     private var overviewSummary: some View {
         VStack(alignment: .leading, spacing: 6) {
-            if let badgeKey = inputKindBadgeKey {
-                Text(LocalizedStringKey(badgeKey))
+            if inputKindBadgeKey == "wet.input.badge.folder" {
+                Text("wet.input.badge.folder")
+                    .font(.system(size: 11, weight: .semibold))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 2)
+                    .background(Color.black.opacity(0.06))
+                    .clipShape(Capsule())
+            } else if inputKindBadgeKey == "wet.input.badge.zip" {
+                Text("wet.input.badge.zip")
                     .font(.system(size: 11, weight: .semibold))
                     .padding(.horizontal, 8)
                     .padding(.vertical, 2)
@@ -1374,7 +1381,7 @@ struct ContentView: View {
             Text("wet.section.artifacts")
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(.secondary)
-            helpIcon("wet.help.artifacts.header")
+            helpIcon(String(localized: "wet.help.artifacts.header", locale: locale))
         }
     }
 
@@ -1384,7 +1391,7 @@ struct ContentView: View {
                 Toggle(isOn: $exportHTMLMax) {
                     HStack(spacing: 6) {
                         Text("wet.artifacts.max.label")
-                        helpIcon("wet.help.artifacts.max")
+                        helpIcon(String(localized: "wet.help.artifacts.max", locale: locale))
                     }
                 }
                 .accessibilityLabel(Text("wet.artifacts.max.accessibility"))
@@ -1397,7 +1404,7 @@ struct ContentView: View {
                 Toggle(isOn: $exportHTMLMid) {
                     HStack(spacing: 6) {
                         Text("wet.artifacts.compact.label")
-                        helpIcon("wet.help.artifacts.compact")
+                        helpIcon(String(localized: "wet.help.artifacts.compact", locale: locale))
                     }
                 }
                 .accessibilityLabel(Text("wet.artifacts.compact.accessibility"))
@@ -1411,7 +1418,7 @@ struct ContentView: View {
                 Toggle(isOn: $exportHTMLMin) {
                     HStack(spacing: 6) {
                         Text("wet.artifacts.email.label")
-                        helpIcon("wet.help.artifacts.email")
+                        helpIcon(String(localized: "wet.help.artifacts.email", locale: locale))
                     }
                 }
                 .accessibilityLabel(Text("wet.artifacts.email.accessibility"))
@@ -1424,7 +1431,7 @@ struct ContentView: View {
                 Toggle(isOn: $exportMarkdown) {
                     HStack(spacing: 6) {
                         Text("wet.artifacts.markdown.label")
-                        helpIcon("wet.help.artifacts.markdown")
+                        helpIcon(String(localized: "wet.help.artifacts.markdown", locale: locale))
                     }
                 }
                 .accessibilityLabel(Text("wet.artifacts.markdown.accessibility"))
@@ -1450,7 +1457,7 @@ struct ContentView: View {
                         Capsule(style: .continuous)
                             .fill(.white.opacity(0.08))
                     )
-                helpIcon("wet.help.artifacts.sidecar")
+                helpIcon(String(localized: "wet.help.artifacts.sidecar", locale: locale))
             }
         }
         .accessibilityLabel(Text("wet.artifacts.sidecar.accessibility"))
@@ -1467,7 +1474,7 @@ struct ContentView: View {
             Toggle(isOn: $deleteOriginalsAfterSidecar) {
                 HStack(spacing: 6) {
                     Text("wet.source.deleteOriginals.label")
-                    helpIcon("wet.help.source.deleteOriginals")
+                    helpIcon(String(localized: "wet.help.source.deleteOriginals", locale: locale))
                 }
             }
             .accessibilityLabel(Text("wet.source.deleteOriginals.accessibility"))
@@ -1488,7 +1495,7 @@ struct ContentView: View {
         Toggle(isOn: $includeRawArchive) {
             HStack(spacing: 6) {
                 Text("wet.source.copyRaw.label")
-                helpIcon("wet.help.source.copyRaw")
+                helpIcon(String(localized: "wet.help.source.copyRaw", locale: locale))
             }
         }
         .accessibilityLabel(Text("wet.source.copyRaw.accessibility"))
@@ -1508,7 +1515,7 @@ struct ContentView: View {
                     Text("wet.participants.exporter.label")
                         .lineLimit(1)
                         .fixedSize(horizontal: true, vertical: false)
-                    helpIcon("wet.help.participants.exporter")
+                    helpIcon(String(localized: "wet.help.participants.exporter", locale: locale))
                 }
                 .frame(minWidth: Layout.participantsLabelMinWidth, alignment: .leading)
                 .layoutPriority(1)
@@ -1547,7 +1554,7 @@ struct ContentView: View {
                     Text("wet.participants.partner.label")
                         .lineLimit(1)
                         .fixedSize(horizontal: true, vertical: false)
-                    helpIcon("wet.help.participants.partner")
+                    helpIcon(String(localized: "wet.help.participants.partner", locale: locale))
                 }
                 .frame(minWidth: Layout.participantsLabelMinWidth, alignment: .leading)
                 .layoutPriority(1)
@@ -1642,7 +1649,7 @@ struct ContentView: View {
                     Text("wet.participants.phoneOverrides.title")
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(.secondary)
-                    helpIcon("wet.help.participants.phoneOverrides")
+                    helpIcon(String(localized: "wet.help.participants.phoneOverrides", locale: locale))
                 }
 
                 ForEach(phoneOnlyParticipants, id: \.self) { num in
@@ -2264,8 +2271,8 @@ struct ContentView: View {
         WETPartnerNaming.safeFolderName(s, maxLen: maxLen)
     }
 
-    private func helpIcon(_ key: String) -> some View {
-        HelpButton(key: key)
+    private func helpIcon(_ message: String) -> some View {
+        HelpButton(message: message)
     }
 
     private var shouldShowAIGlow: Bool {
@@ -5775,17 +5782,8 @@ private struct WASection<Content: View>: View {
 }
 
 private struct HelpButton: View {
-    let key: String
-    @AppStorage("app.language") private var appLanguageRaw: String = AppLanguage.de.rawValue
+    let message: String
     @State private var isPresented = false
-
-    private var localizedBundle: Bundle {
-        guard let path = Bundle.main.path(forResource: appLanguageRaw, ofType: "lproj"),
-              let bundle = Bundle(path: path) else {
-            return .main
-        }
-        return bundle
-    }
 
     var body: some View {
         Button {
@@ -5801,7 +5799,7 @@ private struct HelpButton: View {
         }
         .buttonStyle(.plain)
         .popover(isPresented: $isPresented, arrowEdge: .bottom) {
-            Text(localizedBundle.localizedString(forKey: key, value: nil, table: nil))
+            Text(message)
                 .font(.system(size: 12))
                 .multilineTextAlignment(.leading)
                 .frame(maxWidth: 360, alignment: .leading)
