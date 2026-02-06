@@ -549,12 +549,24 @@ struct SourceOpsVerificationResult: Sendable {
     let copiedZip: URL?
     let exportDirMatches: Bool
     let zipMatches: Bool?
+    let exportDirTimestampsMatch: Bool
+    let zipTimestampsMatch: Bool?
 
     var deletableOriginals: [URL] {
         var out: [URL] = []
         if exportDirMatches { out.append(originalExportDir) }
         if let zip = originalZip, zipMatches == true { out.append(zip) }
         return out
+    }
+
+    var gateFailures: [String] {
+        // Hard blockers only: timestamps are advisory and must not block deletion.
+        var failures: [String] = []
+        if !exportDirMatches { failures.append("sources-byte-mismatch") }
+        if originalZip != nil {
+            if zipMatches != true { failures.append("zip-byte-mismatch") }
+        }
+        return failures
     }
 }
 
@@ -698,22 +710,36 @@ enum SourceOps {
         exportDir: URL,
         provenance: WETSourceProvenance
     ) -> SourceOpsVerificationResult {
+        let fm = FileManager.default
         let originalDir = provenance.detectedFolderURL.standardizedFileURL
         let rawRoot = rawArchiveDirectory(baseName: baseName, in: exportDir.standardizedFileURL)
         let copiedDir = rawRoot.appendingPathComponent(originalDir.lastPathComponent, isDirectory: true)
 
-        let exportDirMatches = WhatsAppExportService.directoriesEqual(src: originalDir, dst: copiedDir)
+        let exportDirMatches = WhatsAppExportService.directoriesEqual(
+            src: originalDir,
+            dst: copiedDir,
+            requireByteCompare: true
+        )
+        let exportDirTimestampsMatch = WhatsAppExportService.directoriesTimestampsEqual(
+            src: originalDir,
+            dst: copiedDir
+        )
 
-        let originalZip = provenance.originalZipURL
+        let originalZip = provenance.originalZipURL.flatMap { candidate in
+            fm.fileExists(atPath: candidate.path) ? candidate : nil
+        }
         var copiedZip: URL? = nil
         var zipMatches: Bool? = nil
+        var zipTimestampsMatch: Bool? = nil
 
-        if let zip = originalZip, FileManager.default.fileExists(atPath: zip.path) {
+        if let zip = originalZip {
             copiedZip = rawRoot.appendingPathComponent(zip.lastPathComponent)
-            if let copiedZip, FileManager.default.fileExists(atPath: copiedZip.path) {
-                zipMatches = WhatsAppExportService.filesEqual(zip, copiedZip)
+            if let copiedZip, fm.fileExists(atPath: copiedZip.path) {
+                zipMatches = WhatsAppExportService.filesEqual(zip, copiedZip, requireByteCompare: true)
+                zipTimestampsMatch = WhatsAppExportService.fileTimestampsEqual(zip, copiedZip)
             } else {
                 zipMatches = false
+                zipTimestampsMatch = false
             }
         }
 
@@ -723,7 +749,9 @@ enum SourceOps {
             originalZip: originalZip,
             copiedZip: copiedZip,
             exportDirMatches: exportDirMatches,
-            zipMatches: zipMatches
+            zipMatches: zipMatches,
+            exportDirTimestampsMatch: exportDirTimestampsMatch,
+            zipTimestampsMatch: zipTimestampsMatch
         )
     }
 
@@ -2718,7 +2746,7 @@ public enum WhatsAppExportService {
         )
         let copiedDir = baseDir.appendingPathComponent(originalNameAfter, isDirectory: true)
 
-        let exportDirMatches = directoriesEqual(src: originalDir, dst: copiedDir)
+        let exportDirMatches = directoriesEqual(src: originalDir, dst: copiedDir, requireByteCompare: true)
 
         let originalZip = originalZipURL ?? pickSiblingZipURL(sourceDir: originalDir)
         var copiedZip: URL? = nil
@@ -2727,7 +2755,7 @@ public enum WhatsAppExportService {
         if let zip = originalZip {
             copiedZip = baseDir.appendingPathComponent(zip.lastPathComponent)
             if let copiedZip, FileManager.default.fileExists(atPath: copiedZip.path) {
-                zipMatches = filesEqual(zip, copiedZip)
+                zipMatches = filesEqual(zip, copiedZip, requireByteCompare: true)
             } else {
                 zipMatches = false
             }
@@ -10514,7 +10542,7 @@ nonisolated private static func stageThumbnailForExport(
         }.first
     }
 
-    fileprivate nonisolated static func filesEqual(_ a: URL, _ b: URL) -> Bool {
+    fileprivate nonisolated static func filesEqual(_ a: URL, _ b: URL, requireByteCompare: Bool = false) -> Bool {
         let fm = FileManager.default
         guard fm.fileExists(atPath: a.path), fm.fileExists(atPath: b.path) else { return false }
 
@@ -10529,7 +10557,8 @@ nonisolated private static func stageThumbnailForExport(
 
         if sizeA.uint64Value != sizeB.uint64Value { return false }
         if sizeA.uint64Value == 0 { return true }
-        if let mA = attrsA[.modificationDate] as? Date,
+        if !requireByteCompare,
+           let mA = attrsA[.modificationDate] as? Date,
            let mB = attrsB[.modificationDate] as? Date,
            datesMatch(mA, mB) {
             return true
@@ -10555,6 +10584,18 @@ nonisolated private static func stageThumbnailForExport(
         }
 
         return true
+    }
+
+    fileprivate nonisolated static func fileTimestampsEqual(_ a: URL, _ b: URL) -> Bool {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: a.path), fm.fileExists(atPath: b.path) else { return false }
+        guard
+            let attrsA = try? fm.attributesOfItem(atPath: a.path),
+            let attrsB = try? fm.attributesOfItem(atPath: b.path)
+        else {
+            return false
+        }
+        return timestampsMatch(attrsA, attrsB)
     }
 
     private nonisolated static func listRegularFiles(in root: URL) -> [String: URL]? {
@@ -10590,7 +10631,43 @@ nonisolated private static func stageThumbnailForExport(
         return out
     }
 
-    fileprivate nonisolated static func directoriesEqual(src: URL, dst: URL) -> Bool {
+    private nonisolated static func listDirectories(in root: URL) -> [String: URL]? {
+        let fm = FileManager.default
+        let base = root.standardizedFileURL
+        guard fm.fileExists(atPath: base.path) else { return nil }
+
+        guard let en = fm.enumerator(
+            at: base,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else {
+            return nil
+        }
+
+        var out: [String: URL] = [".": base]
+        for case let u as URL in en {
+            let rv = try? u.resourceValues(forKeys: [.isDirectoryKey])
+            guard rv?.isDirectory == true else { continue }
+
+            let fullPath = u.standardizedFileURL.path
+            let basePath = base.path.hasSuffix("/") ? base.path : base.path + "/"
+            guard fullPath.hasPrefix(basePath) else { continue }
+
+            var rel = String(fullPath.dropFirst(basePath.count))
+            if rel.hasPrefix("/") { rel.removeFirst() }
+            if rel.isEmpty { continue }
+
+            out[rel] = u
+        }
+
+        return out
+    }
+
+    fileprivate nonisolated static func directoriesEqual(
+        src: URL,
+        dst: URL,
+        requireByteCompare: Bool = false
+    ) -> Bool {
         guard let srcFiles = listRegularFiles(in: src) else { return false }
         guard let dstFiles = listRegularFiles(in: dst) else { return false }
 
@@ -10598,7 +10675,29 @@ nonisolated private static func stageThumbnailForExport(
 
         for (rel, srcURL) in srcFiles {
             guard let dstURL = dstFiles[rel] else { return false }
-            if !filesEqual(srcURL, dstURL) { return false }
+            if !filesEqual(srcURL, dstURL, requireByteCompare: requireByteCompare) { return false }
+        }
+
+        return true
+    }
+
+    fileprivate nonisolated static func directoriesTimestampsEqual(src: URL, dst: URL) -> Bool {
+        guard let srcFiles = listRegularFiles(in: src) else { return false }
+        guard let dstFiles = listRegularFiles(in: dst) else { return false }
+        if srcFiles.count != dstFiles.count { return false }
+
+        for (rel, srcURL) in srcFiles {
+            guard let dstURL = dstFiles[rel] else { return false }
+            if !fileTimestampsEqual(srcURL, dstURL) { return false }
+        }
+
+        guard let srcDirs = listDirectories(in: src) else { return false }
+        guard let dstDirs = listDirectories(in: dst) else { return false }
+        if srcDirs.count != dstDirs.count { return false }
+
+        for (rel, srcURL) in srcDirs {
+            guard let dstURL = dstDirs[rel] else { return false }
+            if !fileTimestampsEqual(srcURL, dstURL) { return false }
         }
 
         return true

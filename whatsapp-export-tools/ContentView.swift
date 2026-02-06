@@ -4317,14 +4317,6 @@ struct ContentView: View {
                 throw error
             }
 
-            if runContext.wantsDeleteOriginals {
-                await offerSourceDeletionIfPossible(
-                    context: runContext,
-                    baseName: baseName,
-                    exportDir: workResult.exportDir
-                )
-            }
-
             let totalDuration = ProcessInfo.processInfo.systemUptime - runStartUptime
             logger.log("Completed: \(Self.formatDuration(totalDuration))")
             var published: [String] = []
@@ -4360,6 +4352,15 @@ struct ContentView: View {
             lastRunFailureArtifact = nil
             currentRunStep = nil
             runStatus = .completed
+
+            // Delete-originals prompt is intentionally the final action of a successful run.
+            if runContext.wantsDeleteOriginals {
+                await offerSourceDeletionIfPossible(
+                    context: runContext,
+                    baseName: baseName,
+                    exportDir: workResult.exportDir
+                )
+            }
         } catch {
             if error is CancellationError {
                 logger.log("Cancelled.")
@@ -5429,6 +5430,12 @@ struct ContentView: View {
 
         let candidates = verification.deletableOriginals
         if candidates.isEmpty {
+            let reasons = verification.gateFailures
+            if !reasons.isEmpty {
+                appendLog("Delete Originals skipped: verification gate failed (\(reasons.joined(separator: ", "))).")
+            } else {
+                appendLog("Delete Originals skipped: no safely deletable originals found.")
+            }
             return
         }
 
