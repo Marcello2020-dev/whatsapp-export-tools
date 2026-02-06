@@ -4,14 +4,17 @@ import AppKit
 import UniformTypeIdentifiers
 import CryptoKit
 
+/// Top-level export interface that manages the UI state for selecting WhatsApp sources, running exports, and showing results.
 struct ContentView: View {
 
+    /// Represents which artifacts (HTML/MD) finished exports produced for the UI to present.
     private struct ExportResult: Sendable {
         let primaryHTML: URL?
         let htmls: [URL]
         let md: URL?
     }
 
+    /// Captures all inputs, overrides, and toggles that drive the export run logic.
     private struct ExportContext: Sendable {
         let chatURL: URL
         let outDir: URL
@@ -51,6 +54,7 @@ struct ContentView: View {
         let htmlLabel: String
     }
 
+    /// Holds the resolved export paths produced by the low-level pipeline for the UI to summarize.
     private struct ExportWorkResult: Sendable {
         let exportDir: URL
         let baseHTMLName: String
@@ -122,6 +126,7 @@ struct ContentView: View {
         }
     }
 
+    /// Captures which combination of steps the user requested so the UI can show progress and reuse the same plan during retries.
     private struct RunPlan: Sendable {
         let variants: [HTMLVariant]
         let wantsMD: Bool
@@ -155,6 +160,7 @@ struct ContentView: View {
         }
     }
 
+    /// Async actor that sequences log messages and UI step state updates safely across Task boundaries.
     private actor ExportProgressReporter {
         private let log: @Sendable (String) -> Void
         private let onStepStart: @Sendable (RunStep) -> Void
@@ -184,6 +190,7 @@ struct ContentView: View {
         }
     }
 
+    /// Ensures we run only `limit` export stages concurrently to keep the thread pool stable.
     private actor StageLimiter {
         private var permits: Int
         private var waiters: [CheckedContinuation<Void, Never>] = []
@@ -852,6 +859,8 @@ struct ContentView: View {
 
     // MARK: - State
 
+    /// All SwiftUI state that drives the picker, toggle, and run-status controls on the main surface.
+
     @State private var lastResult: ExportResult?
 
     @State private var chatURL: URL?
@@ -922,12 +931,14 @@ struct ContentView: View {
     @State private var exportTask: Task<Void, Never>? = nil
     @State private var cancelRequested: Bool = false
 
+    /// Environment helpers for opening auxiliary windows, formatting text, and storing diagnostic logs.
     @Environment(\.openWindow) private var openWindow
     @Environment(\.locale) private var locale
     @EnvironmentObject private var diagnosticsLog: DiagnosticsLogStore
 
     // MARK: - View
 
+    /// Orchestrates the main UI layout, including background, tabs, and run controls.
     var body: some View {
         mainContent
         .padding(16)
@@ -969,6 +980,7 @@ struct ContentView: View {
         .frame(minWidth: 980, minHeight: 720)
     }
 
+    /// Scrollable stack that renders header, tab selector, and active tab content.
     private var mainContent: some View {
         ScrollView(.vertical) {
             VStack(alignment: .leading, spacing: 12) {
@@ -984,6 +996,7 @@ struct ContentView: View {
         .scrollClipDisabled(true)
     }
 
+    /// Switch to toggle between import/source configuration and run outputs.
     private var tabSelector: some View {
         Picker("wet.tab.selector", selection: $selectedTab) {
             Text("wet.tab.input")
@@ -995,6 +1008,7 @@ struct ContentView: View {
         .accessibilityLabel(Text("wet.tab.selector.accessibility"))
     }
 
+    /// Shows either input configuration controls or export results depending on the selected tab.
     @ViewBuilder
     private var tabContent: some View {
         switch selectedTab {
@@ -1009,6 +1023,7 @@ struct ContentView: View {
         }
     }
 
+    /// Layout for output toggles and the run card.
     private var outputTabContent: some View {
         VStack(alignment: .leading, spacing: 12) {
             optionsSection
@@ -1016,6 +1031,7 @@ struct ContentView: View {
         }
     }
 
+    /// Encapsulated card that wraps the run controls and glows while exports are running.
     private var runCard: some View {
         runSection
             .waCard()

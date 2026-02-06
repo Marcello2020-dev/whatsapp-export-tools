@@ -40,6 +40,7 @@ import UniformTypeIdentifiers
 
 // MARK: - Central Debug Logger
 
+/// Lightweight logging helper that can be toggled on/off globally and marshals output through a lock.
 enum WETLog {
     nonisolated private static let lock = NSLock()
     nonisolated(unsafe) private static var debugEnabled: Bool = false
@@ -70,6 +71,7 @@ enum WETLog {
 
 // MARK: - Time Policy (Deterministic)
 
+/// Deterministic formatting helpers so exported timestamps are stable regardless of the host locale.
 enum TimePolicy {
     nonisolated static let canonicalTimeZone: TimeZone =
         TimeZone(identifier: "Europe/Berlin") ?? TimeZone(secondsFromGMT: 0)!
@@ -338,6 +340,7 @@ public struct WAInputSnapshot: Sendable {
     public let inputMode: WETInputMode
 }
 
+/// Describes whether the run came from a folder or ZIP and helps the UI drive permission requests.
 public enum WETInputKind: Sendable {
     case folder
     case zip
@@ -847,6 +850,7 @@ enum SourceOps {
 
 // MARK: - Service
 
+/// Entry point and helper set for orchestrating WhatsApp exports, raw archive copies, and sidecar handling.
 public enum WhatsAppExportService {
 
     // ---------------------------
@@ -961,6 +965,7 @@ public enum WhatsAppExportService {
         try! NSRegularExpression(pattern: #"^you left\.?$"#),
     ]
 
+    /// Intermediate result from parsing the chat transcript so downstream steps only see filtered symbols.
     struct PreparedExport: Sendable {
         let messages: [WAMessage]
         let meName: String
