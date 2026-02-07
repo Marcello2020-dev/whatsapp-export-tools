@@ -8107,6 +8107,34 @@ nonisolated private static func stageThumbnailForExport(
           opacity:.8;
         }
         .wrap{max-width: 980px; margin: 0 auto; padding: 18px 12px 28px;}
+        .wa-history-gate{
+          margin: 0 0 12px;
+          background: rgba(255,255,255,.78);
+          border-radius: 12px;
+          padding: 10px 12px;
+          box-shadow: var(--shadow);
+          display:flex;
+          align-items:center;
+          justify-content:space-between;
+          gap:10px;
+          flex-wrap:wrap;
+        }
+        .wa-history-label{
+          font-size:14px;
+          color:#2b2b2b;
+          opacity:.9;
+        }
+        .wa-history-gate button{
+          border:0;
+          border-radius:10px;
+          padding:8px 12px;
+          font-size:14px;
+          font-weight:600;
+          background:#1f6feb;
+          color:#fff;
+          cursor:pointer;
+        }
+        .wa-history-gate button:hover{ filter: brightness(1.06); }
         .header{
           background: rgba(255,255,255,.75);
           backdrop-filter: blur(6px);
@@ -8144,6 +8172,12 @@ nonisolated private static func stageThumbnailForExport(
           display:flex;
           margin: 10px 0;
           width:100%;
+        }
+        @supports (content-visibility: auto){
+          .row{
+            content-visibility:auto;
+            contain-intrinsic-size: 1px 140px;
+          }
         }
         .row.me{justify-content:flex-end;}
         .row.other{justify-content:flex-start;}
@@ -8492,30 +8526,336 @@ nonisolated private static func stageThumbnailForExport(
       }
     }
 
-    // Initialize all embedded audio/video players by wiring their src to a Blob URL.
-    // This keeps the export single-file while still giving a real mini-player.
+    // Lazily initialize embedded audio/video sources.
+    // Safari can struggle when many large base64 media payloads are decoded eagerly on page load.
+    function waAttachLazyEmbedPlayer(node){
+      if(!node) return;
+      var id = node.getAttribute('data-wa-embed');
+      if(!id) return;
+
+      var loaded = false;
+      var blobURL = null;
+
+      function ensureLoaded(){
+        if(loaded) return true;
+        var url = waCreateEmbedURL(id);
+        if(!url) return false;
+        node.src = url;
+        blobURL = url;
+        loaded = true;
+        return true;
+      }
+
+      function prepare(){
+        ensureLoaded();
+      }
+
+      node.addEventListener('pointerdown', prepare, {passive:true});
+      node.addEventListener('touchstart', prepare, {passive:true});
+      node.addEventListener('mouseenter', prepare, {passive:true});
+      node.addEventListener('focus', prepare, {passive:true});
+      node.addEventListener('click', prepare, {passive:true});
+
+      window.addEventListener('beforeunload', function(){
+        if(blobURL){
+          try{ URL.revokeObjectURL(blobURL); }catch(e){}
+          blobURL = null;
+        }
+      });
+
+      // Eager-load only the first viewport worth of players.
+      try{
+        var rect = node.getBoundingClientRect();
+        if(rect.top < (window.innerHeight || 1000) * 1.5){
+          ensureLoaded();
+        }
+      } catch(e){}
+    }
+
     function waInitEmbedPlayers(){
       try{
         var nodes = document.querySelectorAll('audio[data-wa-embed],video[data-wa-embed]');
         for(var i=0;i<nodes.length;i++){
-          var n = nodes[i];
-          var id = n.getAttribute('data-wa-embed');
-          if(!id) continue;
-          var url = waCreateEmbedURL(id);
-          if(url){
-            n.src = url;
-            // Revoke later to keep memory bounded
-            setTimeout((function(u){
-              return function(){ try{ URL.revokeObjectURL(u); }catch(e){} };
-            })(url), 60 * 1000);
-          }
+          waAttachLazyEmbedPlayer(nodes[i]);
         }
       } catch(e){
         // ignore
       }
     }
 
-    document.addEventListener('DOMContentLoaded', waInitEmbedPlayers);
+    function waAttachLazyEmbedImage(node){
+      if(!node) return;
+      var id = node.getAttribute('data-wa-embed-img');
+      if(!id) return;
+
+      var loaded = false;
+      var blobURL = null;
+
+      function ensureLoaded(){
+        if(loaded) return true;
+        var url = waCreateEmbedURL(id);
+        if(!url) return false;
+        node.src = url;
+        blobURL = url;
+        loaded = true;
+        return true;
+      }
+
+      function prepare(){
+        ensureLoaded();
+      }
+
+      node.addEventListener('pointerdown', prepare, {passive:true});
+      node.addEventListener('touchstart', prepare, {passive:true});
+      node.addEventListener('mouseenter', prepare, {passive:true});
+      node.addEventListener('focus', prepare, {passive:true});
+      node.addEventListener('click', prepare, {passive:true});
+
+      if('IntersectionObserver' in window){
+        try{
+          var obs = new IntersectionObserver(function(entries){
+            for(var i=0;i<entries.length;i++){
+              if(entries[i].isIntersecting){
+                ensureLoaded();
+                try{ obs.disconnect(); }catch(e){}
+                break;
+              }
+            }
+          }, {rootMargin: '600px 0px'});
+          obs.observe(node);
+        } catch(e){}
+      } else {
+        try{
+          var rect = node.getBoundingClientRect();
+          if(rect.top < (window.innerHeight || 1000) * 1.5){
+            ensureLoaded();
+          }
+        } catch(e){}
+      }
+
+      window.addEventListener('beforeunload', function(){
+        if(blobURL){
+          try{ URL.revokeObjectURL(blobURL); }catch(e){}
+          blobURL = null;
+        }
+      });
+    }
+
+    function waInitEmbedImages(){
+      try{
+        var nodes = document.querySelectorAll('img[data-wa-embed-img]');
+        for(var i=0;i<nodes.length;i++){
+          waAttachLazyEmbedImage(nodes[i]);
+        }
+      } catch(e){
+        // ignore
+      }
+    }
+
+    function waInitLargeChatPaging(){
+      try{
+        var wrap = document.querySelector('.wrap');
+        if(!wrap) return;
+
+        var chunkRows = 2000;
+        var oldChunks = (window.__waOldChunks && Array.isArray(window.__waOldChunks)) ? window.__waOldChunks : [];
+        var oldChunkRows = (window.__waOldChunkRows && Array.isArray(window.__waOldChunkRows)) ? window.__waOldChunkRows : [];
+
+        if(oldChunks.length > 0){
+          var remainingRows = 0;
+          for(var rr=0; rr<oldChunkRows.length; rr++){
+            remainingRows += Number(oldChunkRows[rr]) || 0;
+          }
+          if(remainingRows <= 0){
+            remainingRows = oldChunks.length * chunkRows;
+          }
+
+          function decodeHTMLChunk(payload){
+            if(typeof payload !== 'string'){
+              return '';
+            }
+            // Newer exports store raw HTML chunk strings, while older exports
+            // may still carry Base64 payloads. Support both formats.
+            if(payload.indexOf('<') !== -1){
+              return payload;
+            }
+            try{
+              var bin = atob(payload);
+              var len = bin.length;
+              var bytes = new Uint8Array(len);
+              for(var i=0;i<len;i++){ bytes[i] = bin.charCodeAt(i); }
+              if(window.TextDecoder){
+                return new TextDecoder('utf-8').decode(bytes);
+              }
+              // Fallback for older browsers
+              return decodeURIComponent(escape(bin));
+            } catch(e){
+              try{ return atob(payload); } catch(e2){ return ''; }
+            }
+          }
+
+          var gate = document.createElement('div');
+          gate.className = 'wa-history-gate';
+          var label = document.createElement('span');
+          label.className = 'wa-history-label';
+          var button = document.createElement('button');
+          button.type = 'button';
+
+          function nextChunkRowsToLoad(){
+            if(oldChunkRows.length > 0){
+              var nextRows = Number(oldChunkRows[oldChunkRows.length - 1]) || 0;
+              if(nextRows > 0){
+                return Math.min(nextRows, remainingRows);
+              }
+            }
+            return Math.min(chunkRows, remainingRows);
+          }
+
+          function refreshGateFromChunks(){
+            if(oldChunks.length <= 0){
+              try{ gate.remove(); } catch(e){}
+              return;
+            }
+            label.textContent = remainingRows + ' ältere Nachrichten nicht geladen';
+            button.textContent = 'Ältere laden (' + nextChunkRowsToLoad() + ')';
+          }
+
+          button.addEventListener('click', function(){
+            try{
+              if(oldChunks.length <= 0){
+                refreshGateFromChunks();
+                return;
+              }
+
+              var chunkPayload = oldChunks.pop();
+              var loadedRows = 0;
+              if(oldChunkRows.length > 0){
+                loadedRows = Number(oldChunkRows.pop()) || 0;
+              }
+              if(loadedRows > 0){
+                remainingRows = Math.max(0, remainingRows - loadedRows);
+              } else {
+                remainingRows = Math.max(0, remainingRows - chunkRows);
+              }
+
+              var html = decodeHTMLChunk(chunkPayload);
+              if(html){
+                var tmp = document.createElement('div');
+                tmp.innerHTML = html;
+                var insertBefore = gate.nextSibling;
+                while(tmp.firstChild){
+                  wrap.insertBefore(tmp.firstChild, insertBefore);
+                }
+                waInitEmbedPlayers();
+                waInitEmbedImages();
+              }
+
+              refreshGateFromChunks();
+            } catch(e){}
+          });
+
+          gate.appendChild(label);
+          gate.appendChild(button);
+          var header = wrap.querySelector('.header');
+          if(header && header.nextSibling){
+            wrap.insertBefore(gate, header.nextSibling);
+          } else {
+            wrap.appendChild(gate);
+          }
+          refreshGateFromChunks();
+          return;
+        }
+
+        var allRows = wrap.querySelectorAll('.row');
+        var totalRows = allRows.length;
+        var keepRows = 3000;
+        if(totalRows <= keepRows) return;
+
+        var rowsToHide = totalRows - keepRows;
+        var pendingNonRows = [];
+        var children = wrap.children;
+        for(var i=0;i<children.length;i++){
+          var el = children[i];
+          if(el.classList && el.classList.contains('header')){
+            pendingNonRows = [];
+            continue;
+          }
+          var isRow = !!(el.classList && el.classList.contains('row'));
+          if(isRow){
+            if(rowsToHide > 0){
+              for(var j=0;j<pendingNonRows.length;j++){
+                pendingNonRows[j].setAttribute('data-wa-old-hidden', '1');
+                pendingNonRows[j].style.display = 'none';
+              }
+              pendingNonRows = [];
+              el.setAttribute('data-wa-old-hidden', '1');
+              el.style.display = 'none';
+              rowsToHide--;
+            } else {
+              pendingNonRows = [];
+            }
+          } else {
+            pendingNonRows.push(el);
+          }
+        }
+
+        var gate = document.createElement('div');
+        gate.className = 'wa-history-gate';
+        var label = document.createElement('span');
+        label.className = 'wa-history-label';
+        var button = document.createElement('button');
+        button.type = 'button';
+
+        function hiddenRowsCount(){
+          return wrap.querySelectorAll('.row[data-wa-old-hidden=\"1\"]').length;
+        }
+
+        function refreshGate(){
+          var hiddenRows = hiddenRowsCount();
+          if(hiddenRows <= 0){
+            try{ gate.remove(); } catch(e){}
+            return;
+          }
+          label.textContent = hiddenRows + ' ältere Nachrichten ausgeblendet';
+          button.textContent = 'Ältere laden (' + Math.min(chunkRows, hiddenRows) + ')';
+        }
+
+        button.addEventListener('click', function(){
+          try{
+            var hidden = wrap.querySelectorAll('[data-wa-old-hidden=\"1\"]');
+            var rowsShown = 0;
+            for(var i=hidden.length-1;i>=0;i--){
+              var el = hidden[i];
+              el.style.display = '';
+              el.removeAttribute('data-wa-old-hidden');
+              if(el.classList && el.classList.contains('row')){
+                rowsShown++;
+                if(rowsShown >= chunkRows){ break; }
+              }
+            }
+            refreshGate();
+          } catch(e){}
+        });
+
+        gate.appendChild(label);
+        gate.appendChild(button);
+        var header = wrap.querySelector('.header');
+        if(header && header.nextSibling){
+          wrap.insertBefore(gate, header.nextSibling);
+        } else {
+          wrap.appendChild(gate);
+        }
+        refreshGate();
+      } catch(e){
+        // ignore
+      }
+    }
+
+    document.addEventListener('DOMContentLoaded', function(){
+      waInitLargeChatPaging();
+      waInitEmbedPlayers();
+      waInitEmbedImages();
+    });
     
     </script>
     </head><body><div class='wrap'>
@@ -8709,12 +9049,12 @@ nonisolated private static func stageThumbnailForExport(
                     if let img = prev.imageDataURL {
                         if externalPreviews, let previewsDir = externalPreviewsDir {
                             if let href = stagePreviewImageDataURL(img, previewsDir: previewsDir, relativeTo: attachmentRelBaseDir) {
-                                imgBlock = "<div class='pimg'><img alt='' src='\(htmlEscape(href))'></div>"
+                                imgBlock = "<div class='pimg'><img loading='lazy' decoding='async' alt='' src='\(htmlEscape(href))'></div>"
                             } else {
-                                imgBlock = "<div class='pimg'><img alt='' src='\(img)'></div>"
+                                imgBlock = "<div class='pimg'><img loading='lazy' decoding='async' alt='' src='\(img)'></div>"
                             }
                         } else {
-                            imgBlock = "<div class='pimg'><img alt='' src='\(img)'></div>"
+                            imgBlock = "<div class='pimg'><img loading='lazy' decoding='async' alt='' src='\(img)'></div>"
                         }
                     }
                     let ptitle = htmlEscape(prev.title.isEmpty ? u : prev.title)
@@ -8761,7 +9101,7 @@ nonisolated private static func stageThumbnailForExport(
                         if let thumbHref = await thumbnailStoreRef?.thumbnailHref(fileName: fn, relativeTo: attachmentRelBaseDir) {
                             let isImage = ["jpg","jpeg","png","gif","webp","heic","heif"].contains(ext)
                             mediaBlocks.append(
-                                "<div class='media\(isImage ? " media-img" : "")'><img alt='' src='\(htmlEscape(thumbHref))'></div>"
+                                "<div class='media\(isImage ? " media-img" : "")'><img loading='lazy' decoding='async' alt='' src='\(htmlEscape(thumbHref))'></div>"
                             )
                             continue
                         }
@@ -8769,7 +9109,7 @@ nonisolated private static func stageThumbnailForExport(
                         if let thumbDataURL = await thumbnailStoreRef?.thumbnailDataURL(fileName: fn, allowOriginalFallback: false) {
                             let isImage = ["jpg","jpeg","png","gif","webp","heic","heif"].contains(ext)
                             mediaBlocks.append(
-                                "<div class='media\(isImage ? " media-img" : "")'><img alt='' src='\(htmlEscape(thumbDataURL))'></div>"
+                                "<div class='media\(isImage ? " media-img" : "")'><img loading='lazy' decoding='async' alt='' src='\(htmlEscape(thumbDataURL))'></div>"
                             )
                             continue
                         }
@@ -8810,7 +9150,7 @@ nonisolated private static func stageThumbnailForExport(
                             mediaBlocks.append("<div class='fileline'>⬇︎ <a href='javascript:void(0)'\(titleAttr)\(downloadAriaAttr) onclick=\"return waDownloadEmbed('\(embedId)')\">Video speichern</a></div>")
                         } else {
                             if let poster {
-                                mediaBlocks.append("<div class='media'><img alt='' src='\(htmlEscape(poster))'></div>")
+                                mediaBlocks.append("<div class='media'><img loading='lazy' decoding='async' alt='' src='\(htmlEscape(poster))'></div>")
                             }
                             mediaBlocks.append("<div class='fileline'>🎬 \(safeFn)</div>")
                         }
@@ -8856,12 +9196,12 @@ nonisolated private static func stageThumbnailForExport(
                             // Insert the hidden script tag before the clickable UI.
                             mediaBlocks.append("<script id='\(embedId)' type='application/octet-stream' data-mime='\(safeMime)' data-name='\(safeName)'>\(b64)</script>")
                             // Thumbnail preview wrapped in waOpenEmbed link.
-                            mediaBlocks.append("<div class='media'><a href='javascript:void(0)'\(titleAttr)\(openAriaAttr) onclick=\"return waOpenEmbed('\(embedId)')\"><img alt='' src='\(previewDataURL)'></a></div>")
+                            mediaBlocks.append("<div class='media'><a href='javascript:void(0)'\(titleAttr)\(openAriaAttr) onclick=\"return waOpenEmbed('\(embedId)')\"><img loading='lazy' decoding='async' alt='' src='\(previewDataURL)'></a></div>")
                             // Fileline link using waOpenEmbed.
                             mediaBlocks.append("<div class='fileline'>📎 <a href='javascript:void(0)'\(titleAttr)\(openAriaAttr) onclick=\"return waOpenEmbed('\(embedId)')\">\(safeFn)</a></div>")
                             mediaBlocks.append("<div class='fileline'>⬇︎ <a href='javascript:void(0)'\(titleAttr)\(downloadAriaAttr) onclick=\"return waDownloadEmbed('\(embedId)')\">Datei speichern</a></div>")
                         } else if let previewDataURL {
-                            mediaBlocks.append("<div class='media'><img alt='' src='\(previewDataURL)'></div>")
+                            mediaBlocks.append("<div class='media'><img loading='lazy' decoding='async' alt='' src='\(previewDataURL)'></div>")
                             mediaBlocks.append("<div class='fileline'>📎 \(safeFn)</div>")
                         } else if let fileData {
                             embedCounter += 1
@@ -8882,24 +9222,23 @@ nonisolated private static func stageThumbnailForExport(
                     // (Avoids data: URLs in href which can lead to about:blank in Safari.)
                     if ["jpg", "jpeg", "png", "gif", "webp", "heic", "heif"].contains(ext) {
                         let mime = guessMime(fromName: fn)
-                        if let dataURL = fileToDataURL(p), let fileData = try? Data(contentsOf: p) {
+                        if let fileData = try? Data(contentsOf: p) {
                             embedCounter += 1
                             let embedId = "wa-embed-\(index)-\(embedCounter)"
                             let b64 = fileData.base64EncodedString()
                             let safeMime = htmlEscape(mime)
                             let safeName = safeFn
+                            let tinyPlaceholder = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="
 
-                            // Store raw bytes once; click opens blob via waOpenEmbed.
+                            // Store raw bytes once; lazy image src is loaded via Blob URL in JS.
                             mediaBlocks.append("<script id='\(embedId)' type='application/octet-stream' data-mime='\(safeMime)' data-name='\(safeName)'>\(b64)</script>")
-
-                            let safeSrc = htmlEscape(dataURL)
-                            mediaBlocks.append("<div class='media media-img'><a href='javascript:void(0)'\(titleAttr)\(openAriaAttr) onclick=\"return waOpenEmbed('\(embedId)')\"><img alt='' src='\(safeSrc)'></a></div>")
+                            mediaBlocks.append("<div class='media media-img'><a href='javascript:void(0)'\(titleAttr)\(openAriaAttr) onclick=\"return waOpenEmbed('\(embedId)')\"><img loading='lazy' decoding='async' alt='' src='\(tinyPlaceholder)' data-wa-embed-img='\(embedId)'></a></div>")
                             mediaBlocks.append("<div class='fileline'>⬇︎ <a href='javascript:void(0)'\(titleAttr)\(downloadAriaAttr) onclick=\"return waDownloadEmbed('\(embedId)')\">Bild speichern</a></div>")
                             // Kein Dateiname unter eingebetteten Bildern
                         } else if let dataURL = fileToDataURL(p) {
                             // Fallback: show image without click-to-open.
                             let safeSrc = htmlEscape(dataURL)
-                            mediaBlocks.append("<div class='media media-img'><img alt='' src='\(safeSrc)'></div>")
+                            mediaBlocks.append("<div class='media media-img'><img loading='lazy' decoding='async' alt='' src='\(safeSrc)'></div>")
                         } else {
                             // Nur wenn Einbettung fehlschlägt, den Dateinamen anzeigen
                             mediaBlocks.append("<div class='fileline'>🖼️ \(safeFn)</div>")
@@ -8968,7 +9307,7 @@ nonisolated private static func stageThumbnailForExport(
                         }
                         if let thumbHref {
                             mediaBlocks.append(
-                                "<div class='media'><a href='\(safeHref)'\(titleAttr)\(openAriaAttr) target='_blank' rel='noopener'><img alt='' src='\(htmlEscape(thumbHref))'></a></div>"
+                                "<div class='media'><a href='\(safeHref)'\(titleAttr)\(openAriaAttr) target='_blank' rel='noopener'><img loading='lazy' decoding='async' alt='' src='\(htmlEscape(thumbHref))'></a></div>"
                             )
                         }
                         mediaBlocks.append("<div class='fileline'>📎 <a href='\(safeHref)'\(titleAttr)\(openAriaAttr) target='_blank' rel='noopener'>\(safeFn)</a></div>")
@@ -8978,7 +9317,7 @@ nonisolated private static func stageThumbnailForExport(
 
                     if ["jpg", "jpeg", "png", "gif", "webp", "heic", "heif"].contains(ext) {
                         mediaBlocks.append(
-                            "<div class='media media-img'><a href='\(safeHref)'\(titleAttr)\(openAriaAttr) target='_blank' rel='noopener'><img alt='' src='\(safeHref)'></a></div>"
+                            "<div class='media media-img'><a href='\(safeHref)'\(titleAttr)\(openAriaAttr) target='_blank' rel='noopener'><img loading='lazy' decoding='async' alt='' src='\(safeHref)'></a></div>"
                         )
                         mediaBlocks.append("<div class='fileline'>⬇︎ <a href='\(safeHref)'\(downloadAttr)\(titleAttr)\(downloadAriaAttr)>Bild speichern</a></div>")
                         continue
@@ -9029,16 +9368,22 @@ nonisolated private static func stageThumbnailForExport(
                 var previewDataURL: String? = nil
                 var isImage = false
                 if ["jpg","jpeg","png","gif","webp","heic","heif"].contains(ext) {
-                    previewDataURL = fileToDataURL(stagedURL ?? p)
                     isImage = true
+                    if href == nil {
+                        previewDataURL = fileToDataURL(stagedURL ?? p)
+                    }
                 } else if ext == "pdf" {
                     previewDataURL = await thumbnailStoreRef?.thumbnailDataURL(fileName: fn)
                 }
 
-                if let previewDataURL {
+                if isImage, let href {
+                    mediaBlocks.append(
+                        "<div class='media media-img'><a href='\(htmlEscape(href))'\(titleAttr)\(openAriaAttr) target='_blank' rel='noopener'><img loading='lazy' decoding='async' alt='' src='\(htmlEscape(href))'></a></div>"
+                    )
+                } else if let previewDataURL {
                     if let href {
                         mediaBlocks.append(
-                            "<div class='media\(isImage ? " media-img" : "")'><a href='\(htmlEscape(href))'\(titleAttr)\(openAriaAttr) target='_blank' rel='noopener'><img alt='' src='\(previewDataURL)'></a></div>"
+                            "<div class='media\(isImage ? " media-img" : "")'><a href='\(htmlEscape(href))'\(titleAttr)\(openAriaAttr) target='_blank' rel='noopener'><img loading='lazy' decoding='async' alt='' src='\(previewDataURL)'></a></div>"
                         )
                         if !isImage {
                             mediaBlocks.append(
@@ -9046,7 +9391,7 @@ nonisolated private static func stageThumbnailForExport(
                             )
                         }
                     } else {
-                        mediaBlocks.append("<div class='media\(isImage ? " media-img" : "")'><img alt='' src='\(previewDataURL)'></div>")
+                        mediaBlocks.append("<div class='media\(isImage ? " media-img" : "")'><img loading='lazy' decoding='async' alt='' src='\(previewDataURL)'></div>")
                         if !isImage {
                             mediaBlocks.append("<div class='fileline'>📎 \(safeFn)</div>")
                         }
@@ -9107,8 +9452,27 @@ nonisolated private static func stageThumbnailForExport(
                 let end = min(start + chunkSize, msgs.count)
                 return start..<end
             }
+            // Safari can struggle with very large, fully materialized Sidecar DOM trees.
+            // For large Sidecar runs, keep only recent chunks in the initial DOM and lazy-load older chunks on demand.
+            let progressiveLargeSidecar = externalAttachments
+                && !embedAttachments
+                && !embedAttachmentThumbnailsOnly
+                && msgs.count > 12_000
+            let keepTailChunkCount = progressiveLargeSidecar
+                ? min(ranges.count, max(1, (3_000 + chunkSize - 1) / chunkSize))
+                : 0
+            let firstTailChunkIndex = progressiveLargeSidecar
+                ? max(0, ranges.count - keepTailChunkCount)
+                : 0
+            var deferredOldChunks: [String] = []
+            deferredOldChunks.reserveCapacity(firstTailChunkIndex)
+            var deferredOldChunkRows: [Int] = []
+            deferredOldChunkRows.reserveCapacity(firstTailChunkIndex)
             if perfEnabled {
                 print("WET-PERF: html chunks size=\(chunkSize) count=\(ranges.count)")
+                if progressiveLargeSidecar {
+                    print("WET-PERF: sidecar progressive chunking enabled keepTailChunks=\(keepTailChunkCount) deferredChunks=\(firstTailChunkIndex)")
+                }
             }
 
             let renderLimiter = AsyncLimiter(min(caps.cpu, 8))
@@ -9136,10 +9500,29 @@ nonisolated private static func stageThumbnailForExport(
                     pending[chunkIndex] = chunkData
                     while let data = pending.removeValue(forKey: nextIndex) {
                         try Task.checkCancellation()
-                        try writer.append(data)
+                        if progressiveLargeSidecar && nextIndex < firstTailChunkIndex {
+                            if let chunkString = String(data: data, encoding: .utf8) {
+                                deferredOldChunks.append(chunkString)
+                            } else {
+                                deferredOldChunks.append(data.base64EncodedString())
+                            }
+                            deferredOldChunkRows.append(ranges[nextIndex].count)
+                        } else {
+                            try writer.append(data)
+                        }
                         nextIndex += 1
                     }
                 }
+            }
+
+            if progressiveLargeSidecar, !deferredOldChunks.isEmpty {
+                let chunksData = try JSONEncoder().encode(deferredOldChunks)
+                let rowsData = try JSONEncoder().encode(deferredOldChunkRows)
+                var chunksJSON = String(decoding: chunksData, as: UTF8.self)
+                let rowsJSON = String(decoding: rowsData, as: UTF8.self)
+                // Prevent accidental "</script>" termination inside inline payload script.
+                chunksJSON = chunksJSON.replacingOccurrences(of: "</", with: "<\\/")
+                try writer.append("<script>window.__waOldChunks=\(chunksJSON);window.__waOldChunkRows=\(rowsJSON);</script>")
             }
 
             try writer.append("</div></body></html>")
