@@ -163,6 +163,7 @@ env WET_PERF=1 WET_MAX_CPU=4 WET_MAX_IO=6 "$APP_BIN"
 4. Automated gate checks pass.
 5. Regression matrix spot-check passes for current change area.
 6. No known high-severity bugs open for changed flows.
+7. App Store preflight passes: `bash scripts/wet-appstore-preflight.sh`
 
 Release build command:
 
@@ -173,6 +174,10 @@ xcodebuild \
   -configuration Release \
   build
 ```
+
+App Store submission checklist:
+
+- `docs/mac-app-store-submission-checklist.md`
 
 ## 10. Bug Report Template
 
@@ -186,4 +191,3 @@ When reporting a bug, always include:
 - actual result
 - diagnostics log excerpt
 - forensic manifest/audit files if applicable
-
