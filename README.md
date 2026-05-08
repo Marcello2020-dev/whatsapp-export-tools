@@ -65,7 +65,7 @@ A legacy Python script remains in the repo for reference/backward compatibility,
 
 ## License
 
-MIT License – siehe `LICENSE`.
+Proprietary License – see `LICENSE`.
 
 ## Trademark notice
 
