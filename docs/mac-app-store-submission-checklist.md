@@ -14,6 +14,16 @@ It intentionally excludes ZIP extractor refactoring (tracked separately).
 - Privacy Policy URL: required for macOS apps.
 - User Privacy Choices URL: optional (recommended if available).
 
+Repository sources for those URLs:
+
+- `docs/privacy-policy.md`
+- `docs/privacy-choices.md`
+
+Suggested hosting:
+
+- GitHub Pages (recommended) or any public HTTPS page.
+- URL must be reachable without login.
+
 References:
 
 - https://developer.apple.com/help/app-store-connect/reference/app-information/app-privacy/
@@ -35,6 +45,15 @@ Use this if online previews stay enabled in release builds:
 4. Linked to user: **No** (if you do not persist identity-linked backend records)
 5. Used for tracking: **No**
 
+Suggested App Store Connect click path:
+
+1. App Privacy -> Data Types -> Edit
+2. Select data collection: **Yes, we collect data from this app**
+3. Add data type: **User Content**
+4. For User Content, select usage: **App Functionality**
+5. Set tracking: **No**
+6. Publish the privacy responses
+
 Notes:
 
 - This is a conservative submission posture to reduce review friction.
@@ -47,6 +66,10 @@ Ensure `PrivacyInfo.xcprivacy` exists and is bundled in release artifacts.
 Current file:
 
 - `whatsapp-export-tools/PrivacyInfo.xcprivacy`
+
+### Localization note (important)
+
+If your app metadata has multiple localizations, ensure the privacy policy URL is set for each localization context where App Store Connect requires it.
 
 ## 2) Release Archive + Preflight (Point 3)
 

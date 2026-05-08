@@ -67,6 +67,11 @@ A legacy Python script remains in the repo for reference/backward compatibility,
 
 Proprietary License – see `LICENSE`.
 
+## Privacy
+
+- Privacy Policy source: `docs/privacy-policy.md`
+- Privacy Choices source: `docs/privacy-choices.md`
+
 ## Trademark notice
 
 “WhatsApp” ist eine Marke von WhatsApp LLC. Dieses Projekt ist nicht mit WhatsApp/Meta verbunden und wird nicht von ihnen unterstützt.
