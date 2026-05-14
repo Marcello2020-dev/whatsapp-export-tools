@@ -930,6 +930,7 @@ struct ContentView: View {
     @State private var didSetInitialWindowSize: Bool = false
     @State private var exportTask: Task<Void, Never>? = nil
     @State private var cancelRequested: Bool = false
+    @StateObject private var freemiumStore = WETFreemiumStore()
 
     /// Environment helpers for opening auxiliary windows, formatting text, and storing diagnostic logs.
     @Environment(\.openWindow) private var openWindow
@@ -957,6 +958,9 @@ struct ContentView: View {
 #if DEBUG
             runAIGlowHostStateCheckIfNeeded()
 #endif
+        }
+        .task {
+            await freemiumStore.start()
         }
         .sheet(isPresented: $showReplaceSheet) {
             replaceConfirmationSheet
@@ -1738,11 +1742,79 @@ struct ContentView: View {
     private var runSection: some View {
         WASection(title: "wet.section.run", systemImage: "play.circle") {
             VStack(alignment: .leading, spacing: 10) {
+                freemiumStatusView
                 runHeaderBar
                 runTargetFolderView
                 runStatusDetailView
                 runProgressContainer
             }
+        }
+    }
+
+    private var freemiumStatusView: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if freemiumStore.isProEnabled {
+                Label {
+                    Text("wet.paywall.unlocked")
+                } icon: {
+                    Image(systemName: "checkmark.seal.fill")
+                }
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.green)
+            } else {
+                let remaining = freemiumStore.freeExportsRemaining
+                let limit = WETFreemiumStore.freeExportLimit
+
+                Text(String(
+                    format: String(localized: "wet.paywall.freeRemaining", locale: locale),
+                    remaining,
+                    limit
+                ))
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(remaining == 0 ? .orange : .secondary)
+
+                if freemiumStore.requiresUnlock {
+                    Text("wet.paywall.locked")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.orange)
+                }
+
+                HStack(spacing: 8) {
+                    Button {
+                        Task { await purchaseProUnlock() }
+                    } label: {
+                        if freemiumStore.isPurchasing {
+                            Label("wet.paywall.buy.inProgress", systemImage: "hourglass")
+                        } else if let price = freemiumStore.displayPrice {
+                            Label(
+                                String(format: String(localized: "wet.paywall.buy.price", locale: locale), price),
+                                systemImage: "creditcard.fill"
+                            )
+                        } else {
+                            Label("wet.paywall.buy.default", systemImage: "creditcard.fill")
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(Self.waGreen)
+                    .disabled(freemiumStore.isPurchasing)
+
+                    Button {
+                        Task { await restoreProUnlock() }
+                    } label: {
+                        Label("wet.paywall.restore", systemImage: "arrow.clockwise.circle.fill")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(Self.waBlue)
+                    .disabled(freemiumStore.isRestoring)
+                }
+            }
+
+#if DEBUG
+            Button(freemiumStore.debugUnlockOverride ? "Debug Pro Override: ON" : "Debug Pro Override: OFF") {
+                freemiumStore.toggleDebugUnlockOverride()
+            }
+            .buttonStyle(.bordered)
+#endif
         }
     }
 
@@ -3096,7 +3168,11 @@ struct ContentView: View {
     }
 
     private var canStartExport: Bool {
-        !isRunning && chatURL != nil && outBaseURL != nil && !needsParticipantConfirmation
+        !isRunning
+            && chatURL != nil
+            && outBaseURL != nil
+            && !needsParticipantConfirmation
+            && freemiumStore.canRunExport
     }
 
     private var debugLoggingEnabled: Bool {
@@ -3133,6 +3209,39 @@ struct ContentView: View {
                           summary)
         }
         return String(localized: "wet.run.failure.generic", locale: locale)
+    }
+
+    @MainActor
+    private func purchaseProUnlock() async {
+        do {
+            let outcome = try await freemiumStore.purchaseProUnlock()
+            switch outcome {
+            case .unlocked:
+                appendLog(String(localized: "wet.paywall.log.unlockSuccess", locale: locale))
+            case .pending:
+                appendLog(String(localized: "wet.paywall.log.pending", locale: locale))
+            case .cancelled:
+                appendLog(String(localized: "wet.paywall.log.cancelled", locale: locale))
+            }
+        } catch {
+            let message = error.localizedDescription
+            appendLog("ERROR: \(message)")
+        }
+    }
+
+    @MainActor
+    private func restoreProUnlock() async {
+        do {
+            try await freemiumStore.restorePurchases()
+            if freemiumStore.isProEnabled {
+                appendLog(String(localized: "wet.paywall.log.restoreSuccess", locale: locale))
+            } else {
+                appendLog(String(localized: "wet.paywall.log.restoreNoEntitlement", locale: locale))
+            }
+        } catch {
+            let message = error.localizedDescription
+            appendLog("ERROR: \(message)")
+        }
     }
 
     private func progressIconName(for state: RunStepState) -> String {
@@ -3989,6 +4098,11 @@ struct ContentView: View {
         reusePrepared: Bool = false
     ) {
         guard !isRunning else { return }
+        guard freemiumStore.canRunExport else {
+            let message = String(localized: "wet.paywall.locked", locale: locale)
+            appendLog("ERROR: \(message)")
+            return
+        }
         clearLog()
         lastRunDuration = nil
         lastRunFailureSummary = nil
@@ -4565,6 +4679,7 @@ struct ContentView: View {
             lastRunFailureArtifact = nil
             currentRunStep = nil
             runStatus = .completed
+            freemiumStore.recordSuccessfulExportIfNeeded()
 
             // Delete-originals prompt is intentionally the final action of a successful run.
             if runContext.wantsDeleteOriginals {

@@ -6,5 +6,7 @@
 	<array>
 		<string>de</string>
 	</array>
+	<key>WETProUnlockProductID</key>
+	<string>dev.marcello2020.chat-export-studio.pro.lifetime</string>
 </dict>
 </plist>
