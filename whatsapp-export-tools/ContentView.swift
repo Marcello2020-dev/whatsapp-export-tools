@@ -4,7 +4,7 @@ import AppKit
 import UniformTypeIdentifiers
 import CryptoKit
 
-/// Top-level export interface that manages the UI state for selecting WhatsApp sources, running exports, and showing results.
+/// Top-level export interface that manages source selection, exports, and result presentation.
 struct ContentView: View {
 
     /// Represents which artifacts (HTML/MD) finished exports produced for the UI to present.
@@ -25,7 +25,7 @@ struct ContentView: View {
         let allowOverwrite: Bool
         let isOverwriteRetry: Bool
         let preflight: OutputPreflight?
-        let prepared: WhatsAppExportService.PreparedExport?
+        let prepared: ChatExportService.PreparedExport?
         let baseNameOverride: String?
         let exporter: String
         let chatPartner: String
@@ -252,8 +252,8 @@ struct ContentView: View {
             }
 
             do {
-                let inputSnapshot = try WhatsAppExportService.resolveInputSnapshot(inputURL: fixture)
-                let prepared = try WhatsAppExportService.prepareExport(
+                let inputSnapshot = try ChatExportService.resolveInputSnapshot(inputURL: fixture)
+                let prepared = try ChatExportService.prepareExport(
                     chatURL: inputSnapshot.chatURL,
                     meNameOverride: nil,
                     participantNameOverrides: [:]
@@ -261,10 +261,10 @@ struct ContentView: View {
 
                 let exporterRaw = prepared.meName.trimmingCharacters(in: .whitespacesAndNewlines)
                 let exporter = exporterRaw.isEmpty
-                    ? WhatsAppExportService.exporterPlaceholderDisplayName
+                    ? ChatExportService.exporterPlaceholderDisplayName
                     : exporterRaw
                 let partner = "Chat"
-                let baseName = WhatsAppExportService.composeExportBaseNameForOutput(
+                let baseName = ChatExportService.composeExportBaseNameForOutput(
                     messages: prepared.messages,
                     chatURL: prepared.chatURL,
                     exporter: exporter,
@@ -797,17 +797,17 @@ struct ContentView: View {
 
     // MARK: - Theme
 
-    // WhatsApp-like palette (approx.)
-    static let waGreen = Color(red: 0x25/255.0, green: 0xD3/255.0, blue: 0x66/255.0)   // #25D366
-    static let waTeal  = Color(red: 0x12/255.0, green: 0x8C/255.0, blue: 0x7E/255.0)   // #128C7E
-    static let waBlue  = Color(red: 0x34/255.0, green: 0xB7/255.0, blue: 0xF1/255.0)   // #34B7F1
+    // Independent document-export palette used throughout the app.
+    static let archiveBlue = Color(red: 0x0A/255.0, green: 0x84/255.0, blue: 0xFF/255.0) // #0A84FF
+    static let archiveIndigo = Color(red: 0x33/255.0, green: 0x5C/255.0, blue: 0xFF/255.0) // #335CFF
+    static let archiveCyan = Color(red: 0x00/255.0, green: 0xB8/255.0, blue: 0xF0/255.0) // #00B8F0
 
-    static let bgTop = waTeal.opacity(0.22)
-    static let bgBottom = waGreen.opacity(0.12)
+    static let bgTop = archiveIndigo.opacity(0.18)
+    static let bgBottom = archiveCyan.opacity(0.13)
 
     // Subtle “card tint” gradient used by waCard()
     static let cardTintGradient = LinearGradient(
-        colors: [waGreen.opacity(0.18), waBlue.opacity(0.10)],
+        colors: [archiveCyan.opacity(0.18), archiveIndigo.opacity(0.10)],
         startPoint: .topLeading,
         endPoint: .bottomTrailing
     )
@@ -821,7 +821,7 @@ struct ContentView: View {
         return NSApp.applicationIconImage
     }
 
-    struct WhatsAppBackground: View {
+    struct ArchiveBackground: View {
         var body: some View {
             GeometryReader { geo in
                 ZStack {
@@ -899,7 +899,7 @@ struct ContentView: View {
     @State private var inputKindBadgeKey: String? = nil
     @State private var replayModeActive: Bool = false
 
-    // Optional overrides for participants that appear only as phone numbers in the WhatsApp export
+    // Optional overrides for participants that appear only as phone numbers in the chat export.
     // Key = phone-number-like participant string as it appears in the export; Value = user-provided display name
     @State private var phoneParticipantOverrides: [String: String] = [:]
     @State private var autoSuggestedPhoneNames: [String: String] = [:]
@@ -923,7 +923,7 @@ struct ContentView: View {
     @State private var replaceExportDir: URL? = nil
     @State private var overwriteConfirmed: Bool = false
     @State private var pendingPreflight: OutputPreflight? = nil
-    @State private var pendingPreparedExport: WhatsAppExportService.PreparedExport? = nil
+    @State private var pendingPreparedExport: ChatExportService.PreparedExport? = nil
     @State private var showDeleteOriginalsAlert: Bool = false
     @State private var deleteOriginalCandidates: [URL] = []
     @State private var deleteOriginalTempWorkspaceURL: URL? = nil
@@ -944,8 +944,8 @@ struct ContentView: View {
         mainContent
         .padding(16)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .tint(Self.waGreen)
-        .background(WhatsAppBackground().ignoresSafeArea())
+        .tint(Self.archiveBlue)
+        .background(ArchiveBackground().ignoresSafeArea())
         .onAppear {
             applyInitialWindowSizeIfNeeded()
             if !didRestoreSettings {
@@ -1229,6 +1229,11 @@ struct ContentView: View {
                         .disabled(isRunning)
                 }
             }
+
+            Text("wet.input.whatsappHint")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -1795,7 +1800,7 @@ struct ContentView: View {
                         }
                     }
                     .buttonStyle(.borderedProminent)
-                    .tint(Self.waGreen)
+                    .tint(Self.archiveBlue)
                     .disabled(freemiumStore.isPurchasing)
 
                     Button {
@@ -1804,7 +1809,7 @@ struct ContentView: View {
                         Label("wet.paywall.restore", systemImage: "arrow.clockwise.circle.fill")
                     }
                     .buttonStyle(.borderedProminent)
-                    .tint(Self.waBlue)
+                    .tint(Self.archiveIndigo)
                     .disabled(freemiumStore.isRestoring)
                 }
             }
@@ -2153,7 +2158,7 @@ struct ContentView: View {
         } else if let fromExportFolder = chatNameFromExportFolder(chatURL: chatURL) {
             candidate = fromExportFolder
         } else {
-            candidate = chatPartnerCandidates.first ?? detectedParticipants.first ?? "WhatsApp Chat"
+            candidate = chatPartnerCandidates.first ?? detectedParticipants.first ?? "Chat Export"
         }
         return WETPartnerNaming.normalizePartnerFolderName(candidate)
     }
@@ -2224,33 +2229,11 @@ struct ContentView: View {
         let folder = normalizedDisplayName(chatURL.deletingLastPathComponent().lastPathComponent)
         guard !folder.isEmpty else { return nil }
 
-        let lower = folder.lowercased()
-        let genericNames = [
-            "whatsapp chat",
-            "whatsapp-chat"
-        ]
-        if genericNames.contains(lower) {
-            return nil
-        }
-
-        let prefixes = [
-            "WhatsApp Chat - ",
-            "WhatsApp Chat – ",
-            "WhatsApp Chat — ",
-            "WhatsApp Chat with ",
-            "WhatsApp Chat mit ",
-            "WhatsApp-Chat - ",
-            "WhatsApp-Chat – ",
-            "WhatsApp-Chat — ",
-            "WhatsApp-Chat with ",
-            "WhatsApp-Chat mit "
-        ]
-
-        for prefix in prefixes {
-            if lower.hasPrefix(prefix.lowercased()) {
-                let suffix = String(folder.dropFirst(prefix.count))
+        for separator in [" - ", " – ", " — "] {
+            if let range = folder.range(of: separator) {
+                let suffix = String(folder[range.upperBound...])
                     .trimmingCharacters(in: .whitespacesAndNewlines)
-                return suffix.isEmpty ? nil : suffix
+                if !suffix.isEmpty { return suffix }
             }
         }
 
@@ -2687,7 +2670,7 @@ struct ContentView: View {
     private func refreshParticipants(for inputURL: URL) {
         let snapshot: WAInputSnapshot
         do {
-            snapshot = try WhatsAppExportService.resolveInputSnapshot(inputURL: inputURL)
+            snapshot = try ChatExportService.resolveInputSnapshot(inputURL: inputURL)
         } catch {
             appendLog("ERROR: \(error.localizedDescription)")
             replayModeActive = false
@@ -2705,7 +2688,7 @@ struct ContentView: View {
 
         let chatURL = snapshot.chatURL
         do {
-            let detectionSnapshot = try WhatsAppExportService.participantDetectionSnapshot(
+            let detectionSnapshot = try ChatExportService.participantDetectionSnapshot(
                 chatURL: chatURL,
                 provenance: snapshot.provenance,
                 preferredMeName: exporterName
@@ -2781,7 +2764,7 @@ struct ContentView: View {
                 }
             }()
 
-            let resolved = WhatsAppExportService.resolveParticipants(
+            let resolved = ChatExportService.resolveParticipants(
                 participants: parts,
                 detectedExporter: detectedForResolution,
                 detectedPartner: detectedPartner,
@@ -2895,7 +2878,7 @@ struct ContentView: View {
                 } else if !usedFallbackParticipant, let fallback = parts.first {
                     candidates = [fallback]
                 } else {
-                    candidates = ["WhatsApp Chat"]
+                    candidates = ["Chat Export"]
                 }
             }
 
@@ -2932,7 +2915,7 @@ struct ContentView: View {
             detectedDateRange = nil
             detectedMediaCounts = .zero
             inputKindBadgeKey = nil
-            let fallbackPartner = "WhatsApp Chat"
+            let fallbackPartner = "Chat Export"
             chatPartnerCandidates = [fallbackPartner]
             autoDetectedChatPartnerName = fallbackPartner
             if chatPartnerSelection != Self.customChatPartnerTag {
@@ -3039,7 +3022,7 @@ struct ContentView: View {
         let partner = participantResolution.effectivePartner
         participantResolution.exporterOverride = normalizedOverrideValue(partner)
         participantResolution.partnerOverride = normalizedOverrideValue(exporter)
-        let swappedResolved = WhatsAppExportService.resolveParticipants(
+        let swappedResolved = ChatExportService.resolveParticipants(
             participants: participantResolution.participantsDetected,
             detectedExporter: detectedExporterForResolution(),
             detectedPartner: participantResolution.detectedPartner,
@@ -3059,14 +3042,14 @@ struct ContentView: View {
     private func normalizedOverrideValue(_ value: String) -> String? {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty { return nil }
-        if trimmed == WhatsAppExportService.exporterPlaceholderToken { return nil }
+        if trimmed == ChatExportService.exporterPlaceholderToken { return nil }
         return trimmed
     }
 
     private func updateExporterOverride(_ value: String?) {
         let normalized = normalizedOverrideValue(value ?? "")
         participantResolution.exporterOverride = normalized
-        let resolved = WhatsAppExportService.resolveParticipants(
+        let resolved = ChatExportService.resolveParticipants(
             participants: participantResolution.participantsDetected,
             detectedExporter: detectedExporterForResolution(),
             detectedPartner: participantResolution.detectedPartner,
@@ -3084,7 +3067,7 @@ struct ContentView: View {
 
     private func updatePartnerOverride(_ value: String?) {
         participantResolution.partnerOverride = normalizedOverrideValue(value ?? "")
-        let resolved = WhatsAppExportService.resolveParticipants(
+        let resolved = ChatExportService.resolveParticipants(
             participants: participantResolution.participantsDetected,
             detectedExporter: detectedExporterForResolution(),
             detectedPartner: participantResolution.detectedPartner,
@@ -3114,7 +3097,7 @@ struct ContentView: View {
         let raw = participantResolution.effectiveExporter
         let trimmed = applyPhoneOverrideIfNeeded(raw).trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
-            return WhatsAppExportService.exporterPlaceholderDisplayName
+            return ChatExportService.exporterPlaceholderDisplayName
         }
         return trimmed
     }
@@ -3379,7 +3362,7 @@ struct ContentView: View {
         let reportsDir = repoRoot.appendingPathComponent("Codex Reports", isDirectory: true)
         guard fm.fileExists(atPath: reportsDir.path) else { return }
 
-        let snapshot = WhatsAppExportService.perfSnapshot()
+        let snapshot = ChatExportService.perfSnapshot()
         let tsFormatter = DateFormatter()
         tsFormatter.locale = Locale(identifier: "en_US_POSIX")
         tsFormatter.timeZone = TimeZone.current
@@ -3778,11 +3761,11 @@ struct ContentView: View {
     }
 
     nonisolated private static func preparedWithBaseName(
-        _ prepared: WhatsAppExportService.PreparedExport,
+        _ prepared: ChatExportService.PreparedExport,
         baseName: String
-    ) -> WhatsAppExportService.PreparedExport {
+    ) -> ChatExportService.PreparedExport {
         if prepared.baseName == baseName { return prepared }
-        return WhatsAppExportService.PreparedExport(
+        return ChatExportService.PreparedExport(
             messages: prepared.messages,
             meName: prepared.meName,
             baseName: baseName,
@@ -4122,9 +4105,9 @@ struct ContentView: View {
             pendingPreflight = nil
             pendingPreparedExport = nil
         }
-        WhatsAppExportService.resetAttachmentIndexCache()
-        WhatsAppExportService.resetThumbnailCaches()
-        WhatsAppExportService.resetPerfMetrics()
+        ChatExportService.resetAttachmentIndexCache()
+        ChatExportService.resetThumbnailCaches()
+        ChatExportService.resetPerfMetrics()
         let t0 = ProcessInfo.processInfo.systemUptime
         logExportTiming("T0 tap", startUptime: t0)
         isRunning = true
@@ -4176,7 +4159,7 @@ struct ContentView: View {
 
         let snapshot: WAInputSnapshot
         do {
-            snapshot = try WhatsAppExportService.resolveInputSnapshot(
+            snapshot = try ChatExportService.resolveInputSnapshot(
                 inputURL: chatURL,
                 detectedPartnerRaw: detectedPartnerRaw,
                 overridePartnerRaw: overridePartnerEffective
@@ -4200,7 +4183,7 @@ struct ContentView: View {
 
         let exporter = effectiveExporterForOutput()
         let allowPlaceholderAsMe = resolution.allowPlaceholderAsMe
-        let titleNamesOverride = WhatsAppExportService.conversationLabelForOutput(
+        let titleNamesOverride = ChatExportService.conversationLabelForOutput(
             exporter: exporter,
             partners: outputChatPartners.isEmpty ? nil : outputChatPartners,
             chatKind: resolution.chatKind,
@@ -4414,14 +4397,14 @@ struct ContentView: View {
         }
         let perfEnabled = env["WET_PERF"] == "1"
 
-        let prepared: WhatsAppExportService.PreparedExport
+        let prepared: ChatExportService.PreparedExport
         do {
             if let provided = context.prepared {
                 prepared = provided
             } else {
                 prepared = try await Self.debugMeasureAsync("parse chat") {
                     let parseTask = Task.detached(priority: .userInitiated) {
-                        try WhatsAppExportService.prepareExport(
+                        try ChatExportService.prepareExport(
                             chatURL: context.chatURL,
                             meNameOverride: context.exporter,
                             participantNameOverrides: context.participantNameOverrides
@@ -4440,7 +4423,7 @@ struct ContentView: View {
             return
         }
         let overrideTrimmed = context.baseNameOverride?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let computedBaseName = WhatsAppExportService.composeExportBaseNameForOutput(
+        let computedBaseName = ChatExportService.composeExportBaseNameForOutput(
             messages: prepared.messages,
             chatURL: prepared.chatURL,
             exporter: context.exporter,
@@ -4509,7 +4492,7 @@ struct ContentView: View {
                  "RawArchive=\(onOff(runContext.wantsRawArchiveCopy)) " +
                  "DeleteOriginals=\(onOff(runContext.wantsDeleteOriginals))")
         if perfEnabled {
-            let caps = WhatsAppExportService.concurrencyCaps()
+            let caps = ChatExportService.concurrencyCaps()
             logger.log("WET-PERF: caps cpu=\(caps.cpu) io=\(caps.io)")
             if let cpuOverride = env["WET_MAX_CPU"] {
                 logger.log("WET-PERF: WET_MAX_CPU=\(cpuOverride)")
@@ -4608,7 +4591,7 @@ struct ContentView: View {
                     wantsMarkdown: runContext.wantsMD,
                     wantsSidecar: runContext.wantsSidecar
                 )
-                let flags = WhatsAppExportService.ManifestArtifactFlags(
+                let flags = ChatExportService.ManifestArtifactFlags(
                     sidecar: runContext.wantsSidecar,
                     max: runContext.plan.variants.contains(.embedAll),
                     compact: runContext.plan.variants.contains(.thumbnailsOnly),
@@ -4617,14 +4600,14 @@ struct ContentView: View {
                     deleteOriginals: runContext.wantsDeleteOriginals,
                     rawArchive: runContext.wantsRawArchiveCopy
                 )
-                let resolution = WhatsAppExportService.ManifestParticipantResolution(
+                let resolution = ChatExportService.ManifestParticipantResolution(
                     exporterConfidence: runContext.exporterConfidence,
                     partnerConfidence: runContext.partnerConfidence,
                     exporterWasOverridden: runContext.exporterWasOverridden,
                     partnerWasOverridden: runContext.partnerWasOverridden,
                     wasSwapped: runContext.wasSwapped
                 )
-                _ = try WhatsAppExportService.writeDeterministicManifestAndChecksums(
+                _ = try ChatExportService.writeDeterministicManifestAndChecksums(
                     exportDir: workResult.exportDir,
                     baseName: baseName,
                     chatURL: prepared.chatURL,
@@ -4651,7 +4634,7 @@ struct ContentView: View {
             if runContext.wantsRawArchiveCopy { published.append("Raw archive") }
             published.append(contentsOf: runContext.plan.variants.map { Self.htmlVariantLogLabel(for: $0) })
             if runContext.wantsMD { published.append("Markdown") }
-            let perfSnapshot = WhatsAppExportService.perfSnapshot()
+            let perfSnapshot = ChatExportService.perfSnapshot()
             logger.log(
                 "Counters: artifacts=\(published.count) " +
                 "thumbs requested=\(perfSnapshot.thumbStoreRequested) " +
@@ -4838,7 +4821,7 @@ struct ContentView: View {
     nonisolated private static func performExportWork(
         context: ExportContext,
         baseName: String,
-        prepared: WhatsAppExportService.PreparedExport,
+        prepared: ChatExportService.PreparedExport,
         log: @escaping @Sendable (String) -> Void,
         debugEnabled: Bool,
         debugLog: @escaping @Sendable (String) -> Void,
@@ -4854,7 +4837,7 @@ struct ContentView: View {
         let parallelEnabled = parallelOverride ?? Self.parallelExportEnabled()
         let verboseDebug = debugEnabled && env["WET_DEBUG_VERBOSE"] == "1"
         if debugEnabled {
-            let caps = WhatsAppExportService.concurrencyCaps()
+            let caps = ChatExportService.concurrencyCaps()
             debugLog("CONCURRENCY CAPS: cpu=\(caps.cpu) io=\(caps.io)")
             if let cpuOverride = env["WET_MAX_CPU"] {
                 debugLog("CONCURRENCY OVERRIDE: WET_MAX_CPU=\(cpuOverride)")
@@ -4867,8 +4850,8 @@ struct ContentView: View {
 
         let baseHTMLName = "\(baseName).html"
 
-        let stagingBase = try WhatsAppExportService.localStagingBaseDirectory()
-        let targetIsICloud = WhatsAppExportService.isLikelyICloudBacked(exportDir)
+        let stagingBase = try ChatExportService.localStagingBaseDirectory()
+        let targetIsICloud = ChatExportService.isLikelyICloudBacked(exportDir)
         if debugEnabled {
             debugLog("STAGING BASE: \(stagingBase.path)")
             debugLog("PUBLISH TARGET: \(exportDir.path)")
@@ -4882,20 +4865,20 @@ struct ContentView: View {
         let wantsAttachmentIndex = plan.wantsSidecar
             || plan.wantsMD
             || plan.variants.contains(where: { $0 == .embedAll || $0 == .thumbnailsOnly })
-        if wantsAttachmentIndex, WhatsAppExportService.hasAnyAttachmentMarkers(messages: prepared.messages) {
-            WhatsAppExportService.prewarmAttachmentIndex(for: prepared.chatURL.deletingLastPathComponent())
+        if wantsAttachmentIndex, ChatExportService.hasAnyAttachmentMarkers(messages: prepared.messages) {
+            ChatExportService.prewarmAttachmentIndex(for: prepared.chatURL.deletingLastPathComponent())
         }
 
         let wantsThumbStore = plan.wantsAnyThumbs
-        var attachmentEntries: [WhatsAppExportService.AttachmentCanonicalEntry] = []
-        if wantsThumbStore, WhatsAppExportService.hasAnyAttachmentMarkers(messages: prepared.messages) {
-            attachmentEntries = WhatsAppExportService.buildAttachmentCanonicalEntries(
+        var attachmentEntries: [ChatExportService.AttachmentCanonicalEntry] = []
+        if wantsThumbStore, ChatExportService.hasAnyAttachmentMarkers(messages: prepared.messages) {
+            attachmentEntries = ChatExportService.buildAttachmentCanonicalEntries(
                 messages: prepared.messages,
                 chatSourceDir: prepared.chatURL.deletingLastPathComponent()
             )
         }
 
-        let stagingDir = try WhatsAppExportService.createStagingDirectory(in: stagingBase)
+        let stagingDir = try ChatExportService.createStagingDirectory(in: stagingBase)
         if debugEnabled {
             debugLog("STAGING ROOT CREATED: \(stagingDir.path)")
         }
@@ -4959,7 +4942,7 @@ struct ContentView: View {
                 debugLog("VARIANT DONE: \(artifactLabel(artifact)) duration=\(Self.formatDuration(duration))")
             }
             await reporter.finished(runStep(for: artifact), duration: duration)
-            WhatsAppExportService.recordArtifactDuration(label: artifactLabel(artifact), duration: duration)
+            ChatExportService.recordArtifactDuration(label: artifactLabel(artifact), duration: duration)
         }
 
         var publishCounts: [String: Int] = [:]
@@ -5142,12 +5125,12 @@ struct ContentView: View {
                 debugLog("TIMESTAMP SYNC: \(sidecarBaseDir.path)")
             }
             if attachmentEntries.isEmpty { return }
-            WhatsAppExportService.normalizeSidecarMediaTimestamps(
+            ChatExportService.normalizeSidecarMediaTimestamps(
                 entries: attachmentEntries,
                 sidecarBaseDir: sidecarBaseDir
             )
             if logMismatches {
-                let mismatches = WhatsAppExportService.sampleSidecarMediaTimestampMismatches(
+                let mismatches = ChatExportService.sampleSidecarMediaTimestampMismatches(
                     entries: attachmentEntries,
                     sidecarBaseDir: sidecarBaseDir,
                     maxFiles: 3
@@ -5219,7 +5202,7 @@ struct ContentView: View {
                 try fm.moveItem(at: staged, to: final)
             }
             let moveDuration = ProcessInfo.processInfo.systemUptime - moveStart
-            WhatsAppExportService.recordPublishDuration(label: recordLabel, duration: moveDuration)
+            ChatExportService.recordPublishDuration(label: recordLabel, duration: moveDuration)
             movedOutputs.append(final)
             if debugEnabled {
                 debugLog("PUBLISH OK: \(final.path)")
@@ -5237,7 +5220,7 @@ struct ContentView: View {
             steps.append(.markdown)
         }
 
-        var thumbnailStore: WhatsAppExportService.ThumbnailStore? = nil
+        var thumbnailStore: ChatExportService.ThumbnailStore? = nil
 
         var movedOutputs: [URL] = []
         var htmlByVariant: [HTMLVariant: URL] = [:]
@@ -5251,7 +5234,7 @@ struct ContentView: View {
         var didPublishExternalAssets = false
 
         if wantsThumbStore, !context.wantsSidecar {
-            let thumbContext = try await WhatsAppExportService.prepareThumbnailStoreContext(
+            let thumbContext = try await ChatExportService.prepareThumbnailStoreContext(
                 wantsThumbs: wantsThumbStore,
                 attachmentEntries: attachmentEntries,
                 mode: .temp(baseName: baseName, chatURL: prepared.chatURL, stagingBase: stagingBase)
@@ -5266,7 +5249,7 @@ struct ContentView: View {
 
         func publishExternalAssetsIfNeeded() throws {
             guard !didPublishExternalAssets else { return }
-            let publishedAssets = try WhatsAppExportService.publishExternalAssetsIfPresent(
+            let publishedAssets = try ChatExportService.publishExternalAssetsIfPresent(
                 stagingRoot: stagingDir,
                 exportDir: exportDir,
                 allowOverwrite: context.allowOverwrite,
@@ -5284,7 +5267,7 @@ struct ContentView: View {
 
         func performSidecarStep() async throws {
             let sidecarResult = try await Self.debugMeasureAsync("generate sidecar") {
-                try await WhatsAppExportService.renderSidecar(
+                try await ChatExportService.renderSidecar(
                     prepared: prepared,
                     outDir: stagingDir,
                     allowStagingOverwrite: true,
@@ -5360,7 +5343,7 @@ struct ContentView: View {
                 logFirstLevelEntries(stagingDir, label: "Sidecar staging root entries (all)", skipHidden: false)
                 logFirstLevelEntries(stagedSidecarBaseDir, label: "Sidecar staging dir entries (all)", skipHidden: false)
                 try ensureNonEmptyArtifact(stagedSidecarBaseDir, artifact: .sidecar)
-                try WhatsAppExportService.validateSidecarLayout(sidecarBaseDir: stagedSidecarBaseDir)
+                try ChatExportService.validateSidecarLayout(sidecarBaseDir: stagedSidecarBaseDir)
             }
             guard let stagedSidecarHTML else {
                 throw EmptyArtifactError(url: stagingDir, reason: "sidecar HTML missing")
@@ -5419,7 +5402,7 @@ struct ContentView: View {
                 finalSidecarBaseDir = finalSidecarDir
                 if wantsThumbStore, !attachmentEntries.isEmpty {
                     let thumbsDir = finalSidecarDir.appendingPathComponent("_thumbs", isDirectory: true)
-                    thumbnailStore = WhatsAppExportService.ThumbnailStore(
+                    thumbnailStore = ChatExportService.ThumbnailStore(
                         entries: attachmentEntries,
                         thumbsDir: thumbsDir,
                         allowWrite: false
@@ -5436,7 +5419,7 @@ struct ContentView: View {
             let useThumbHrefs = context.wantsSidecar && variant.thumbnailsOnly
             let thumbRelBaseDir = useThumbHrefs ? exportDir : nil
             let stagedHTML = try await Self.debugMeasureAsync("generate \(artifactLabel(.html(variant)))") {
-                try await WhatsAppExportService.renderHTMLPrepared(
+                try await ChatExportService.renderHTMLPrepared(
                     prepared: prepared,
                     outDir: stagingDir,
                     fileSuffix: Self.htmlVariantSuffix(for: variant),
@@ -5498,7 +5481,7 @@ struct ContentView: View {
                 return map
             }()
             let stagedMDURL = try Self.debugMeasure("generate Markdown") {
-                try WhatsAppExportService.renderMarkdown(
+                try ChatExportService.renderMarkdown(
                     prepared: prepared,
                     outDir: stagingDir,
                     chatURLOverride: mdChatURL,
@@ -5575,7 +5558,7 @@ struct ContentView: View {
                 }
 
                 if !parallelSteps.isEmpty {
-                    let caps = WhatsAppExportService.concurrencyCaps()
+                    let caps = ChatExportService.concurrencyCaps()
                     let renderCap = max(1, min(caps.cpu, 4))
                     let limiter = StageLimiter(renderCap)
 
@@ -5933,7 +5916,7 @@ private struct WACard: ViewModifier {
             .padding(10)
             .background(
                 ZStack {
-                    // Color tint layer (WhatsApp palette) — very light so the watermark can shine through
+                    // Very light tint layer so the watermark can shine through.
                     shape
                         .fill(ContentView.cardTintGradient)
                         .opacity(0.06)
@@ -5946,7 +5929,7 @@ private struct WACard: ViewModifier {
             )
             .overlay(
                 shape
-                    .stroke(ContentView.waGreen.opacity(0.05), lineWidth: 1)
+                    .stroke(ContentView.archiveBlue.opacity(0.05), lineWidth: 1)
             )
         .shadow(color: .black.opacity(0.06), radius: 12, x: 0, y: 6)
     }

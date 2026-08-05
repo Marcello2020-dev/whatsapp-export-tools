@@ -114,7 +114,7 @@ Preferred for first submissions:
 
 Use clear reviewer notes:
 
-- "App converts user-selected WhatsApp exports into local HTML/Markdown artifacts."
+- "App converts user-selected chat exports into local HTML/Markdown artifacts."
 - "No background services, no hidden telemetry."
 - "Network access is used only for optional link preview enrichment."
 - "All file access is user-selected via sandbox panels/bookmarks."

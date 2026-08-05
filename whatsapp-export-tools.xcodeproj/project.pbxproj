@@ -12,12 +12,12 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
-		1F7402162F0B1C39000499C3 /* Exceptions for "whatsapp-export-tools" folder in "WhatsApp Export Tools" target */ = {
+		1F7402162F0B1C39000499C3 /* Exceptions for "whatsapp-export-tools" folder in "Chat Export Studio" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				Info.plist,
 			);
-			target = 1F7A85992F0A86540053EE07 /* WhatsApp Export Tools */;
+			target = 1F7A85992F0A86540053EE07 /* Chat Export Studio */;
 		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
@@ -25,7 +25,7 @@
 		1F7A859C2F0A86540053EE07 /* whatsapp-export-tools */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
-				1F7402162F0B1C39000499C3 /* Exceptions for "whatsapp-export-tools" folder in "WhatsApp Export Tools" target */,
+				1F7402162F0B1C39000499C3 /* Exceptions for "whatsapp-export-tools" folder in "Chat Export Studio" target */,
 			);
 			path = "whatsapp-export-tools";
 			sourceTree = "<group>";
@@ -63,9 +63,9 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		1F7A85992F0A86540053EE07 /* WhatsApp Export Tools */ = {
+		1F7A85992F0A86540053EE07 /* Chat Export Studio */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 1F7A85A52F0A86550053EE07 /* Build configuration list for PBXNativeTarget "WhatsApp Export Tools" */;
+			buildConfigurationList = 1F7A85A52F0A86550053EE07 /* Build configuration list for PBXNativeTarget "Chat Export Studio" */;
 			buildPhases = (
 				1F7A85962F0A86540053EE07 /* Sources */,
 				1F7A85972F0A86540053EE07 /* Frameworks */,
@@ -78,10 +78,10 @@
 			fileSystemSynchronizedGroups = (
 				1F7A859C2F0A86540053EE07 /* whatsapp-export-tools */,
 			);
-			name = "WhatsApp Export Tools";
+			name = "Chat Export Studio";
 			packageProductDependencies = (
 			);
-			productName = "whatsapp-export-tools";
+			productName = "Chat Export Studio";
 			productReference = 1F7A859A2F0A86540053EE07 /* Chat Export Studio.app */;
 			productType = "com.apple.product-type.application";
 		};
@@ -115,7 +115,7 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				1F7A85992F0A86540053EE07 /* WhatsApp Export Tools */,
+				1F7A85992F0A86540053EE07 /* Chat Export Studio */,
 			);
 		};
 /* End PBXProject section */
@@ -277,7 +277,7 @@
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 3;
 				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = S2972HAK7G;
 				ENABLE_APP_SANDBOX = YES;
@@ -317,7 +317,7 @@
 				CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 3;
 				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = S2972HAK7G;
 				ENABLE_APP_SANDBOX = YES;
@@ -358,7 +358,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		1F7A85A52F0A86550053EE07 /* Build configuration list for PBXNativeTarget "WhatsApp Export Tools" */ = {
+		1F7A85A52F0A86550053EE07 /* Build configuration list for PBXNativeTarget "Chat Export Studio" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				1F7A85A62F0A86550053EE07 /* Debug */,

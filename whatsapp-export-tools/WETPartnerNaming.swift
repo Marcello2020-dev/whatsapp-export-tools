@@ -1,6 +1,6 @@
 import Foundation
 
-/// Utility helpers for normalizing partner folder names coming from WhatsApp exports.
+/// Utility helpers for normalizing partner folder names coming from chat exports.
 enum WETPartnerNaming {
     /// Carries both the original and normalized folder name so callers can detect changes.
     struct NormalizationResult: Equatable {
@@ -52,7 +52,7 @@ enum WETPartnerNaming {
         x = x.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
         x = x.trimmingCharacters(in: CharacterSet(charactersIn: " ."))
 
-        if x.isEmpty { x = "WhatsApp Chat" }
+        if x.isEmpty { x = "Chat Export" }
         if x.count > maxLen {
             x = String(x.prefix(maxLen)).trimmingCharacters(in: CharacterSet(charactersIn: " ."))
         }

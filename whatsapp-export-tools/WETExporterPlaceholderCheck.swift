@@ -30,8 +30,8 @@ struct WETExporterPlaceholderCheck {
         }
 
         do {
-            let snapshot = try WhatsAppExportService.resolveInputSnapshot(inputURL: chatURL)
-            let detection = try WhatsAppExportService.participantDetectionSnapshot(
+            let snapshot = try ChatExportService.resolveInputSnapshot(inputURL: chatURL)
+            let detection = try ChatExportService.participantDetectionSnapshot(
                 chatURL: snapshot.chatURL,
                 provenance: snapshot.provenance
             )
@@ -41,9 +41,9 @@ struct WETExporterPlaceholderCheck {
             expect(participants.contains("Person B"), "participants include Person B")
             expect(!lower.contains("du"), "participants exclude Du")
             expect(!lower.contains("you"), "participants exclude You")
-            expect(!participants.contains(WhatsAppExportService.exporterPlaceholderToken), "participants exclude placeholder token")
+            expect(!participants.contains(ChatExportService.exporterPlaceholderToken), "participants exclude placeholder token")
 
-            let meName = try WhatsAppExportService.detectMeName(chatURL: snapshot.chatURL)
+            let meName = try ChatExportService.detectMeName(chatURL: snapshot.chatURL)
             expect(meName == nil, "exporter inference is unknown")
             expect(detection.detection.exporterSelfCandidate == nil, "exporterSelfCandidate is nil")
             expect(detection.detection.exporterPlaceholderSeen, "exporter placeholder detected")
@@ -58,24 +58,24 @@ struct WETExporterPlaceholderCheck {
             expect(fallback.confidence == .none, "fallback exporter confidence is none")
             expect(fallback.assumed, "fallback exporter marked assumed")
 
-            let messageCount = try WhatsAppExportService._messageCountForTesting(chatURL)
+            let messageCount = try ChatExportService._messageCountForTesting(chatURL)
             expect(messageCount == 5, "message count == 5")
 
-            let swapLabel = WhatsAppExportService.conversationLabelForOutput(
+            let swapLabel = ChatExportService.conversationLabelForOutput(
                 exporter: "Person A",
                 partner: "Person B",
                 chatKind: .oneToOne,
                 chatURL: snapshot.chatURL
             )
             expect(swapLabel == "Person A ↔ Person B", "label uses exporter/partner")
-            let swapLabelReversed = WhatsAppExportService.conversationLabelForOutput(
+            let swapLabelReversed = ChatExportService.conversationLabelForOutput(
                 exporter: "Person B",
                 partner: "Person A",
                 chatKind: .oneToOne,
                 chatURL: snapshot.chatURL
             )
             expect(swapLabelReversed == "Person B ↔ Person A", "label swaps exporter/partner")
-            let noDupLabel = WhatsAppExportService.conversationLabelForOutput(
+            let noDupLabel = ChatExportService.conversationLabelForOutput(
                 exporter: "Person A",
                 partner: "Person A",
                 chatKind: .oneToOne,
@@ -83,11 +83,11 @@ struct WETExporterPlaceholderCheck {
             )
             expect(!noDupLabel.contains("Person A ↔ Person A"), "label avoids duplicate names")
 
-            let prepared = try WhatsAppExportService.prepareExport(
+            let prepared = try ChatExportService.prepareExport(
                 chatURL: snapshot.chatURL,
                 meNameOverride: "Person A"
             )
-            let baseName = WhatsAppExportService.composeExportBaseNameForOutput(
+            let baseName = ChatExportService.composeExportBaseNameForOutput(
                 messages: prepared.messages,
                 chatURL: snapshot.chatURL,
                 exporter: "Person A",
@@ -96,15 +96,15 @@ struct WETExporterPlaceholderCheck {
             )
             expect(!baseName.contains("Person A ↔ Person A"), "baseName avoids duplicate names")
 
-            let weakSnapshot = try WhatsAppExportService.resolveInputSnapshot(inputURL: weakPartnerChatURL)
-            let weakDetection = try WhatsAppExportService.participantDetectionSnapshot(
+            let weakSnapshot = try ChatExportService.resolveInputSnapshot(inputURL: weakPartnerChatURL)
+            let weakDetection = try ChatExportService.participantDetectionSnapshot(
                 chatURL: weakSnapshot.chatURL,
                 provenance: weakSnapshot.provenance
             )
             expect(weakDetection.detection.partnerConfidence == .weak, "weak partner confidence for phone-only export")
 
-            let twoPartySnapshot = try WhatsAppExportService.resolveInputSnapshot(inputURL: twoPartyChatURL)
-            let twoPartyDetection = try WhatsAppExportService.participantDetectionSnapshot(
+            let twoPartySnapshot = try ChatExportService.resolveInputSnapshot(inputURL: twoPartyChatURL)
+            let twoPartyDetection = try ChatExportService.participantDetectionSnapshot(
                 chatURL: twoPartySnapshot.chatURL,
                 provenance: twoPartySnapshot.provenance
             )
@@ -114,7 +114,7 @@ struct WETExporterPlaceholderCheck {
                 participants: twoPartyDetection.participants
             )
             expect(derived != nil, "derived exporter from 2 participants")
-            let resolvedTwoParty = WhatsAppExportService.resolveParticipants(
+            let resolvedTwoParty = ChatExportService.resolveParticipants(
                 participants: twoPartyDetection.participants,
                 detectedExporter: nil,
                 detectedPartner: twoPartyDetection.detection.otherPartyCandidate ?? twoPartyDetection.detection.chatTitleCandidate,
@@ -126,8 +126,8 @@ struct WETExporterPlaceholderCheck {
             expect(!resolvedTwoParty.exporter.isEmpty, "resolved exporter from partner hint")
             expect(resolvedTwoParty.partners.count == 1, "resolved partner count 1")
 
-            let groupSnapshot = try WhatsAppExportService.resolveInputSnapshot(inputURL: groupChatURL)
-            let groupDetection = try WhatsAppExportService.participantDetectionSnapshot(
+            let groupSnapshot = try ChatExportService.resolveInputSnapshot(inputURL: groupChatURL)
+            let groupDetection = try ChatExportService.participantDetectionSnapshot(
                 chatURL: groupSnapshot.chatURL,
                 provenance: groupSnapshot.provenance,
                 preferredMeName: "Person A"
@@ -139,7 +139,7 @@ struct WETExporterPlaceholderCheck {
             expect(groupDetection.participants.contains("Person B"), "group participants include Person B")
             expect(groupDetection.participants.contains("Person C"), "group participants include Person C")
 
-            let groupPrepared = try WhatsAppExportService.prepareExport(
+            let groupPrepared = try ChatExportService.prepareExport(
                 chatURL: groupSnapshot.chatURL,
                 meNameOverride: "Person A"
             )
@@ -153,7 +153,7 @@ struct WETExporterPlaceholderCheck {
             let groupPartners = groupDetection.participants.filter {
                 $0.lowercased() != "person a".lowercased()
             }
-            let mdURL = try WhatsAppExportService.renderMarkdown(
+            let mdURL = try ChatExportService.renderMarkdown(
                 prepared: groupPrepared,
                 outDir: groupTemp,
                 partnerNamesOverride: groupPartners,
@@ -163,16 +163,16 @@ struct WETExporterPlaceholderCheck {
             expect(mdText.contains("**Person A (Ich)**"), "override marks outgoing in markdown")
             expect(mdText.contains("**Person B**"), "partner line present in markdown")
 
-            let eventMessages = try WhatsAppExportService._messagesForTesting(groupEventChatURL)
+            let eventMessages = try ChatExportService._messagesForTesting(groupEventChatURL)
             expect(eventMessages.count >= 2, "group event fixture has at least 2 messages")
             if eventMessages.count >= 2 {
                 let penultimate = eventMessages[eventMessages.count - 2]
                 let last = eventMessages[eventMessages.count - 1]
-                let penultimateIsSystem = WhatsAppExportService._isSystemMessageForTesting(
+                let penultimateIsSystem = ChatExportService._isSystemMessageForTesting(
                     authorRaw: penultimate.author,
                     text: penultimate.text
                 )
-                let lastIsSystem = WhatsAppExportService._isSystemMessageForTesting(
+                let lastIsSystem = ChatExportService._isSystemMessageForTesting(
                     authorRaw: last.author,
                     text: last.text
                 )
@@ -191,7 +191,7 @@ struct WETExporterPlaceholderCheck {
             let htmlURL = tempRoot.appendingPathComponent(htmlName)
             try "ok".write(to: htmlURL, atomically: true, encoding: .utf8)
 
-            let flags = WhatsAppExportService.ManifestArtifactFlags(
+            let flags = ChatExportService.ManifestArtifactFlags(
                 sidecar: false,
                 max: true,
                 compact: false,
@@ -200,14 +200,14 @@ struct WETExporterPlaceholderCheck {
                 deleteOriginals: false,
                 rawArchive: false
             )
-            let resolution = WhatsAppExportService.ManifestParticipantResolution(
+            let resolution = ChatExportService.ManifestParticipantResolution(
                 exporterConfidence: .none,
                 partnerConfidence: .weak,
                 exporterWasOverridden: true,
                 partnerWasOverridden: true,
                 wasSwapped: true
             )
-            let result = try WhatsAppExportService.writeDeterministicManifestAndChecksums(
+            let result = try ChatExportService.writeDeterministicManifestAndChecksums(
                 exportDir: tempRoot,
                 baseName: baseName,
                 chatURL: snapshot.chatURL,
@@ -226,7 +226,7 @@ struct WETExporterPlaceholderCheck {
             expect(manifestText.contains("\"partnerConfidence\""), "manifest includes partnerConfidence")
 
 #if DEBUG
-            let css = WhatsAppExportService._htmlCSSForTesting()
+            let css = ChatExportService._htmlCSSForTesting()
             expect(css.contains(".row.me{justify-content:flex-end;}"), "CSS aligns outgoing rows right")
             expect(css.contains(".row.other{justify-content:flex-start;}"), "CSS aligns incoming rows left")
             expect(css.contains(".bubble{") && css.contains("text-align: left;"), "bubble text aligns left")

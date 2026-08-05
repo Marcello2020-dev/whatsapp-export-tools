@@ -1,6 +1,6 @@
 //
-//  WhatsAppExportService.swift
-//  whatsapp-export-tools
+//  ChatExportService.swift
+//  Chat Export Studio
 //
 //  Created by Marcel Mißbach on 04.01.26.
 //
@@ -385,7 +385,7 @@ public enum WAInputError: Error, LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .unsupportedInput(let url):
-            return "Unsupported input. Please select a WhatsApp export folder, ZIP, or Chat.txt/_chat.txt. (\(url.lastPathComponent))"
+            return "Unsupported input. Please select a chat export folder, ZIP, or Chat.txt/_chat.txt. (\(url.lastPathComponent))"
         case .transcriptNotFound(let url):
             return "Chat.txt or _chat.txt not found in input: \(url.lastPathComponent)"
         case .ambiguousTranscript(let urls):
@@ -630,8 +630,8 @@ enum SourceOps {
             throw SourceOpsError.missingSourceDir(url: sourceDir)
         }
 
-        let stagingBase = try WhatsAppExportService.localStagingBaseDirectory()
-        let stagingDir = try WhatsAppExportService.createStagingDirectory(in: stagingBase)
+        let stagingBase = try ChatExportService.localStagingBaseDirectory()
+        let stagingDir = try ChatExportService.createStagingDirectory(in: stagingBase)
         var didRemoveStaging = false
         defer {
             if !didRemoveStaging, fm.fileExists(atPath: stagingDir.path) {
@@ -654,7 +654,7 @@ enum SourceOps {
         if debugEnabled {
             debugLog?("RAW ARCHIVE SKIP PREFIXES: \(skipPrefixes)")
         }
-        try WhatsAppExportService.copyDirectoryPreservingStructure(
+        try ChatExportService.copyDirectoryPreservingStructure(
             from: sourceDir,
             to: stagedExportDir,
             skippingPathPrefixes: skipPrefixes
@@ -740,12 +740,12 @@ enum SourceOps {
         let rawRoot = rawArchiveDirectory(baseName: baseName, in: exportDir.standardizedFileURL)
         let copiedDir = rawRoot.appendingPathComponent(originalDir.lastPathComponent, isDirectory: true)
 
-        let exportDirMatches = WhatsAppExportService.directoriesEqual(
+        let exportDirMatches = ChatExportService.directoriesEqual(
             src: originalDir,
             dst: copiedDir,
             requireByteCompare: true
         )
-        let exportDirTimestampsMatch = WhatsAppExportService.directoriesTimestampsEqual(
+        let exportDirTimestampsMatch = ChatExportService.directoriesTimestampsEqual(
             src: originalDir,
             dst: copiedDir
         )
@@ -760,8 +760,8 @@ enum SourceOps {
         if let zip = originalZip {
             copiedZip = rawRoot.appendingPathComponent(zip.lastPathComponent)
             if let copiedZip, fm.fileExists(atPath: copiedZip.path) {
-                zipMatches = WhatsAppExportService.filesEqual(zip, copiedZip, requireByteCompare: true)
-                zipTimestampsMatch = WhatsAppExportService.fileTimestampsEqual(zip, copiedZip)
+                zipMatches = ChatExportService.filesEqual(zip, copiedZip, requireByteCompare: true)
+                zipTimestampsMatch = ChatExportService.fileTimestampsEqual(zip, copiedZip)
             } else {
                 zipMatches = false
                 zipTimestampsMatch = false
@@ -850,8 +850,8 @@ enum SourceOps {
 
 // MARK: - Service
 
-/// Entry point and helper set for orchestrating WhatsApp exports, raw archive copies, and sidecar handling.
-public enum WhatsAppExportService {
+/// Entry point and helper set for orchestrating chat exports, raw archive copies, and sidecar handling.
+public enum ChatExportService {
 
     // ---------------------------
     // Constants / Regex
@@ -988,11 +988,11 @@ public enum WhatsAppExportService {
         // Prefer author-based detection.
         if isSystemAuthor(authorRaw) { return true }
 
-        // Some exports put WhatsApp notices into the message body (or the author field may be empty/"Unbekannt").
+        // Some exports put system notices into the message body (or the author field may be empty/"Unbekannt").
         let lowText = normalizedSystemText(text)
         if lowText.isEmpty { return false }
 
-        // Exact markers (when the whole line matches a known WhatsApp/system notice).
+        // Exact markers when the whole line matches a known system notice.
         if systemMarkers.contains(lowText) { return true }
 
         // Strong keyword pairs (avoid overly-broad matches).
@@ -1591,7 +1591,7 @@ public enum WhatsAppExportService {
             }
 
             if allowOriginalFallback, Self.isImageExtension(entry.sourceURL.pathExtension) {
-                if let dataURL = WhatsAppExportService.fileToDataURL(entry.sourceURL) {
+                if let dataURL = ChatExportService.fileToDataURL(entry.sourceURL) {
                     dataURLCache[key] = dataURL
                     return dataURL
                 }
@@ -1605,7 +1605,7 @@ public enum WhatsAppExportService {
             let key = entry.canonicalRelPath + "||" + (baseDir?.standardizedFileURL.path ?? "")
             if let cached = hrefCache[key] { return cached }
             guard let fileURL = await ensureThumbnailFile(for: entry) else { return nil }
-            let href = WhatsAppExportService.relativeHref(for: fileURL, relativeTo: baseDir)
+            let href = ChatExportService.relativeHref(for: fileURL, relativeTo: baseDir)
             hrefCache[key] = href
             return href
         }
@@ -1622,13 +1622,13 @@ public enum WhatsAppExportService {
         }
 
         private func ensureThumbnailFile(for entry: AttachmentCanonicalEntry) async -> URL? {
-            WhatsAppExportService.recordThumbStoreRequested()
+            ChatExportService.recordThumbStoreRequested()
             guard Self.isThumbnailCandidateExtension(entry.sourceURL.pathExtension) else { return nil }
             let key = entry.canonicalRelPath
             let dest = thumbFileURL(for: key)
 
             if Self.isValidThumbFile(dest) {
-                WhatsAppExportService.recordThumbStoreReused()
+                ChatExportService.recordThumbStoreReused()
                 return dest
             }
 
@@ -1650,7 +1650,7 @@ public enum WhatsAppExportService {
                         return ThumbResult(fileURL: destURL, generated: false, duration: 0)
                     }
                     let start = ProcessInfo.processInfo.systemUptime
-                    guard let jpg = await WhatsAppExportService.thumbnailJPEGData(
+                    guard let jpg = await ChatExportService.thumbnailJPEGData(
                         for: src,
                         maxPixel: thumbMaxPixel,
                         quality: thumbJPEGQuality
@@ -1658,8 +1658,8 @@ public enum WhatsAppExportService {
                         return nil
                     }
                     do {
-                        try WhatsAppExportService.ensureDirectory(destURL.deletingLastPathComponent())
-                        try WhatsAppExportService.writeExclusiveData(jpg, to: destURL)
+                        try ChatExportService.ensureDirectory(destURL.deletingLastPathComponent())
+                        try ChatExportService.writeExclusiveData(jpg, to: destURL)
                     } catch {
                         // Best-effort write; fallback to reuse if file exists.
                     }
@@ -1677,9 +1677,9 @@ public enum WhatsAppExportService {
 
             if let result, let fileURL = result.fileURL {
                 if result.generated {
-                    WhatsAppExportService.recordThumbStoreGenerated(duration: result.duration)
+                    ChatExportService.recordThumbStoreGenerated(duration: result.duration)
                 } else {
-                    WhatsAppExportService.recordThumbStoreReused()
+                    ChatExportService.recordThumbStoreReused()
                 }
                 return fileURL
             }
@@ -2749,7 +2749,7 @@ public enum WhatsAppExportService {
         return (nil, .unknown, reasons)
     }
 
-    /// Compare the original WhatsApp export folder (and sibling zip, if present) with the sidecar copies.
+    /// Compare the original chat export folder (and sibling zip, if present) with the sidecar copies.
     /// Returns which originals are byte-identical and can be safely deleted.
     public nonisolated static func verifySidecarCopies(
         originalExportDir: URL,
@@ -3742,7 +3742,7 @@ public enum WhatsAppExportService {
     // ---------------------------
 
     /// Heuristic check whether a string looks like a phone-number participant label.
-    /// WhatsApp exports often use formats like "+49 171 1234567", "+491711234567", "0171 1234567".
+    /// Chat exports often use formats like "+49 171 1234567", "+491711234567", "0171 1234567".
     nonisolated private static func isPhoneCandidate(_ s: String) -> Bool {
         let x = _normSpace(s)
         if x.isEmpty { return false }
@@ -4045,7 +4045,7 @@ public enum WhatsAppExportService {
             out.append(allowed.contains(ch) ? Character(ch) : "_")
         }
         out = out.trimmingCharacters(in: CharacterSet(charactersIn: "_"))
-        return out.isEmpty ? "WHATSAPP_CHAT" : out
+        return out.isEmpty ? "CHAT_EXPORT" : out
     }
     
     // Produces a human-readable, Finder-friendly filename (keeps spaces and Unicode),
@@ -4067,7 +4067,7 @@ public enum WhatsAppExportService {
         // Avoid leading/trailing dots/spaces
         x = x.trimmingCharacters(in: CharacterSet(charactersIn: " ."))
 
-        if x.isEmpty { x = "WhatsApp Chat" }
+        if x.isEmpty { x = "Chat Export" }
 
         // Length cap (extension is added later)
         if x.count > maxLen {
@@ -4077,33 +4077,13 @@ public enum WhatsAppExportService {
         return x
     }
 
-    nonisolated private static let chatTitlePrefixes: [String] = [
-        "WhatsApp Chat - ",
-        "WhatsApp Chat – ",
-        "WhatsApp Chat — ",
-        "WhatsApp Chat with ",
-        "WhatsApp Chat mit ",
-        "WhatsApp-Chat - ",
-        "WhatsApp-Chat – ",
-        "WhatsApp-Chat — ",
-        "WhatsApp-Chat with ",
-        "WhatsApp-Chat mit "
-    ]
-
     nonisolated private static func stripChatPrefix(_ raw: String) -> String? {
         let cleaned = _normSpace(raw)
         if cleaned.isEmpty { return nil }
 
-        let lower = cleaned.lowercased()
-        let genericNames = [
-            "whatsapp chat",
-            "whatsapp-chat"
-        ]
-        if genericNames.contains(lower) { return nil }
-
-        for prefix in chatTitlePrefixes {
-            if lower.hasPrefix(prefix.lowercased()) {
-                let suffix = String(cleaned.dropFirst(prefix.count))
+        for separator in [" - ", " – ", " — "] {
+            if let range = cleaned.range(of: separator) {
+                let suffix = String(cleaned[range.upperBound...])
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 return suffix.isEmpty ? nil : suffix
             }
@@ -4112,15 +4092,14 @@ public enum WhatsAppExportService {
         return cleaned
     }
 
-    // Like stripChatPrefix, but only returns a value if an explicit WhatsApp header/title prefix is present.
+    // Like stripChatPrefix, but only returns a value if a conventional title separator is present.
     nonisolated private static func stripExplicitChatPrefix(_ raw: String) -> String? {
         let cleaned = _normSpace(raw)
         if cleaned.isEmpty { return nil }
 
-        let lower = cleaned.lowercased()
-        for prefix in chatTitlePrefixes {
-            if lower.hasPrefix(prefix.lowercased()) {
-                let suffix = String(cleaned.dropFirst(prefix.count))
+        for separator in [" - ", " – ", " — "] {
+            if let range = cleaned.range(of: separator) {
+                let suffix = String(cleaned[range.upperBound...])
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 return suffix.isEmpty ? nil : suffix
             }
@@ -4838,7 +4817,7 @@ public enum WhatsAppExportService {
             var out: [String] = []
             for (idx, comp) in comps.enumerated() {
                 let lower = comp.lowercased()
-                if idx == 0 && (lower.hasPrefix("whatsapp chat") || lower.hasPrefix("whatsapp-chat")) {
+                if idx == 0 && (lower == "chat" || lower == "chat export") {
                     continue
                 }
                 if safeDirs.contains(lower) {
@@ -5754,24 +5733,11 @@ public enum WhatsAppExportService {
     // Prefer export folder/zip stem as a fallback chat identifier.
     nonisolated private static func fallbackChatIdentifier(from chatURL: URL) -> String {
         let folderName = normalizedParticipantLabel(chatURL.deletingLastPathComponent().lastPathComponent)
-        if folderName.isEmpty { return "WhatsApp Chat" }
+        if folderName.isEmpty { return "Chat Export" }
 
-        let prefixes = [
-            "WhatsApp Chat - ",
-            "WhatsApp Chat – ",
-            "WhatsApp Chat — ",
-            "WhatsApp Chat with ",
-            "WhatsApp Chat mit ",
-            "WhatsApp-Chat - ",
-            "WhatsApp-Chat – ",
-            "WhatsApp-Chat — ",
-            "WhatsApp-Chat with ",
-            "WhatsApp-Chat mit "
-        ]
-
-        for prefix in prefixes {
-            if folderName.lowercased().hasPrefix(prefix.lowercased()) {
-                let trimmed = normalizedParticipantLabel(String(folderName.dropFirst(prefix.count)))
+        for separator in [" - ", " – ", " — "] {
+            if let range = folderName.range(of: separator) {
+                let trimmed = normalizedParticipantLabel(String(folderName[range.upperBound...]))
                 if !trimmed.isEmpty { return trimmed }
             }
         }
@@ -5990,7 +5956,7 @@ public enum WhatsAppExportService {
         )
         let periodPart = exportDateRangeLabel(messages: messages)
         let createdStamp = exportCreatedStamp(for: chatURL)
-        let baseRaw = "WhatsApp Chat · \(convoPart) · \(periodPart) · Chat.txt created \(createdStamp)"
+        let baseRaw = "Chat Export · \(convoPart) · \(periodPart) · Chat.txt created \(createdStamp)"
         return safeFinderFilename(baseRaw)
     }
 
@@ -6002,7 +5968,7 @@ public enum WhatsAppExportService {
         let convoPart = exportParticipantsLabel(messages: messages, meName: meName, chatURL: chatURL)
         let periodPart = exportDateRangeLabel(messages: messages)
         let createdStamp = exportCreatedStamp(for: chatURL)
-        let baseRaw = "WhatsApp Chat · \(convoPart) · \(periodPart) · Chat.txt created \(createdStamp)"
+        let baseRaw = "Chat Export · \(convoPart) · \(periodPart) · Chat.txt created \(createdStamp)"
         return safeFinderFilename(baseRaw)
     }
 
@@ -6012,10 +5978,10 @@ public enum WhatsAppExportService {
     }
 
     // ---------------------------
-    // Parsing WhatsApp exports
+    // Parsing chat exports
     // ---------------------------
 
-    // Parse "dd.MM.yyyy, HH:mm(:ss)" timestamps used in WhatsApp exports.
+    // Parse "dd.MM.yyyy, HH:mm(:ss)" timestamps used in chat exports.
     nonisolated private static func parseDT_DE(date: String, hm: String, sec: String?) -> Date? {
         let parts = date.split(separator: ".")
         guard parts.count == 3 else { return nil }
@@ -6057,7 +6023,7 @@ public enum WhatsAppExportService {
         do {
             s = try String(contentsOf: chatURL, encoding: .utf8)
         } catch {
-            // Fallbacks for common WhatsApp exports
+            // Fallbacks for common chat exports
             if let s16 = try? String(contentsOf: chatURL, encoding: .utf16) {
                 s = s16
             } else if let sLatin = try? String(contentsOf: chatURL, encoding: .isoLatin1) {
@@ -6076,13 +6042,13 @@ public enum WhatsAppExportService {
         return false
     }
 
-    // Parse WhatsApp export lines into message records.
+    // Parse chat export lines into message records.
     nonisolated private static func parseMessages(_ chatURL: URL) throws -> [WAMessage] {
         let lines = try loadChatLines(chatURL)
         return parseMessages(lines)
     }
 
-    // Parse WhatsApp export lines into message records.
+    // Parse chat export lines into message records.
     nonisolated private static func parseMessages(_ lines: [String]) -> [WAMessage] {
         var msgs: [WAMessage] = []
         var lastIndex: Int? = nil
@@ -6731,7 +6697,7 @@ public enum WhatsAppExportService {
     }
     
     /// For text-only exports, keep chat bubbles non-empty when the original message only contained attachments.
-    /// Returns a human-readable placeholder containing the original filenames (as referenced in the WhatsApp export).
+    /// Returns a human-readable placeholder containing the original filenames referenced in the chat export.
     nonisolated private static func attachmentPlaceholderText(forAttachments fns: [String]) -> String {
         guard !fns.isEmpty else { return "" }
 
@@ -7651,7 +7617,7 @@ nonisolated private static func stageThumbnailForExport(
         guard let u = URL(string: url) else { throw URLError(.badURL) }
         var req = URLRequest(url: u, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: timeout)
         req.httpMethod = "GET"
-        req.setValue("Mozilla/5.0 (WhatsAppExportTools/1.0)", forHTTPHeaderField: "User-Agent")
+        req.setValue("Mozilla/5.0 (ChatExportStudio/1.0)", forHTTPHeaderField: "User-Agent")
         req.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
 
         let (data, resp) = try await URLSession.shared.data(for: req)
@@ -8406,7 +8372,7 @@ nonisolated private static func stageThumbnailForExport(
         let exportCreatedAt = exportCreatedDate(chatURL: chatURL)
         let exportCreatedStr = exportCreatedAt.map { exportDTFormatter.string(from: $0) } ?? "(unknown)"
 
-        // message count (exclude WhatsApp system messages)
+        // Message count excluding system messages.
         let messageCount: Int = msgs.reduce(0) { acc, m in
             let authorNorm = _normSpace(m.author)
             let textWoAttach = stripAttachmentMarkers(m.text)
@@ -8423,7 +8389,7 @@ nonisolated private static func stageThumbnailForExport(
             var parts: [String] = []
             parts.append("<!doctype html><html lang='de'><head><meta charset='utf-8'>")
             parts.append("<meta name='viewport' content='width=device-width, initial-scale=1'>")
-            parts.append("<title>\(htmlEscape("WhatsApp Chat: " + titleNames))</title>")
+            parts.append("<title>\(htmlEscape("Chat Archive: " + titleNames))</title>")
             parts.append("<style>\n\(cssIndented)\n    </style>")
             // Insert the waOpenEmbed JS helper (in the <head>).
             parts.append("""
@@ -8872,7 +8838,7 @@ nonisolated private static func stageThumbnailForExport(
             }()
 
             parts.append("<div class='header'>")
-            parts.append("<p class='h-title'>WhatsApp Chat</p>")
+            parts.append("<p class='h-title'>Chat Archive</p>")
             parts.append("<div class='h-participants'>")
             parts.append("<div class='h-partner'>\(htmlEscape(partnerDisplay))</div>")
             parts.append("<div class='h-me'>\(htmlEscape(meNameDisplay))</div>")
@@ -9608,7 +9574,7 @@ nonisolated private static func stageThumbnailForExport(
         var out: [String] = []
         out.reserveCapacity(max(256, msgs.count * 3))
 
-        out.append("# WhatsApp Chat")
+        out.append("# Chat Archive")
         out.append("")
         out.append("**\(titleNames)**")
         out.append("")
@@ -10369,13 +10335,13 @@ nonisolated private static func stageThumbnailForExport(
         let fm = FileManager.default
         if let override = ProcessInfo.processInfo.environment["WET_TMPDIR"], !override.isEmpty {
             let root = URL(fileURLWithPath: override, isDirectory: true)
-            let base = root.appendingPathComponent("whatsapp-export-tools", isDirectory: true)
+            let base = root.appendingPathComponent("chat-export-studio", isDirectory: true)
             if !fm.fileExists(atPath: base.path) {
                 try fm.createDirectory(at: base, withIntermediateDirectories: true)
             }
             return base.standardizedFileURL
         }
-        let base = fm.temporaryDirectory.appendingPathComponent("whatsapp-export-tools", isDirectory: true)
+        let base = fm.temporaryDirectory.appendingPathComponent("chat-export-studio", isDirectory: true)
         if !fm.fileExists(atPath: base.path) {
             try fm.createDirectory(at: base, withIntermediateDirectories: true)
         }
@@ -10975,8 +10941,8 @@ nonisolated private static func stageThumbnailForExport(
         }
     }
     
-    /// Copies a sibling .zip next to the WhatsApp export folder into the sorted export folder.
-    /// WhatsApp exports are often shared as "<ExportFolder>.zip" alongside the extracted folder.
+    /// Copies a sibling .zip next to the chat export folder into the sorted export folder.
+    /// Chat exports are often shared as "<ExportFolder>.zip" alongside the extracted folder.
     /// Best-effort: if no reasonable zip is found, this is a no-op.
     nonisolated private static func copySiblingZipIfPresent(
         sourceDir: URL,
@@ -11037,15 +11003,10 @@ nonisolated private static func stageThumbnailForExport(
 
     private nonisolated static func stripChatStemPrefix(_ raw: String) -> String {
         let s = normalizedKey(raw)
-        let prefixes = [
-            "whatsapp chat - ",
-            "whatsapp chat – ",
-            "whatsapp chat — ",
-            "whatsapp chat with ",
-            "whatsapp chat mit "
-        ]
-        for prefix in prefixes where s.hasPrefix(prefix) {
-            return String(s.dropFirst(prefix.count))
+        for separator in [" - ", " – ", " — "] {
+            if let range = s.range(of: separator) {
+                return String(s[range.upperBound...])
+            }
         }
         return s
     }

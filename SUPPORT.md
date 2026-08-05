@@ -5,7 +5,6 @@ Thank you for using Chat Export Studio.
 ## Contact
 
 - Email: marcel.missbach@me.com
-- GitHub Issues: https://github.com/Marcello2020-dev/whatsapp-export-tools/issues
 
 ## What to include in a support request
 
@@ -28,7 +27,6 @@ Vielen Dank, dass du Chat Export Studio nutzt.
 ## Kontakt
 
 - E-Mail: marcel.missbach@me.com
-- GitHub-Issues: https://github.com/Marcello2020-dev/whatsapp-export-tools/issues
 
 ## Diese Informationen bitte bei Support-Anfragen mitschicken
 

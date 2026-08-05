@@ -47,7 +47,7 @@ struct WETDeterminismCheck {
                fm.fileExists(atPath: zipMtimeInput.path),
                fm.fileExists(atPath: folderRoot.path) {
                 do {
-                    let zipSnapshot = try WhatsAppExportService.resolveInputSnapshot(inputURL: zipMtimeInput)
+                    let zipSnapshot = try ChatExportService.resolveInputSnapshot(inputURL: zipMtimeInput)
                     let extractedSnapshot = try snapshot(root: zipSnapshot.exportDir)
                     let folderSnapshot = try snapshot(root: folderRoot)
                     let shared = Set(folderSnapshot.keys).intersection(extractedSnapshot.keys)

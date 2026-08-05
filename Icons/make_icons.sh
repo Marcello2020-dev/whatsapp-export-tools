@@ -5,16 +5,15 @@ set -euo pipefail
 ICONS_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Source image (must exist in this folder)
-SRC="$ICONS_DIR/whatsapp-export-tools-icon-1024.png"
+SRC="$ICONS_DIR/chat-export-studio-icon-1024.png"
 
 # Output names (in this folder)
-BASENAME="whatsapp-export-tools"
+BASENAME="chat-export-studio"
 ICONSET="$ICONS_DIR/${BASENAME}.iconset"
-ICNS_OUT="$ICONS_DIR/${BASENAME}.icns"
 
 if [[ ! -f "$SRC" ]]; then
   echo "ERROR: Quelle nicht gefunden: $SRC"
-  echo "Lege eine 1024×1024 PNG-Datei unter folgendem Namen ab: whatsapp-export-tools-icon-1024.png"
+  echo "Lege eine 1024×1024 PNG-Datei unter folgendem Namen ab: chat-export-studio-icon-1024.png"
   exit 1
 fi
 
@@ -44,8 +43,4 @@ cp -f "$SRC" "$ICONSET/icon_512x512@2x.png"
 
 echo "OK: iconset erstellt: $ICONSET"
 
-# .icns erzeugen
-/usr/bin/iconutil -c icns "$ICONSET" -o "$ICNS_OUT"
-echo "OK: icns erstellt: $ICNS_OUT"
-
-echo "Fertig."
+echo "Fertig. Xcode erzeugt beim Build die .icns-Datei aus dem AppIcon-Asset-Katalog."

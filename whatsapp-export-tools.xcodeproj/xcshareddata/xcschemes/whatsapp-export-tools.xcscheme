@@ -17,7 +17,7 @@
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "1F7A85992F0A86540053EE07"
                BuildableName = "Chat Export Studio.app"
-               BlueprintName = "WhatsApp Export Tools"
+               BlueprintName = "Chat Export Studio"
                ReferencedContainer = "container:whatsapp-export-tools.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
@@ -48,7 +48,7 @@
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "1F7A85992F0A86540053EE07"
             BuildableName = "Chat Export Studio.app"
-            BlueprintName = "WhatsApp Export Tools"
+            BlueprintName = "Chat Export Studio"
             ReferencedContainer = "container:whatsapp-export-tools.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
@@ -72,7 +72,7 @@
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "1F7A85992F0A86540053EE07"
             BuildableName = "Chat Export Studio.app"
-            BlueprintName = "WhatsApp Export Tools"
+            BlueprintName = "Chat Export Studio"
             ReferencedContainer = "container:whatsapp-export-tools.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>

@@ -12,7 +12,7 @@ This Privacy Policy describes how Chat Export Studio handles information.
 
 ## 2. What the app does
 
-Chat Export Studio is a local macOS app that converts user-selected WhatsApp export files into local HTML/Markdown outputs.
+Chat Export Studio is a local macOS app that converts user-selected chat export files into local HTML/Markdown outputs.
 
 ## 3. Data handled by the app
 

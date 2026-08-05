@@ -1,6 +1,6 @@
 //
-//  whatsapp_export_toolsApp.swift
-//  whatsapp-export-tools
+//  ChatExportStudioApp.swift
+//  Chat Export Studio
 //
 //  Created by Marcel Mißbach on 04.01.26.
 //
@@ -22,7 +22,7 @@ enum AppLanguage: String, CaseIterable, Identifiable {
 
 /// Main app entry that wires diagnostics, language selection, and conditional debug checks into the lifecycle.
 @main
-struct whatsapp_export_toolsApp: App {
+struct ChatExportStudioApp: App {
     @StateObject private var diagnosticsLog = DiagnosticsLogStore()
     @AppStorage("app.language") private var appLanguageRaw: String = AppLanguage.de.rawValue
 
@@ -196,7 +196,7 @@ private struct WETZipTimestampResolverCheck {
         let ut = Date(timeIntervalSince1970: 1_600_000_000)
         let dosD = dosDate(year: 2022, month: 10, day: 1)
         let dosT = dosTime(hour: 10, minute: 30, second: 0)
-        let utRes = WhatsAppExportService.ZipEntryTimestampResolver.resolve(
+        let utRes = ChatExportService.ZipEntryTimestampResolver.resolve(
             utMTime: ut,
             dosDate: dosD,
             dosTime: dosT,
@@ -210,14 +210,14 @@ private struct WETZipTimestampResolverCheck {
         let startT1 = dosTime(hour: 1, minute: 30, second: 0)
         let startT2 = dosTime(hour: 3, minute: 30, second: 0)
 
-        let startRes1 = WhatsAppExportService.ZipEntryTimestampResolver.resolve(
+        let startRes1 = ChatExportService.ZipEntryTimestampResolver.resolve(
             utMTime: nil,
             dosDate: startD,
             dosTime: startT1,
             timeZone: tz,
             diagnosticsEnabled: true
         )
-        let startRes2 = WhatsAppExportService.ZipEntryTimestampResolver.resolve(
+        let startRes2 = ChatExportService.ZipEntryTimestampResolver.resolve(
             utMTime: nil,
             dosDate: startD,
             dosTime: startT2,
@@ -245,14 +245,14 @@ private struct WETZipTimestampResolverCheck {
         let endT1 = dosTime(hour: 1, minute: 30, second: 0)
         let endT2 = dosTime(hour: 3, minute: 30, second: 0)
 
-        let endRes1 = WhatsAppExportService.ZipEntryTimestampResolver.resolve(
+        let endRes1 = ChatExportService.ZipEntryTimestampResolver.resolve(
             utMTime: nil,
             dosDate: endD,
             dosTime: endT1,
             timeZone: tz,
             diagnosticsEnabled: true
         )
-        let endRes2 = WhatsAppExportService.ZipEntryTimestampResolver.resolve(
+        let endRes2 = ChatExportService.ZipEntryTimestampResolver.resolve(
             utMTime: nil,
             dosDate: endD,
             dosTime: endT2,
@@ -312,7 +312,7 @@ private struct WETZipTimestampFixtureCheck {
         let refURL = (env["WET_ZIP_TS_FIXTURE_REF"].flatMap { $0.isEmpty ? nil : $0 }).map { URL(fileURLWithPath: $0) }
 
         do {
-            let summary = try WhatsAppExportService.runZipTimestampFixtureCheck(zipURL: zipURL, referenceDir: refURL)
+            let summary = try ChatExportService.runZipTimestampFixtureCheck(zipURL: zipURL, referenceDir: refURL)
             print("WET_ZIP_TS_FIXTURE_CHECK: total=\(summary.total) missing=\(summary.missing) extra=\(summary.extra) sizeOrHash=\(summary.sizeOrHashMismatch) mtime=\(summary.mtimeMismatch) drift3600=\(summary.drift3600)")
         } catch {
             print("WET_ZIP_TS_FIXTURE_CHECK: FAIL (\(error))")

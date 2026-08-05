@@ -341,7 +341,7 @@ struct WETBareDomainLinkifyCheck {
         var failures: [String] = []
 
         for c in cases {
-            let output = WhatsAppExportService._linkifyHTMLForTesting(c.input, linkifyHTTP: c.linkifyHTTP)
+            let output = ChatExportService._linkifyHTMLForTesting(c.input, linkifyHTTP: c.linkifyHTTP)
             if output != c.expected {
                 failures.append("[\(c.name)] expected: \(c.expected) | got: \(output)")
             }
@@ -429,7 +429,7 @@ struct WETBareDomainPreviewCheck {
         var failures: [String] = []
 
         for c in cases {
-            let output = WhatsAppExportService._previewTargetsForTesting(c.input)
+            let output = ChatExportService._previewTargetsForTesting(c.input)
             if output != c.expected {
                 failures.append("[\(c.name)] expected: \(c.expected) | got: \(output)")
             }
@@ -477,7 +477,7 @@ struct WETSystemMessageCheck {
 
         Task {
             do {
-                let result = try await WhatsAppExportService.exportMulti(
+                let result = try await ChatExportService.exportMulti(
                     chatURL: chatURL,
                     outDir: outDir,
                     meNameOverride: nil,

@@ -115,18 +115,18 @@ public struct AIGlowPalette: Equatable, Sendable {
         return AIGlowPalette(name: "Apple Default", light: variant)
     }()
 
-    public static let whatsAppGreen: AIGlowPalette = {
+    public static let archiveBlue: AIGlowPalette = {
         let ringHexLight: [UInt32] = [
-            0x25D366, 0x6EE6B0, 0x34B7F1, 0x00B4D8, 0x2ECC71, 0x25D366
+            0x0A84FF, 0x00B8F0, 0x335CFF, 0x56A8FF, 0x4D6CFF, 0x0A84FF
         ]
         let auraHexLight: [UInt32] = [
-            0x1D8A55, 0x46B98A, 0x2A7FA1, 0x1B7396, 0x249E67, 0x1D8A55
+            0x075DB8, 0x008FBE, 0x243CB7, 0x3778C8, 0x344CC5, 0x075DB8
         ]
         let ringHexDark: [UInt32] = [
-            0x1FB85B, 0x35D58B, 0x2CA0D1, 0x0C87B8, 0x23B96B, 0x1FB85B
+            0x268CFF, 0x12BFEF, 0x5274FF, 0x6AB8FF, 0x617CFF, 0x268CFF
         ]
         let auraHexDark: [UInt32] = [
-            0x0F5A37, 0x1F7A59, 0x17607D, 0x13526F, 0x1A6A4A, 0x0F5A37
+            0x063C75, 0x075470, 0x1B2D78, 0x244B86, 0x293B85, 0x063C75
         ]
         let light = Variant(
             ringStops: Self.evenStops(hexes: ringHexLight),
@@ -136,7 +136,7 @@ public struct AIGlowPalette: Equatable, Sendable {
             ringStops: Self.evenStops(hexes: ringHexDark),
             auraStops: Self.evenStops(hexes: auraHexDark)
         )
-        return AIGlowPalette(name: "WhatsApp Green", light: light, dark: dark)
+        return AIGlowPalette(name: "Archive Blue", light: light, dark: dark)
     }()
 
     public static let `default` = appleDefault

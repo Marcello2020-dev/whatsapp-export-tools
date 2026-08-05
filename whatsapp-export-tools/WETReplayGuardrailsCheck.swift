@@ -36,7 +36,7 @@ struct WETReplayGuardrailsCheck {
 
             // A) Default: legacy output (artifacts, no Sources) is rejected.
             do {
-                _ = try WhatsAppExportService.resolveInputSnapshot(inputURL: legacyOutput)
+                _ = try ChatExportService.resolveInputSnapshot(inputURL: legacyOutput)
                 throw VerificationError(message: "Expected legacy output to be rejected, but resolveInputSnapshot succeeded")
             } catch let error as WAInputError {
                 guard case .replaySourcesRequired = error else {
@@ -45,7 +45,7 @@ struct WETReplayGuardrailsCheck {
             }
 
             // B) Replay mode: output root with Sources -> read root is Sources.
-            let replaySnapshot = try WhatsAppExportService.resolveInputSnapshot(inputURL: outputWithSources)
+            let replaySnapshot = try ChatExportService.resolveInputSnapshot(inputURL: outputWithSources)
             guard replaySnapshot.inputMode.isReplay else {
                 throw VerificationError(message: "Expected replay mode for output with Sources")
             }
@@ -61,7 +61,7 @@ struct WETReplayGuardrailsCheck {
             let sidecarDir = outputWithSources.appendingPathComponent("Run-Sidecar", isDirectory: true)
             try fm.createDirectory(at: sidecarDir, withIntermediateDirectories: true)
             do {
-                _ = try WhatsAppExportService.resolveInputSnapshot(inputURL: sidecarDir)
+                _ = try ChatExportService.resolveInputSnapshot(inputURL: sidecarDir)
                 throw VerificationError(message: "Expected non-Sources folder inside output root to be rejected")
             } catch let error as WAInputError {
                 guard case .replaySourcesRequired = error else {
@@ -71,7 +71,7 @@ struct WETReplayGuardrailsCheck {
 
             // D) Replay mode: Sources folder itself is allowed.
             let sourcesRootInput = outputWithSources.appendingPathComponent(WETOutputNaming.sourcesFolderName, isDirectory: true)
-            let sourcesSnapshot = try WhatsAppExportService.resolveInputSnapshot(inputURL: sourcesRootInput)
+            let sourcesSnapshot = try ChatExportService.resolveInputSnapshot(inputURL: sourcesRootInput)
             guard sourcesSnapshot.inputMode.isReplay else {
                 throw VerificationError(message: "Expected replay mode when selecting Sources folder")
             }

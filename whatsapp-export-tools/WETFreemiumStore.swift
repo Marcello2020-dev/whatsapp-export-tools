@@ -28,7 +28,7 @@ final class WETFreemiumStore: ObservableObject {
     static let freeExportLimit: Int = 2
     private static let freeExportCountKey = "wet.freemium.successfulExports"
     private static let debugUnlockOverrideKey = "wet.freemium.debugUnlockOverride"
-    private static let defaultProductID = "dev.marcello2020.chat-export-studio.pro.lifetime"
+    private static let defaultProductID = "dev.marcello2020.chat_export_studio.pro.lifetime"
 
     @Published private(set) var isUnlocked: Bool = false
     @Published private(set) var successfulFreeExports: Int

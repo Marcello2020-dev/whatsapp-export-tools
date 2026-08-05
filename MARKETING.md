@@ -1,6 +1,6 @@
 # Chat Export Studio
 
-Chat Export Studio converts WhatsApp chat exports into clean, searchable, archive-ready outputs.
+Chat Export Studio converts user-selected chat exports into clean, searchable, archive-ready outputs.
 
 ## Why Chat Export Studio
 
@@ -25,7 +25,7 @@ Chat data is processed locally on your Mac. No chat content is sent to external 
 
 # Chat Export Studio (Deutsch)
 
-Chat Export Studio wandelt WhatsApp-Chat-Exporte in saubere, durchsuchbare und archivierungsfähige Ausgaben um.
+Chat Export Studio wandelt ausgewählte Chat-Exporte in saubere, durchsuchbare und archivierungsfähige Ausgaben um.
 
 ## Warum Chat Export Studio
 
@@ -38,7 +38,7 @@ Chat Export Studio wandelt WhatsApp-Chat-Exporte in saubere, durchsuchbare und a
 ## Anwendungsfälle
 
 - Persönliches Langzeit-Archiv
-- Rechtssichere bzw. nachvollziehbare Dokumentation
+- Nachvollziehbare Dokumentation
 - Recherche- und Reporting-Workflows
 - Umwandlung roher Exporte in lesbare Formate
 

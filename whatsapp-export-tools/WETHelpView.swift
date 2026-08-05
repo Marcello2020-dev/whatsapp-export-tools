@@ -21,12 +21,12 @@ struct WETHelpView: View {
                     titleDE: "Schnellstart",
                     titleEN: "Quick Start",
                     linesDE: [
-                        "1. Chat-Quelle wählen (Ordner, ZIP oder Chat.txt/_chat.txt).",
+                        "1. In WhatsApp „Chat exportieren“ wählen und den erzeugten Ordner, das ZIP oder die Chat.txt/_chat.txt auswählen.",
                         "2. Zielordner wählen.",
                         "3. Export-Varianten auswählen und Export starten."
                     ],
                     linesEN: [
-                        "1. Select a chat source (folder, ZIP, or Chat.txt/_chat.txt).",
+                        "1. In WhatsApp, use Export Chat and select the resulting folder, ZIP, or Chat.txt/_chat.txt.",
                         "2. Select the output directory.",
                         "3. Choose export variants and start export."
                     ]

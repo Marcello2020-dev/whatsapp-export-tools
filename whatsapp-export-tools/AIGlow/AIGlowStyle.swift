@@ -357,8 +357,8 @@ public struct AIGlowStyle: Equatable, @unchecked Sendable {
     )
 
     public static let `default` = appleIntelligenceDefault
-    public static let whatsAppGreen = AIGlowStyle.default.withPalette(.whatsAppGreen)
-    public static let wetDefault = whatsAppGreen
+    public static let archiveBlue = AIGlowStyle.default.withPalette(.archiveBlue)
+    public static let wetDefault = archiveBlue
 
     public func normalized() -> AIGlowStyle {
         let baseline = AIGlowStyle.default

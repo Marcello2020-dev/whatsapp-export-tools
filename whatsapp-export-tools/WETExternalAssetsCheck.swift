@@ -75,9 +75,9 @@ struct WETExternalAssetsCheck {
         return htmlStaged
     }
 
-    /// Relies on `WhatsAppExportService` to publish any `_thumbs/_previews` folders from staging into the export.
+    /// Relies on `ChatExportService` to publish any `_thumbs/_previews` folders from staging into the export.
     private static func publishExternalAssets(staging: URL, exportDir: URL) throws {
-        _ = try WhatsAppExportService.publishExternalAssetsIfPresent(
+        _ = try ChatExportService.publishExternalAssetsIfPresent(
             stagingRoot: staging,
             exportDir: exportDir,
             allowOverwrite: true,
